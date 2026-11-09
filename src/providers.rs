@@ -17,6 +17,9 @@ pub struct Provider {
     pub about: String,
     pub auth_url: String,
     pub token_url: String,
+    /// The endpoint a refresh goes to, when not `token_url` (Figma: `/v1/oauth/refresh`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_url: Option<String>,
     /// Base for relative API paths; `{resource_id}` is the site picked at login.
     pub api_base: String,
     /// Hosts the token may be sent to; `*.example.com` matches subdomains.
@@ -46,6 +49,10 @@ pub struct Provider {
     /// Fixed loopback port, for providers that match the callback URL exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_port: Option<u16>,
+    /// How many seconds the authorization code lasts, when it is short enough
+    /// to tell the person (Figma: 30); login says so where it asks for a paste.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_seconds: Option<u64>,
     /// The loopback redirect's host: `localhost` or `127.0.0.1`.
     #[serde(default)]
     pub redirect_host: RedirectHost,
@@ -139,6 +146,9 @@ pub struct FieldFlags {
     /// The OAuth token endpoint.
     #[arg(long)]
     token_url: Option<String>,
+    /// The endpoint a refresh goes to; without it, the token endpoint.
+    #[arg(long)]
+    refresh_url: Option<String>,
     /// Base for relative `sesame api` paths; `{resource_id}` is the site picked at login.
     #[arg(long)]
     api_base: Option<String>,
@@ -173,6 +183,10 @@ pub struct FieldFlags {
     /// Fixed loopback port for the callback, for providers that match it exactly.
     #[arg(long)]
     redirect_port: Option<u16>,
+    /// How many seconds the authorization code lasts; login tells the person
+    /// to paste the address back within them.
+    #[arg(long)]
+    code_seconds: Option<u64>,
     /// The loopback redirect's host: `localhost` (the default) or `127.0.0.1`.
     #[arg(long)]
     redirect_host: Option<String>,
@@ -214,6 +228,7 @@ impl FieldFlags {
             ("about", opt(self.about)),
             ("auth_url", opt(self.auth_url)),
             ("token_url", opt(self.token_url)),
+            ("refresh_url", opt(self.refresh_url)),
             ("api_base", opt(self.api_base)),
             ("hosts", list(self.hosts)),
             ("scopes", list(self.scopes)),
@@ -224,6 +239,7 @@ impl FieldFlags {
             ("resources_url", opt(self.resources_url)),
             ("site_name_field", opt(self.site_name_field)),
             ("redirect_port", self.redirect_port.map(Value::from)),
+            ("code_seconds", self.code_seconds.map(Value::from)),
             ("redirect_host", opt(self.redirect_host)),
             ("device_url", opt(self.device_url)),
             ("identity_url", opt(self.identity_url)),
@@ -451,6 +467,9 @@ impl Provider {
     fn check(&self) -> Result<(), String> {
         check_url("auth_url", &self.auth_url)?;
         check_url("token_url", &self.token_url)?;
+        if let Some(u) = &self.refresh_url {
+            check_url("refresh_url", u)?;
+        }
         check_url("api_base", &self.api_base.replace("{resource_id}", "x"))?;
         if let Some(u) = &self.resources_url {
             check_url("resources_url", u)?;
@@ -514,6 +533,9 @@ impl Provider {
         if self.redirect_port == Some(0) {
             return Err("redirect_port 0: leave it out for any free port".into());
         }
+        if self.code_seconds == Some(0) {
+            return Err("code_seconds 0: leave it out when the provider does not say".into());
+        }
         for s in &self.setup {
             if s.title.trim().is_empty() {
                 return Err("a setup step has no title".into());
@@ -531,6 +553,11 @@ impl Provider {
             Some(port) => redirect_uri(self.redirect_host, port),
             None => format!("http://{}:<any port>/callback", self.redirect_host.as_str()),
         }
+    }
+
+    /// Where a refresh goes: `refresh_url`, or else the token endpoint.
+    pub fn refresh_endpoint(&self) -> &str {
+        self.refresh_url.as_deref().unwrap_or(&self.token_url)
     }
 
     /// The first of `error_fields` a 2xx JSON answer carries with a value that
@@ -575,7 +602,7 @@ mod tests {
     #[test]
     fn built_ins_are_valid() {
         let all = built_in::all();
-        for name in ["github", "google", "jira", "linear", "notion"] {
+        for name in ["figma", "github", "google", "jira", "linear", "notion"] {
             assert!(all.contains_key(name), "{name}");
         }
         for (name, p) in &all {
@@ -625,6 +652,8 @@ mod tests {
             ),
             ("site_name_field", json!(""), "site_name_field is empty"),
             ("redirect_port", json!(0), "redirect_port 0"),
+            ("refresh_url", json!("nope"), "refresh_url"),
+            ("code_seconds", json!(0), "code_seconds 0"),
             (
                 "redirect_host",
                 json!("example.com"),
@@ -690,6 +719,8 @@ mod tests {
             api_headers: vec!["Notion-Version: 2026-03-11".into()],
             client_auth: Some("basic".into()),
             redirect_port: Some(9000),
+            refresh_url: Some("https://x.example/refresh".into()),
+            code_seconds: Some(30),
             redirect_host: Some("127.0.0.1".into()),
             device_url: Some("https://x.example/device".into()),
             scope_separator: Some(",".into()),
@@ -706,6 +737,8 @@ mod tests {
                 "api_headers": {"Notion-Version": "2026-03-11"},
                 "client_auth": "basic",
                 "redirect_port": 9000,
+                "refresh_url": "https://x.example/refresh",
+                "code_seconds": 30,
                 "redirect_host": "127.0.0.1",
                 "device_url": "https://x.example/device",
                 "scope_separator": ",",

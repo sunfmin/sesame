@@ -278,7 +278,7 @@ fn first_use_points_to_setup() {
     assert!(!ok);
     assert!(out.contains("unknown provider `nope`"), "{out}");
     assert!(
-        out.contains("acme, github, google, jira, linear, notion"),
+        out.contains("acme, figma, github, google, jira, linear, notion"),
         "{out}"
     );
 
@@ -1051,5 +1051,233 @@ fn linear_scopes_daily_refresh_graphql_errors() {
         .filter(|l| l.contains("grant_type=refresh_token"))
         .count();
     assert_eq!(refreshes, 2, "{log:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A provider shaped like Figma's: HTTP Basic at the token endpoint, refresh
+/// at its own endpoint whose answer has no refresh token, an authorization
+/// code that lasts 30 seconds, and the account read from `/v1/me`.
+#[test]
+fn separate_refresh_endpoint_and_expired_code() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        // base64("cid:the-secret")
+        let basic = "Basic Y2lkOnRoZS1zZWNyZXQ=";
+        let mut exchanges = 0;
+        let mut access = "access-1".to_string();
+        for stream in listener.incoming().flatten() {
+            let (target, headers, body) = read_request(&stream);
+            let h = |k: &str| header(&headers, k).unwrap_or_default();
+            log2.lock().unwrap().push(format!("{target} {body}"));
+            let mut s = stream;
+            if target.starts_with("/oauth?") {
+                let u = url::Url::parse(&format!("http://x{target}")).unwrap();
+                let q = |k: &str| {
+                    u.query_pairs()
+                        .find(|(n, _)| n == k)
+                        .unwrap()
+                        .1
+                        .into_owned()
+                };
+                let loc = format!("{}?code=the-code&state={}", q("redirect_uri"), q("state"));
+                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
+            } else if target == "/v1/oauth/token" {
+                assert_eq!(h("authorization"), basic);
+                assert!(!body.contains("client_id") && !body.contains("client_secret"));
+                assert!(body.contains("grant_type=authorization_code"), "{body}");
+                exchanges += 1;
+                if exchanges == 1 {
+                    // The code came back too late.
+                    reply(
+                        &mut s,
+                        "400 Bad Request",
+                        "",
+                        r#"{"error":true,"status":400,"message":"Invalid code"}"#,
+                    );
+                } else {
+                    reply(
+                        &mut s,
+                        "200 OK",
+                        "",
+                        r#"{"user_id_string":"1","access_token":"access-1","token_type":"bearer","expires_in":7776000,"refresh_token":"refresh-1"}"#,
+                    );
+                }
+            } else if target == "/v1/oauth/refresh" {
+                assert_eq!(h("authorization"), basic);
+                assert!(body.contains("refresh_token=refresh-1"), "{body}");
+                assert!(!body.contains("client_secret"));
+                access = "access-2".into();
+                reply(
+                    &mut s,
+                    "200 OK",
+                    "",
+                    r#"{"access_token":"access-2","token_type":"bearer","expires_in":7776000}"#,
+                );
+            } else if target == "/v1/me"
+                && h("authorization") == "Bearer access-1"
+                && access == "access-1"
+            {
+                reply(
+                    &mut s,
+                    "200 OK",
+                    "",
+                    r#"{"id":"1","email":"felix@example.com","handle":"Felix"}"#,
+                );
+            } else if target.starts_with("/v1/files/") {
+                if h("authorization") != format!("Bearer {access}") || access != "access-2" {
+                    // Refused, to make the CLI refresh.
+                    reply(&mut s, "401 Unauthorized", "", "{}");
+                } else {
+                    reply(&mut s, "200 OK", "", r#"{"name":"Design"}"#);
+                }
+            } else {
+                reply(&mut s, "404 Not Found", "", "");
+            }
+        }
+    });
+
+    let tmp = std::env::temp_dir().join(format!("sesame-figma-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let sesame = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        c.args(args).env("SESAME_CONFIG_DIR", &config);
+        c
+    };
+    let run = |args: &[&str]| {
+        let out = sesame(args).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(out.status.success(), "{args:?}: {err}");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    // Plays the browser; returns whether login succeeded and what it printed.
+    let login = || {
+        let mut login = sesame(&["login", "fig", "--no-browser"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut err = BufReader::new(login.stderr.take().unwrap());
+        let mut printed = String::new();
+        let auth_url = loop {
+            let mut l = String::new();
+            assert!(err.read_line(&mut l).unwrap() > 0, "no URL: {printed}");
+            printed.push_str(&l);
+            if let Some(u) = l.trim().strip_prefix("http") {
+                break format!("http{u}");
+            }
+        };
+        let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
+        assert!(page.contains("Signed in"));
+        let ok = login.wait().unwrap().success();
+        err.read_to_string(&mut printed).unwrap();
+        (ok, printed)
+    };
+
+    let base = format!("http://127.0.0.1:{port}");
+    run(&[
+        "provider",
+        "add",
+        "fig",
+        "--auth-url",
+        &format!("{base}/oauth"),
+        "--token-url",
+        &format!("{base}/v1/oauth/token"),
+        "--refresh-url",
+        &format!("{base}/v1/oauth/refresh"),
+        "--api-base",
+        &format!("{base}/v1"),
+        "--host",
+        "127.0.0.1",
+        "--scope",
+        "current_user:read",
+        "--client-auth",
+        "basic",
+        "--code-seconds",
+        "30",
+        "--identity-url",
+        &format!("{base}/v1/me"),
+        "--identity-field",
+        "email",
+    ]);
+    let shown: serde_json::Value =
+        serde_json::from_str(&run(&["provider", "show", "fig"])).unwrap();
+    assert_eq!(
+        shown["refresh_url"]["value"],
+        format!("{base}/v1/oauth/refresh")
+    );
+    assert_eq!(shown["code_seconds"]["value"], 30);
+    let shown: serde_json::Value =
+        serde_json::from_str(&run(&["provider", "show", "figma"])).unwrap();
+    assert_eq!(
+        shown["refresh_url"]["value"],
+        "https://api.figma.com/v1/oauth/refresh"
+    );
+    assert_eq!(shown["redirect_port"]["value"], 8753);
+
+    let mut client = sesame(&["client", "fig", "--client-id", "cid", "--secret-stdin"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    client
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"the-secret\n")
+        .unwrap();
+    assert!(client.wait().unwrap().success());
+
+    let (ok, out) = login();
+    assert!(!ok, "{out}");
+    assert!(out.contains("within 30 seconds"), "{out}");
+    assert!(
+        out.contains("most likely expired (it lasts 30 seconds); run `sesame login fig` again"),
+        "{out}"
+    );
+
+    let (ok, out) = login();
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("Logged in to `fig` (felix@example.com)"),
+        "{out}"
+    );
+    assert!(run(&["providers"]).contains("logged in (felix@example.com)"));
+
+    // A 401, a refresh at the refresh endpoint, then the call again.
+    assert_eq!(
+        run(&["api", "fig", "/files/abc"]).trim(),
+        r#"{"name":"Design"}"#
+    );
+    assert_eq!(run(&["token", "fig"]).trim(), "access-2");
+
+    let db = rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+    let refresh: String = db
+        .query_row(
+            "SELECT refresh_token FROM tokens WHERE provider = 'fig'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        refresh, "refresh-1",
+        "the refresh answer had none: the old one is kept"
+    );
+
+    let log = log.lock().unwrap();
+    assert!(
+        !log.iter()
+            .any(|l| l.starts_with("/v1/oauth/token ") && l.contains("refresh_token")),
+        "{log:?}"
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|l| l.starts_with("/v1/oauth/refresh "))
+            .count(),
+        1,
+        "{log:?}"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
