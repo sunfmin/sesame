@@ -1391,7 +1391,8 @@ fn https_paste_user_token_error_field_pasted_token() {
         "--redirect",
         "https-paste",
         "--redirect-port",
-        "8751",
+        // Not slack's 8751: a fixed port is one provider's only.
+        "8761",
         "--error-field",
         "error",
     ]);
@@ -1413,7 +1414,7 @@ fn https_paste_user_token_error_field_pasted_token() {
         );
     }
     let (_, out, _) = run(&["setup", "chat"]);
-    assert!(out.contains("https://localhost:8751/callback"), "{out}");
+    assert!(out.contains("https://localhost:8761/callback"), "{out}");
     assert!(run(&["client", "chat", "--client-id", "cid", "--no-secret"]).0);
 
     // Login: play the browser up to the https redirect, which nothing answers,
@@ -1439,7 +1440,7 @@ fn https_paste_user_token_error_field_pasted_token() {
         let resp = no_follow.get(&auth_url).send().unwrap();
         let landed = resp.headers()["location"].to_str().unwrap().to_string();
         assert!(
-            landed.starts_with("https://localhost:8751/callback?code="),
+            landed.starts_with("https://localhost:8761/callback?code="),
             "{landed}"
         );
         let mut stdin = login.stdin.take().unwrap();

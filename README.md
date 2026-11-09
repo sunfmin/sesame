@@ -65,7 +65,18 @@ sesame logout jira                            # forgets the local token only
   URL (`--scope-separator ,` for Linear), and which fields of a 2xx JSON answer
   still mean failure (`--error-field errors` for GraphQL).
   `sesame provider add --help` lists every field; `add` and `set`
-  refuse an invalid value before writing anything.
+  refuse an invalid value before writing anything, and a fixed
+  `--redirect-port` another provider already uses. Every field is one row of
+  the field table in [`src/providers/fields.rs`](src/providers/fields.rs):
+  its flag, type, check, and the question to answer about a platform to fill
+  it in.
+- **A platform sesame does not know**: `sesame provider guide` prints, for the
+  AI doing it, the steps and one question per field to answer from the
+  platform's docs. `sesame provider discover <domain or issuer>` reads its
+  RFC 8414 or OpenID Connect metadata, if any, and prints a draft `sesame
+  provider add`. Store each doc page with `--source`; `sesame provider export
+  <name>` prints the `add` command that makes the definition again, to share
+  it or turn it into a built-in.
 - **Service** = one API of a provider, reached with the provider's client and
   token: Google's are `drive`, `docs`, `youtube`, `calendar` and `gmail`. A
   service has its own `api_base` and scopes, and its name is used like a

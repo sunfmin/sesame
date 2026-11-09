@@ -104,6 +104,7 @@ The scopes sesame asks for at login: {scopes}",
             ),
         ],
         services: BTreeMap::new(),
+        sources: strings(&["https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps"]),
     }
 }
 
@@ -270,6 +271,7 @@ The dialog that opens shows the Client ID and Client secret; keep them for stori
                 ),
             ),
         ]),
+        sources: strings(&["https://developers.google.com/identity/protocols/oauth2/native-app", "https://developers.google.com/workspace/gmail/api/auth/scopes"]),
     }
 }
 
@@ -338,6 +340,7 @@ It must match exactly, so do not change localhost or the port. Click Save change
             ),
         ],
         services: BTreeMap::new(),
+        sources: strings(&["https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/"]),
     }
 }
 
@@ -424,6 +427,10 @@ with hidden input.",
             ),
         ],
         services: BTreeMap::new(),
+        sources: strings(&[
+            "https://docs.slack.dev/authentication/installing-with-oauth",
+            "https://docs.slack.dev/authentication/using-pkce",
+        ]),
     }
 }
 
@@ -485,6 +492,7 @@ To change them later, log in again, or share a page with the integration from No
             ),
         ],
         services: BTreeMap::new(),
+        sources: strings(&["https://developers.notion.com/docs/authorization"]),
     }
 }
 
@@ -558,6 +566,7 @@ organization to use it, publish it as Private (no review by Figma); Public needs
             ),
         ],
         services: BTreeMap::new(),
+        sources: strings(&["https://developers.figma.com/docs/rest-api/oauth-apps/", "https://developers.figma.com/docs/rest-api/scopes/"]),
     }
 }
 
@@ -614,5 +623,6 @@ The scopes sesame asks for at login: {scopes} (they are asked for at login, not 
             ),
         ],
         services: BTreeMap::new(),
+        sources: strings(&["https://linear.app/developers/oauth-2-0-authentication"]),
     }
 }
