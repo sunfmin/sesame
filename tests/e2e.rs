@@ -100,25 +100,37 @@ fn login_call_refresh_logout() {
     let _ = std::fs::remove_dir_all(&tmp);
     let config = tmp.join("config");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("providers.toml"),
-        format!(
-            r#"[fake]
-auth_url = "http://127.0.0.1:{port}/authorize"
-token_url = "http://127.0.0.1:{port}/token"
-api_base = "http://127.0.0.1:{port}/ex/{{resource_id}}"
-hosts = ["127.0.0.1"]
-scopes = ["read"]
-resources_url = "http://127.0.0.1:{port}/sites"
-"#
-        ),
-    )
-    .unwrap();
     let sesame = |args: &[&str]| {
         let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
         c.args(args).env("SESAME_CONFIG_DIR", &config);
         c
     };
+
+    let base = format!("http://127.0.0.1:{port}");
+    let out = sesame(&[
+        "provider",
+        "add",
+        "fake",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/token"),
+        "--api-base",
+        &format!("{base}/ex/{{resource_id}}"),
+        "--host",
+        "127.0.0.1",
+        "--scope",
+        "read",
+        "--resources-url",
+        &format!("{base}/sites"),
+    ])
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let st = sesame(&["client", "fake", "--client-id", "cid", "--no-secret"])
         .status()
@@ -185,30 +197,13 @@ resources_url = "http://127.0.0.1:{port}/sites"
 }
 
 /// First use: no client yet. Every command names the next one to run, and a
-/// provider from the user's providers.toml prints its own setup steps.
+/// provider added with `sesame provider add` prints its own setup steps.
 #[test]
 fn first_use_points_to_setup() {
     let tmp = std::env::temp_dir().join(format!("sesame-setup-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let config = tmp.join("config");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("providers.toml"),
-        r#"[acme]
-auth_url = "https://acme.example/authorize"
-token_url = "https://acme.example/token"
-api_base = "https://api.acme.example"
-hosts = ["api.acme.example"]
-scopes = ["read", "write"]
-redirect_port = 9321
-
-[[acme.setup]]
-title = "Register the app"
-page = "https://acme.example/apps"
-details = "Callback: {callback}; scopes: {scopes}"
-"#,
-    )
-    .unwrap();
     let sesame = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_sesame"))
             .args(args)
@@ -219,6 +214,30 @@ details = "Callback: {callback}; scopes: {scopes}"
             + &String::from_utf8_lossy(&out.stderr);
         (out.status.success(), text)
     };
+
+    let (ok, out) = sesame(&[
+        "provider",
+        "add",
+        "acme",
+        "--auth-url",
+        "https://acme.example/authorize",
+        "--token-url",
+        "https://acme.example/token",
+        "--api-base",
+        "https://api.acme.example",
+        "--host",
+        "api.acme.example",
+        "--scope",
+        "read",
+        "--scope",
+        "write",
+        "--redirect-port",
+        "9321",
+        "--setup-step",
+        r#"{"title": "Register the app", "page": "https://acme.example/apps",
+            "details": "Callback: {callback}; scopes: {scopes}"}"#,
+    ]);
+    assert!(ok, "{out}");
 
     let (ok, out) = sesame(&["setup", "acme"]);
     assert!(ok, "{out}");
@@ -266,5 +285,123 @@ details = "Callback: {callback}; scopes: {scopes}"
     let (_, out) = sesame(&["--help"]);
     assert!(out.starts_with("If you are an AI"), "{out}");
     assert!(out.contains("sesame setup <provider>"), "{out}");
+    assert!(!out.contains("providers.toml"), "{out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `provider set` on a built-in stores only the changed field, `rm` brings the
+/// built-in back, and an invalid value writes nothing.
+#[test]
+fn provider_set_show_rm() {
+    let tmp = std::env::temp_dir().join(format!("sesame-provider-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let sesame = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sesame"))
+            .args(args)
+            .env("SESAME_CONFIG_DIR", &config)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            err,
+        )
+    };
+    let show = |name: &str| -> serde_json::Value {
+        let (ok, out, err) = sesame(&["provider", "show", name]);
+        assert!(ok, "{err}");
+        serde_json::from_str(&out).unwrap()
+    };
+    let field_db_rows = || {
+        let db = rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+        db.query_row("SELECT count(*) FROM provider_fields", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+
+    let before = show("google");
+    assert!(
+        before
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|f| f["from"] == "built-in")
+    );
+
+    let (ok, _, err) = sesame(&[
+        "provider", "set", "google", "--scope", "email", "--scope", "openid",
+    ]);
+    assert!(ok, "{err}");
+    let after = show("google");
+    assert_eq!(
+        after["scopes"]["value"],
+        serde_json::json!(["email", "openid"])
+    );
+    assert_eq!(after["scopes"]["from"], "user");
+    for (k, v) in before.as_object().unwrap() {
+        if k != "scopes" {
+            assert_eq!(&after[k], v, "{k} changed");
+        }
+    }
+    assert_eq!(field_db_rows(), 1);
+    let (_, out, _) = sesame(&["setup", "google"]);
+    assert!(
+        out.contains("The scopes sesame asks for at login: email, openid"),
+        "{out}"
+    );
+
+    // Invalid values are refused before anything is written.
+    for bad in [
+        &["provider", "set", "google", "--token-url", "not a url"][..],
+        &["provider", "set", "google", "--token-body", "xml"],
+        &[
+            "provider",
+            "add",
+            "bad",
+            "--auth-url",
+            "https://b.example/a",
+            "--token-url",
+            "https://b.example/t",
+            "--api-base",
+            "https://b.example",
+        ],
+        &[
+            "provider",
+            "add",
+            "bad",
+            "--auth-url",
+            "https://b.example/a",
+            "--token-url",
+            "https://b.example/t",
+            "--api-base",
+            "https://b.example",
+            "--host",
+            "b.example",
+            "--token-body",
+            "xml",
+        ],
+    ] {
+        let (ok, _, err) = sesame(bad);
+        assert!(!ok, "{bad:?} was accepted");
+        assert!(err.starts_with("sesame: "), "{bad:?}: {err}");
+    }
+    assert_eq!(field_db_rows(), 1);
+    assert_eq!(show("google"), after);
+    let (ok, _, err) = sesame(&["provider", "show", "bad"]);
+    assert!(!ok && err.contains("unknown provider `bad`"), "{err}");
+
+    let (ok, _, err) = sesame(&["provider", "add", "jira", "--host", "x.example"]);
+    assert!(!ok && err.contains("sesame provider set jira"), "{err}");
+
+    let (ok, _, err) = sesame(&["provider", "rm", "google"]);
+    assert!(ok && err.contains("built-in"), "{err}");
+    assert_eq!(show("google"), before);
+    assert_eq!(field_db_rows(), 0);
+
+    let (ok, _, err) = sesame(&["provider", "set", "nope", "--scope", "x"]);
+    assert!(!ok && err.contains("sesame provider add nope"), "{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }

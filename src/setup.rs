@@ -42,8 +42,8 @@ pub fn render(name: &str, p: &Provider) -> String {
             "Register an OAuth app with the provider",
             None,
             &format!(
-                "No setup steps are written for `{name}`. Add `[[{name}.setup]]` entries (title, page,\n\
-                 details) to its definition in ~/.config/sesame/providers.toml to print them here.\n\
+                "No setup steps are written for `{name}`. To print them here, add them with\n\
+                 sesame provider set {name} --setup-step '{{\"title\": …, \"page\": …, \"details\": …}}'\n\
                  Register an authorization-code (PKCE) app with callback URL {callback}\n\
                  and the scopes: {scopes}"
             ),
@@ -88,14 +88,7 @@ pub fn render(name: &str, p: &Provider) -> String {
 mod tests {
     use super::*;
 
-    fn built_in(name: &str) -> Provider {
-        toml::from_str::<std::collections::BTreeMap<String, Provider>>(include_str!(
-            "providers.toml"
-        ))
-        .unwrap()
-        .remove(name)
-        .unwrap()
-    }
+    use crate::providers::built_in;
 
     #[test]
     fn google() {
