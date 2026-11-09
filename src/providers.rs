@@ -307,7 +307,31 @@ fn resolve(mut user: BTreeMap<String, Fields>) -> Result<BTreeMap<String, Provid
 }
 
 pub fn all() -> Result<BTreeMap<String, Provider>, String> {
-    resolve(Store::open()?.provider_fields()?)
+    resolve(stored(&Store::open()?)?)
+}
+
+/// Keeps of `user` only the fields that change `built_in`: a value equal to
+/// the built-in one is no change of the person's. Dropping a service only
+/// means something for one the built-in has.
+fn own_changes(built_in: &Provider, user: &mut Fields) {
+    let base = as_fields(built_in);
+    user.retain(|k, v| match base_value(&base, k) {
+        b if v.is_null() => b.is_some(),
+        b => b != Some(v),
+    });
+}
+
+/// The person's stored fields by provider, each built-in's reduced to its
+/// own changes: a provider they added before it became built-in keeps only
+/// the fields that differ from the built-in definition.
+fn stored(s: &Store) -> Result<BTreeMap<String, Fields>, String> {
+    let mut all = s.provider_fields()?;
+    for (name, b) in built_in::all() {
+        if let Some(user) = all.get_mut(&name) {
+            own_changes(&b, user);
+        }
+    }
+    Ok(all)
 }
 
 fn unknown(name: &str, all: &BTreeMap<String, Provider>) -> String {
@@ -412,7 +436,7 @@ pub fn add(name: &str, mut fields: Fields) -> Result<(), String> {
     fields.retain(|_, v| !v.is_null());
     let store = Store::open()?;
     store.locked(|s| {
-        let mut all = s.provider_fields()?;
+        let mut all = stored(s)?;
         if all.contains_key(name) {
             return Err(format!(
                 "provider `{name}` exists; change it with `sesame provider set {name}`"
@@ -431,7 +455,7 @@ pub fn set(name: &str, fields: Fields) -> Result<(), String> {
     let built_in = built_in::all().remove(name);
     let store = Store::open()?;
     store.locked(|s| {
-        let mut all = s.provider_fields()?;
+        let mut all = stored(s)?;
         let mut user = match (all.remove(name), &built_in) {
             (Some(f), _) => f,
             (None, Some(_)) => Fields::new(),
@@ -458,12 +482,9 @@ pub fn set(name: &str, fields: Fields) -> Result<(), String> {
             };
             user.insert(k, v);
         }
-        let base = built_in.as_ref().map(as_fields).unwrap_or_default();
-        user.retain(|k, v| match base_value(&base, k) {
-            // Dropping a service only means something for one the built-in has.
-            b if v.is_null() => b.is_some(),
-            b => b != Some(v),
-        });
+        if let Some(b) = &built_in {
+            own_changes(b, &mut user);
+        }
         all.insert(name.into(), user.clone());
         port_is_free(&resolve(all)?, name)?;
         s.save_provider_fields(name, &user)
@@ -474,10 +495,7 @@ pub fn set(name: &str, fields: Fields) -> Result<(), String> {
 /// definition in force; an error for a name that is neither.
 fn layers(name: &str) -> Result<(Option<Provider>, Fields, Provider), String> {
     let built_in = built_in::all().remove(name);
-    let user = Store::open()?
-        .provider_fields()?
-        .remove(name)
-        .unwrap_or_default();
+    let user = stored(&Store::open()?)?.remove(name).unwrap_or_default();
     if built_in.is_none() && user.is_empty() {
         return Err(unknown(name, &all()?));
     }

@@ -35,6 +35,7 @@ pub fn all() -> BTreeMap<String, Provider> {
         ("figma".into(), figma()),
         ("github".into(), github()),
         ("google".into(), google()),
+        ("hubspot".into(), hubspot()),
         ("jira".into(), jira()),
         ("linear".into(), linear()),
         ("notion".into(), notion()),
@@ -624,5 +625,91 @@ The scopes sesame asks for at login: {scopes} (they are asked for at login, not 
         ],
         services: BTreeMap::new(),
         sources: strings(&["https://linear.app/developers/oauth-2-0-authentication"]),
+    }
+}
+
+/// A HubSpot app on the developer platform, which only HubSpot's CLI creates.
+/// The code is exchanged and refreshed at the v3 token endpoint (the server
+/// metadata still names v1), client credentials in the form body; the access
+/// token lasts 30 minutes. The callback must be http://localhost (HubSpot
+/// refuses an IP) and matches as registered, so the port is fixed. Scopes
+/// requested must be the app's `requiredScopes`; an installed app that
+/// approves again keeps the scopes it was installed with.
+fn hubspot() -> Provider {
+    Provider {
+        about: "HubSpot CRM REST API (OAuth app on the developer platform)".into(),
+        auth_url: "https://app.hubspot.com/oauth/authorize".into(),
+        token_url: "https://api.hubspot.com/oauth/v3/token".into(),
+        refresh_url: None,
+        api_base: "https://api.hubapi.com".into(),
+        hosts: strings(&["api.hubapi.com", "api.hubspot.com"]),
+        scopes: strings(&[
+            "oauth",
+            "crm.objects.contacts.read",
+            "crm.objects.contacts.write",
+            "crm.objects.companies.read",
+            "crm.objects.companies.write",
+            "crm.objects.deals.read",
+            "crm.objects.deals.write",
+            "crm.objects.owners.read",
+            "crm.objects.tickets.read",
+            "crm.objects.tickets.write",
+        ]),
+        scope_param: "scope".into(),
+        scope_separator: " ".into(),
+        auth_params: BTreeMap::new(),
+        pkce: true,
+        token_body: TokenBody::Form,
+        token_path: String::new(),
+        client_auth: ClientAuth::Body,
+        api_headers: BTreeMap::new(),
+        resources_url: None,
+        site_name_field: None,
+        redirect: Redirect::Loopback,
+        redirect_port: Some(8754),
+        code_seconds: None,
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        // A number: the account (portal) the token reaches; needs only `oauth`.
+        identity_url: Some("https://api.hubapi.com/account-info/v3/details".into()),
+        identity_field: Some("portalId".into()),
+        identity_body: None,
+        error_fields: vec![],
+        setup: vec![
+            step(
+                "Install the HubSpot CLI and sign it in",
+                Some(
+                    "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/create-an-app",
+                ),
+                "HubSpot apps are created only from its CLI. Run: npm install -g @hubspot/cli  then  hs account auth --default  (it links to a page that makes a personal access key; paste the key into its prompt).",
+            ),
+            step(
+                "Create a private OAuth app project",
+                Some(
+                    "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/create-an-app",
+                ),
+                "Run: hs project create --name sesame-hubspot --dest sesame-hubspot --project-base app --distribution private --auth oauth  and press Enter at the features prompt (none are needed).",
+            ),
+            step(
+                "Set the redirect URL and scopes, then upload",
+                Some(
+                    "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/oauth/working-with-oauth",
+                ),
+                "In sesame-hubspot/src/app/app-hsmeta.json, under config.auth, set \"redirectUrls\" to [\"{callback}\"] (exactly: http, localhost, this port) and \"requiredScopes\" to exactly these, replacing the template's: {scopes}. Then, in sesame-hubspot, run: hs project upload --forceCreate",
+            ),
+            step(
+                "Copy the client ID and secret",
+                Some("https://app.hubspot.com"),
+                "Run hs project open, click the app under Project Components, open the Auth tab: it shows the Client ID and Client secret. A private app has no Install button: your account is already on the Distribution tab's approved list, and sesame login installs the app. Accounts hosted in other regions (app-na2, app-eu1) sign in through app.hubspot.com too. Access tokens last 30 minutes; sesame refreshes them. Changing the scopes later: edit requiredScopes, hs project upload, then uninstall the app (Settings > Integrations > Connected Apps > the app > Actions > Uninstall) before sesame login again: re-approving an installed app keeps its old scopes.",
+            ),
+        ],
+        services: BTreeMap::new(),
+        sources: strings(&[
+            "https://app.hubspot.com/.well-known/oauth-authorization-server",
+            "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/oauth/working-with-oauth",
+            "https://developers.hubspot.com/docs/api-reference/legacy/authentication/manage-oauth-tokens",
+            "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/create-an-app",
+            "https://developers.hubspot.com/docs/api-reference/account-account-info-v3/details/get-account-info-v3-details",
+        ]),
     }
 }

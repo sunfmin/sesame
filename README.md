@@ -27,6 +27,7 @@ sesame api notion /search -d '{}'             # Notion-Version is sent for you; 
 sesame api figma /me
 sesame api figma /files/<key>
 sesame api linear /graphql -d '{"query":"{ viewer { id name } }"}'   # GraphQL `errors` exit non-zero
+sesame api hubspot /crm/v3/objects/contacts?limit=1
 curl -H "Authorization: Bearer $(sesame token jira)" ...
 sesame providers                              # who you are signed in to, and each service's access
 sesame logout jira                            # forgets the local token only
@@ -35,7 +36,7 @@ sesame logout jira                            # forgets the local token only
 ## How it works
 
 - **Provider** = one OAuth realm: one login, one token. The built-ins (figma, github, google,
-  jira, linear, notion, slack) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
+  hubspot, jira, linear, notion, slack) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
   Your own providers, and your changes to a built-in one, are stored in
   `sesame.db` and managed with commands; there is no config file to edit:
 
@@ -76,7 +77,9 @@ sesame logout jira                            # forgets the local token only
   RFC 8414 or OpenID Connect metadata, if any, and prints a draft `sesame
   provider add`. Store each doc page with `--source`; `sesame provider export
   <name>` prints the `add` command that makes the definition again, to share
-  it or turn it into a built-in.
+  it or turn it into a built-in. Once a provider you added is built in, only
+  the fields where yours differ from the built-in count as your changes;
+  your client and token stay.
 - **Service** = one API of a provider, reached with the provider's client and
   token: Google's are `drive`, `docs`, `youtube`, `calendar` and `gmail`. A
   service has its own `api_base` and scopes, and its name is used like a
