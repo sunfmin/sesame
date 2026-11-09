@@ -360,18 +360,14 @@ fn api(
         None => out.write_all(&bytes),
     }
     .map_err(|e| e.to_string())?;
-    let ok = oauth::body_ok(&p, &bytes);
-    if !ok {
-        eprintln!(
-            "sesame: `{name}` answered {status} with \"{}\": false: the call failed",
-            p.ok_field.as_deref().unwrap_or_default()
-        );
+    if !status.is_success() {
+        return Ok(ExitCode::FAILURE);
     }
-    Ok(if status.is_success() && ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    if let Some(f) = p.error_in(&bytes) {
+        eprintln!("sesame: the answer carries `{f}`: the call failed despite {status}");
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn resolve(p: &providers::Provider, token: &Token, path: &str) -> Result<url::Url, String> {

@@ -19,6 +19,7 @@ sesame api slack /conversations.list                  # as yourself, with a Slac
 sesame api slack /chat.postMessage -d '{"channel":"C…","text":"hi"}'
 sesame login slack --token                            # or store a token you copied (hidden input)
 sesame api notion /search -d '{}'             # Notion-Version is sent for you; -H replaces it
+sesame api linear /graphql -d '{"query":"{ viewer { id name } }"}'   # GraphQL `errors` exit non-zero
 curl -H "Authorization: Bearer $(sesame token jira)" ...
 sesame providers                              # who you are signed in to
 sesame logout jira                            # forgets the local token only
@@ -27,7 +28,7 @@ sesame logout jira                            # forgets the local token only
 ## How it works
 
 - **Provider** = one OAuth realm: one login, one token. The built-ins (github, google,
-  jira, notion, slack) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
+  jira, linear, notion, slack) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
   Your own providers, and your changes to a built-in one, are stored in
   `sesame.db` and managed with commands; there is no config file to edit:
 
@@ -48,7 +49,10 @@ sesame logout jira                            # forgets the local token only
   `sesame providers` shows as the site (Notion's `workspace_name`).
 
   A built-in provider's fields you did not `set` follow each new version of
-  sesame. `sesame provider add --help` lists every field; `add` and `set`
+  sesame. Among the fields: how the scopes are joined in the authorization
+  URL (`--scope-separator ,` for Linear), and which fields of a 2xx JSON answer
+  still mean failure (`--error-field errors` for GraphQL).
+  `sesame provider add --help` lists every field; `add` and `set`
   refuse an invalid value before writing anything.
 - **Login** is the authorization-code flow with PKCE and a loopback redirect
   (`http://localhost:<port>/callback`, or `127.0.0.1` for a provider whose
@@ -61,7 +65,7 @@ sesame logout jira                            # forgets the local token only
   A provider that takes only https callbacks (`--redirect https-paste`,
   as slack) uses `https://localhost:<redirect-port>/callback`: nothing listens
   there, the browser says it cannot open the page, and you paste its address.
-  The fields `scope_param`, `pkce`, `token_path`, `site_name_field` and `ok_field`
+  The fields `scope_param`, `pkce`, `token_path`, `site_name_field` and `error_fields`
   describe the rest of a provider's OAuth dialect (`sesame provider add --help`).
 - **`login --token`** (or `--token-stdin`) stores a token you got another way,
   such as a Slack app's User OAuth Token; it has no refresh, and `sesame
@@ -76,8 +80,8 @@ sesame logout jira                            # forgets the local token only
   connected apps, Notion's Settings > Connections, GitHub's Settings > Applications,
   the Slack app's page).
 - **`api`** sends the token only to the provider's `hosts`; a 401 triggers one
-  refresh and retry. With an `ok_field` (slack: `ok`), a JSON answer whose field
-  is `false` exits non-zero even on HTTP 200.
+  refresh and retry. It exits non-zero on a non-2xx status, and on a 2xx whose
+  JSON carries one of the provider's `error_fields` not empty.
 
 ## Registering the OAuth apps
 

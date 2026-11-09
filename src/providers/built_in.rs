@@ -35,6 +35,7 @@ pub fn all() -> BTreeMap<String, Provider> {
         ("github".into(), github()),
         ("google".into(), google()),
         ("jira".into(), jira()),
+        ("linear".into(), linear()),
         ("notion".into(), notion()),
         ("slack".into(), slack()),
     ])
@@ -51,6 +52,7 @@ fn github() -> Provider {
         token_url: "https://github.com/login/oauth/access_token".into(),
         api_base: "https://api.github.com".into(),
         hosts: strings(&["api.github.com", "uploads.github.com"]),
+        scope_separator: " ".into(),
         scopes: strings(&["repo", "read:org"]),
         scope_param: "scope".into(),
         auth_params: BTreeMap::new(),
@@ -66,11 +68,12 @@ fn github() -> Provider {
         site_name_field: None,
         redirect: Redirect::Loopback,
         redirect_port: None,
-        ok_field: None,
         redirect_host: RedirectHost::Loopback,
         device_url: Some("https://github.com/login/device/code".into()),
         identity_url: Some("https://api.github.com/user".into()),
         identity_field: Some("login".into()),
+        identity_body: None,
+        error_fields: vec![],
         setup: vec![
             step(
                 "Register an OAuth App (Settings > Developer settings > OAuth Apps)",
@@ -107,6 +110,7 @@ fn google() -> Provider {
         token_url: "https://oauth2.googleapis.com/token".into(),
         api_base: "https://www.googleapis.com".into(),
         hosts: strings(&["*.googleapis.com"]),
+        scope_separator: " ".into(),
         scopes: strings(&[
             "openid",
             "email",
@@ -125,11 +129,12 @@ fn google() -> Provider {
         site_name_field: None,
         redirect: Redirect::Loopback,
         redirect_port: None,
-        ok_field: None,
         redirect_host: RedirectHost::Localhost,
         device_url: None,
         identity_url: None,
         identity_field: None,
+        identity_body: None,
+        error_fields: vec![],
         setup: vec![
             step(
                 "Create or pick a Google Cloud project",
@@ -197,6 +202,7 @@ fn jira() -> Provider {
         token_url: "https://auth.atlassian.com/oauth/token".into(),
         api_base: "https://api.atlassian.com/ex/jira/{resource_id}".into(),
         hosts: strings(&["api.atlassian.com"]),
+        scope_separator: " ".into(),
         scopes: strings(&[
             "read:jira-work",
             "write:jira-work",
@@ -214,11 +220,12 @@ fn jira() -> Provider {
         site_name_field: None,
         redirect: Redirect::Loopback,
         redirect_port: Some(8749),
-        ok_field: None,
         redirect_host: RedirectHost::Localhost,
         device_url: None,
         identity_url: None,
         identity_field: None,
+        identity_body: None,
+        error_fields: vec![],
         setup: vec![
             step(
                 "Create an OAuth 2.0 integration in the Atlassian developer console",
@@ -280,6 +287,7 @@ fn slack() -> Provider {
             "users:read",
         ]),
         scope_param: "user_scope".into(),
+        scope_separator: ",".into(),
         auth_params: BTreeMap::new(),
         pkce: false,
         token_body: TokenBody::Form,
@@ -290,13 +298,15 @@ fn slack() -> Provider {
         site_name_field: Some("/team/name".into()),
         redirect: Redirect::HttpsPaste,
         redirect_port: Some(8751),
-        ok_field: Some("ok".into()),
         redirect_host: RedirectHost::Localhost,
         device_url: None,
         // https://docs.slack.dev/reference/methods/auth.test: who the token is,
         // also for a pasted one.
         identity_url: Some("https://slack.com/api/auth.test".into()),
         identity_field: Some("user".into()),
+        identity_body: None,
+        // A failed call is HTTP 200 with `"ok": false` and an `error` code.
+        error_fields: strings(&["error"]),
         setup: vec![
             step(
                 "Create a Slack app",
@@ -345,6 +355,7 @@ fn notion() -> Provider {
         hosts: strings(&["api.notion.com"]),
         scopes: Vec::new(),
         scope_param: "scope".into(),
+        scope_separator: " ".into(),
         auth_params: params(&[("owner", "user")]),
         pkce: true,
         token_body: TokenBody::Json,
@@ -356,11 +367,12 @@ fn notion() -> Provider {
         redirect: Redirect::Loopback,
         // Notion allows http only for localhost, and matches the port and path exactly.
         redirect_port: Some(8750),
-        ok_field: None,
         redirect_host: RedirectHost::Localhost,
         device_url: None,
         identity_url: None,
         identity_field: None,
+        identity_body: None,
+        error_fields: vec![],
         setup: vec![
             step(
                 "Create an OAuth (public) integration in Notion's developer portal",
@@ -384,6 +396,59 @@ It must match exactly: keep http, localhost (not 127.0.0.1) and the port. Save t
 The Configuration tab shows the OAuth client ID and client secret. Keep it open for the next step.
 Notion has no scopes: at login, the consent page asks which pages and databases sesame may reach.
 To change them later, log in again, or share a page with the integration from Notion.",
+            ),
+        ],
+    }
+}
+
+/// Linear: GraphQL only, at `/graphql`. Scopes are comma-separated; the access
+/// token lasts 24 hours and each refresh hands out a new refresh token.
+/// https://linear.app/developers/oauth-2-0-authentication
+fn linear() -> Provider {
+    Provider {
+        about: "Linear (GraphQL API)".into(),
+        auth_url: "https://linear.app/oauth/authorize".into(),
+        token_url: "https://api.linear.app/oauth/token".into(),
+        api_base: "https://api.linear.app".into(),
+        hosts: strings(&["api.linear.app"]),
+        scopes: strings(&["read", "write"]),
+        scope_param: "scope".into(),
+        scope_separator: ",".into(),
+        auth_params: BTreeMap::new(),
+        pkce: true,
+        token_body: TokenBody::Form,
+        token_path: String::new(),
+        client_auth: ClientAuth::Body,
+        api_headers: BTreeMap::new(),
+        resources_url: None,
+        site_name_field: None,
+        redirect: Redirect::Loopback,
+        // Linear documents no rule for the callback, so it is matched as registered.
+        redirect_port: Some(8752),
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: Some("https://api.linear.app/graphql".into()),
+        identity_field: Some("/data/viewer/name".into()),
+        identity_body: Some(serde_json::json!({"query": "{ viewer { name } }"})),
+        // A GraphQL error comes back as 200 with `errors`.
+        error_fields: strings(&["errors"]),
+        setup: vec![
+            step(
+                "Create an OAuth application in Linear (Settings > API > OAuth applications)",
+                Some("https://linear.app/settings/api/applications/new"),
+                "\
+Sign in to the Linear workspace sesame should reach; every admin of that workspace can see the app.
+- Application name: anything, e.g. \"sesame\"; people see it when they approve access.
+- Callback URLs: {callback}
+  It must match exactly, so do not change localhost or the port.
+Click Create.",
+            ),
+            step(
+                "Copy the client ID and secret",
+                None,
+                "\
+The application's page shows the Client ID and the Client secret. Keep it open for the next step.
+The scopes sesame asks for at login: {scopes} (they are asked for at login, not set on this page).",
             ),
         ],
     }
