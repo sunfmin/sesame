@@ -328,11 +328,14 @@ fn api(
         None => out.write_all(&bytes),
     }
     .map_err(|e| e.to_string())?;
-    Ok(if status.is_success() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    if !status.is_success() {
+        return Ok(ExitCode::FAILURE);
+    }
+    if let Some(f) = p.error_in(&bytes) {
+        eprintln!("sesame: the answer carries `{f}`: the call failed despite {status}");
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn resolve(p: &providers::Provider, token: &Token, path: &str) -> Result<url::Url, String> {

@@ -23,6 +23,9 @@ pub struct Provider {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// What joins the scopes in the authorization URL: a space (OAuth's own), `,` for some.
+    #[serde(default = "space")]
+    pub scope_separator: String,
     #[serde(default)]
     pub auth_params: BTreeMap<String, String>,
     #[serde(default)]
@@ -53,12 +56,24 @@ pub struct Provider {
     /// A JSON endpoint on one of `hosts` naming who signed in, read after login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_url: Option<String>,
-    /// The field of `identity_url`'s answer that names the account (e.g. `login`).
+    /// The field of `identity_url`'s answer that names the account (e.g. `login`),
+    /// or a JSON pointer into it (`/data/viewer/name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_field: Option<String>,
+    /// JSON body for `identity_url`: with one it is a POST (GraphQL), without it a GET.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_body: Option<Value>,
+    /// Top-level fields of an API's JSON answer that, present and not empty,
+    /// mean the call failed although the status is 2xx (GraphQL's `errors`).
+    #[serde(default)]
+    pub error_fields: Vec<String>,
     /// How to register this provider's OAuth app, for `sesame setup`.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
+}
+
+fn space() -> String {
+    " ".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +148,9 @@ pub struct FieldFlags {
     /// A scope login asks for; repeatable. With none, the authorization URL has no `scope`.
     #[arg(long = "scope")]
     scopes: Vec<String>,
+    /// What joins the scopes in the authorization URL (default: a space).
+    #[arg(long)]
+    scope_separator: Option<String>,
     /// `key=value` added to the authorization URL; repeatable.
     #[arg(long = "auth-param")]
     auth_params: Vec<String>,
@@ -165,9 +183,17 @@ pub struct FieldFlags {
     /// JSON endpoint naming who signed in, read after login (on one of the hosts).
     #[arg(long)]
     identity_url: Option<String>,
-    /// The field of the identity answer naming the account, e.g. `login`.
+    /// The field of the identity answer naming the account, e.g. `login`, or a
+    /// JSON pointer into it, e.g. `/data/viewer/name`.
     #[arg(long)]
     identity_field: Option<String>,
+    /// JSON body for the identity call, which makes it a POST (GraphQL).
+    #[arg(long)]
+    identity_body: Option<String>,
+    /// A top-level field of the API's JSON answer that, not empty, fails the
+    /// call despite a 2xx status (GraphQL: `errors`); repeatable.
+    #[arg(long = "error-field")]
+    error_fields: Vec<String>,
     /// A step for `sesame setup`, as JSON: `{"title": …, "page": …, "details": …}`;
     /// repeatable, in order. `{callback}` and `{scopes}` in details are filled in.
     #[arg(long = "setup-step")]
@@ -191,6 +217,8 @@ impl FieldFlags {
             ("api_base", opt(self.api_base)),
             ("hosts", list(self.hosts)),
             ("scopes", list(self.scopes)),
+            ("scope_separator", opt(self.scope_separator)),
+            ("error_fields", list(self.error_fields)),
             ("token_body", opt(self.token_body)),
             ("client_auth", opt(self.client_auth)),
             ("resources_url", opt(self.resources_url)),
@@ -224,6 +252,11 @@ impl FieldFlags {
                 m.insert(k.trim().into(), v.trim().into());
             }
             put("api_headers", Value::Object(m));
+        }
+        if let Some(b) = self.identity_body {
+            let v = serde_json::from_str(&b)
+                .map_err(|e| format!("--identity-body `{b}` is not JSON: {e}"))?;
+            put("identity_body", v);
         }
         if !self.setup.is_empty() {
             let steps = self
@@ -453,6 +486,15 @@ impl Provider {
             }
             _ => return Err("identity_url and identity_field go together: give both".into()),
         }
+        if self.identity_body.is_some() && self.identity_url.is_none() {
+            return Err("identity_body without identity_url: give the URL it goes to".into());
+        }
+        if self.scope_separator.is_empty() {
+            return Err("scope_separator is empty: give a space or a character such as `,`".into());
+        }
+        if self.error_fields.iter().any(|f| f.trim().is_empty()) {
+            return Err("an error_fields entry is empty".into());
+        }
         for (k, v) in &self.api_headers {
             reqwest::header::HeaderName::from_bytes(k.as_bytes())
                 .map_err(|_| format!("api header `{k}`: not a header name"))?;
@@ -491,6 +533,22 @@ impl Provider {
         }
     }
 
+    /// The first of `error_fields` a 2xx JSON answer carries with a value that
+    /// is not empty (`null`, `false`, `""`, `[]` and `{}` are empty).
+    pub fn error_in<'a>(&'a self, body: &[u8]) -> Option<&'a str> {
+        let v: Value = serde_json::from_slice(body).ok()?;
+        self.error_fields
+            .iter()
+            .find(|f| match v.get(f.as_str()) {
+                None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+                Some(Value::String(s)) => !s.is_empty(),
+                Some(Value::Array(a)) => !a.is_empty(),
+                Some(Value::Object(o)) => !o.is_empty(),
+                Some(_) => true,
+            })
+            .map(String::as_str)
+    }
+
     pub fn allows_host(&self, host: &str) -> bool {
         self.hosts.iter().any(|h| match h.strip_prefix("*.") {
             Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
@@ -517,7 +575,7 @@ mod tests {
     #[test]
     fn built_ins_are_valid() {
         let all = built_in::all();
-        for name in ["github", "google", "jira", "notion"] {
+        for name in ["github", "google", "jira", "linear", "notion"] {
             assert!(all.contains_key(name), "{name}");
         }
         for (name, p) in &all {
@@ -579,6 +637,13 @@ mod tests {
                 "go together",
             ),
             ("identity_field", json!("login"), "go together"),
+            (
+                "identity_body",
+                json!({"query": "{ viewer { name } }"}),
+                "without identity_url",
+            ),
+            ("scope_separator", json!(""), "scope_separator is empty"),
+            ("error_fields", json!([""]), "error_fields entry is empty"),
             ("setup", json!([{"title": ""}]), "no title"),
             ("nope", json!(1), "unknown field `nope`"),
         ] {
@@ -599,6 +664,25 @@ mod tests {
     }
 
     #[test]
+    fn error_fields_fail_only_when_not_empty() {
+        let p = built_in("linear");
+        assert_eq!(
+            p.error_in(br#"{"errors":[{"message":"x"}]}"#),
+            Some("errors")
+        );
+        for ok in [
+            &br#"{"data":{}}"#[..],
+            br#"{"data":{},"errors":[]}"#,
+            br#"{"errors":null}"#,
+            br#"[1]"#,
+            b"not json",
+        ] {
+            assert_eq!(p.error_in(ok), None, "{}", String::from_utf8_lossy(ok));
+        }
+        assert_eq!(built_in("google").error_in(br#"{"errors":[1]}"#), None);
+    }
+
+    #[test]
     fn flags_become_fields() {
         let flags = FieldFlags {
             scopes: vec!["a".into(), "b".into()],
@@ -608,6 +692,9 @@ mod tests {
             redirect_port: Some(9000),
             redirect_host: Some("127.0.0.1".into()),
             device_url: Some("https://x.example/device".into()),
+            scope_separator: Some(",".into()),
+            error_fields: vec!["errors".into()],
+            identity_body: Some(r#"{"query":"{ viewer { name } }"}"#.into()),
             setup: vec![r#"{"title":"T","page":"https://x.example"}"#.into()],
             ..Default::default()
         };
@@ -621,6 +708,9 @@ mod tests {
                 "redirect_port": 9000,
                 "redirect_host": "127.0.0.1",
                 "device_url": "https://x.example/device",
+                "scope_separator": ",",
+                "error_fields": ["errors"],
+                "identity_body": {"query": "{ viewer { name } }"},
                 "setup": [{"title": "T", "page": "https://x.example"}],
             })
         );

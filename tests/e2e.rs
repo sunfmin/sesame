@@ -277,7 +277,10 @@ fn first_use_points_to_setup() {
     let (ok, out) = sesame(&["setup", "nope"]);
     assert!(!ok);
     assert!(out.contains("unknown provider `nope`"), "{out}");
-    assert!(out.contains("acme, github, google, jira, notion"), "{out}");
+    assert!(
+        out.contains("acme, github, google, jira, linear, notion"),
+        "{out}"
+    );
 
     let (_, out) = sesame(&["providers"]);
     assert!(out.contains("next: sesame setup acme"), "{out}");
@@ -828,5 +831,225 @@ fn device_flow_and_browser_fallback() {
         .filter(|l| l.contains("device_code=dev-ok"))
         .count();
     assert_eq!(polls, 3, "{log:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A Linear-shaped fake: comma-separated scopes, 24-hour tokens whose every
+/// refresh hands out a new refresh token, and GraphQL errors under a 200.
+fn fake_linear() -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        let mut n = 1;
+        for stream in listener.incoming().flatten() {
+            let (target, headers, body) = read_request(&stream);
+            log2.lock().unwrap().push(format!("{target} {body}"));
+            let auth = header(&headers, "authorization").unwrap_or_default();
+            let mut s = stream;
+            let token = |n: i32| {
+                format!(
+                    r#"{{"access_token":"access-{n}","refresh_token":"refresh-{n}","expires_in":86399,"scope":"read,write"}}"#
+                )
+            };
+            if target.starts_with("/authorize") {
+                let u = url::Url::parse(&format!("http://x{target}")).unwrap();
+                let q = |k: &str| {
+                    u.query_pairs()
+                        .find(|(m, _)| m == k)
+                        .unwrap()
+                        .1
+                        .into_owned()
+                };
+                let loc = format!("{}?code=the-code&state={}", q("redirect_uri"), q("state"));
+                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
+            } else if target == "/oauth/token" {
+                if body.contains("grant_type=authorization_code") {
+                    reply(&mut s, "200 OK", "", &token(n));
+                } else if body.contains(&format!("refresh_token=refresh-{n}")) {
+                    n += 1;
+                    reply(&mut s, "200 OK", "", &token(n));
+                } else {
+                    reply(
+                        &mut s,
+                        "400 Bad Request",
+                        "",
+                        r#"{"error":"invalid_grant"}"#,
+                    );
+                }
+            } else if target == "/graphql" && auth == format!("Bearer access-{n}") {
+                let b = if body.contains("broken") {
+                    r#"{"data":null,"errors":[{"message":"Cannot query field \"broken\""}]}"#
+                } else if body.contains("viewer { name }") {
+                    r#"{"data":{"viewer":{"name":"Felix"}}}"#
+                } else {
+                    r#"{"data":{"viewer":{"id":"u1"}}}"#
+                };
+                reply(&mut s, "200 OK", "", b);
+            } else if target == "/graphql" {
+                reply(
+                    &mut s,
+                    "401 Unauthorized",
+                    "",
+                    r#"{"errors":[{"message":"auth"}]}"#,
+                );
+            } else {
+                reply(&mut s, "404 Not Found", "", "");
+            }
+        }
+    });
+    (port, log)
+}
+
+/// The built-in `linear`, pointed at the fake: the authorization URL asks for
+/// `read,write`, login names who signed in, a day later the token refreshes and
+/// the new refresh token is kept, and GraphQL `errors` under a 200 fail `api`.
+#[test]
+fn linear_scopes_daily_refresh_graphql_errors() {
+    let (port, log) = fake_linear();
+    let tmp = std::env::temp_dir().join(format!("sesame-linear-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let sesame = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        c.args(args).env("SESAME_CONFIG_DIR", &config);
+        c
+    };
+    let run = |args: &[&str]| {
+        let out = sesame(args).output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let db = || rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+    let stored = || {
+        db().query_row(
+            "SELECT refresh_token, expires_at FROM tokens WHERE provider = 'linear'",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .unwrap()
+    };
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    };
+    // A day has passed: the stored access token is past its expiry.
+    let a_day_later = || {
+        db().execute(
+            "UPDATE tokens SET expires_at = ?1 WHERE provider = 'linear'",
+            [now() - 1],
+        )
+        .unwrap();
+    };
+
+    // 8752 is linear's fixed port; the test takes a free one so runs in
+    // parallel (and a real `sesame login linear`) do not collide.
+    let free = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok, _, err) = run(&[
+        "provider",
+        "set",
+        "linear",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/oauth/token"),
+        "--api-base",
+        &base,
+        "--host",
+        "127.0.0.1",
+        "--redirect-port",
+        &free,
+        "--identity-url",
+        &format!("{base}/graphql"),
+    ]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = run(&["provider", "show", "linear"]);
+    assert!(ok, "{err}");
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(shown["scope_separator"]["value"], ",");
+    assert_eq!(shown["scope_separator"]["from"], "built-in");
+    assert_eq!(
+        shown["error_fields"]["value"],
+        serde_json::json!(["errors"])
+    );
+
+    let (ok, _, _) = run(&["client", "linear", "--client-id", "cid", "--secret-stdin"]);
+    assert!(ok);
+
+    let mut login = sesame(&["login", "linear", "--no-browser"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(login.stderr.take().unwrap());
+    let auth_url = loop {
+        let mut l = String::new();
+        assert!(err.read_line(&mut l).unwrap() > 0, "no URL printed");
+        if let Some(u) = l.trim().strip_prefix("http") {
+            break format!("http{u}");
+        }
+    };
+    let u = url::Url::parse(&auth_url).unwrap();
+    let scope = u.query_pairs().find(|(k, _)| k == "scope").unwrap().1;
+    assert_eq!(scope, "read,write");
+    let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
+    assert!(page.contains("Signed in"));
+    let status = login.wait().unwrap();
+    let mut rest = String::new();
+    err.read_to_string(&mut rest).unwrap();
+    assert!(status.success(), "login failed: {rest}");
+    assert!(rest.contains("Logged in to `linear` (Felix)"), "{rest}");
+
+    let (refresh, expires) = stored();
+    assert_eq!(refresh, "refresh-1");
+    assert!((expires - now() - 86399).abs() < 60, "{expires}");
+    let (_, out, _) = run(&["providers"]);
+    assert!(out.contains("logged in (Felix)"), "{out}");
+
+    let query = r#"{"query":"{ viewer { id } }"}"#;
+    let (ok, out, err) = run(&["api", "linear", "/graphql", "-d", query]);
+    assert!(ok, "{err}");
+    assert!(out.contains("u1"), "{out}");
+
+    // Two days in a row: each refresh rotates the refresh token and keeps the new one.
+    for day in 2..=3 {
+        a_day_later();
+        let (ok, out, err) = run(&["api", "linear", "/graphql", "-d", query]);
+        assert!(ok, "day {day}: {err}");
+        assert!(out.contains("u1"), "{out}");
+        assert_eq!(stored().0, format!("refresh-{day}"));
+        assert!(stored().1 > now() + 86000);
+    }
+
+    let (ok, out, err) = run(&[
+        "api",
+        "linear",
+        "/graphql",
+        "-d",
+        r#"{"query":"{ broken }"}"#,
+    ]);
+    assert!(!ok, "a 200 with errors passed: {out}");
+    assert!(out.contains("Cannot query field"), "{out}");
+    assert!(err.contains("`errors`"), "{err}");
+
+    let log = log.lock().unwrap();
+    let refreshes = log
+        .iter()
+        .filter(|l| l.contains("grant_type=refresh_token"))
+        .count();
+    assert_eq!(refreshes, 2, "{log:?}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
