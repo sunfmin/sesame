@@ -59,7 +59,7 @@ pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, Str
         Some(device_url) if !opts.loopback => {
             device_flow(p, &client, device_url, &scopes, opts.open_browser)?
         }
-        _ => loopback_flow(p, &client, &scopes, opts.open_browser)?,
+        _ => loopback_flow(name, p, &client, &scopes, opts.open_browser)?,
     };
     if let Some(resources_url) = &p.resources_url {
         pick_resource(&mut token, resources_url, opts.site.as_deref())?;
@@ -75,6 +75,7 @@ pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, Str
 }
 
 fn loopback_flow(
+    name: &str,
     p: &Provider,
     client: &Client,
     scopes: &[String],
@@ -114,15 +115,19 @@ fn loopback_flow(
     }
 
     eprintln!("Open this URL to sign in:\n\n  {url}\n");
+    let within = match p.code_seconds {
+        Some(s) => format!(" within {s} seconds: the code in it expires then"),
+        None => String::new(),
+    };
     match p.redirect {
         Redirect::Loopback => eprintln!(
             "Waiting for the redirect to {redirect_uri}.\n\
-             On another machine than this one? Paste the address the browser ended on here."
+             On another machine than this one? Paste the address the browser ended on here{within}."
         ),
         Redirect::HttpsPaste => eprintln!(
             "After you approve, the browser goes to {redirect_uri}?code=… and says it cannot\n\
              open the page: that is expected. Copy the whole address from its address bar and\n\
-             paste it here."
+             paste it here{within}."
         ),
     }
     if open_browser {
@@ -170,7 +175,27 @@ fn loopback_flow(
     if p.pkce {
         form.push(("code_verifier", verifier));
     }
-    request_token(p, client, form, None)
+    let (status, text) = post(p, &p.token_url, form, Some(client))?;
+    if !status.is_success() {
+        return Err(code_refused(name, p, status, &text));
+    }
+    token_from(p, &text, None)
+}
+
+/// The error for a refused code exchange. An `invalid_grant`, or any 4xx from a
+/// provider whose code lasts only seconds, most likely means the code expired.
+fn code_refused(name: &str, p: &Provider, status: reqwest::StatusCode, text: &str) -> String {
+    let mut e = format!("token endpoint answered {status}: {text}");
+    if text.contains("invalid_grant") || (p.code_seconds.is_some() && status.is_client_error()) {
+        let lasts = match p.code_seconds {
+            Some(s) => format!(" (it lasts {s} seconds)"),
+            None => String::new(),
+        };
+        e.push_str(&format!(
+            "\nThe authorization code most likely expired{lasts}; run `sesame login {name}` again."
+        ));
+    }
+    e
 }
 
 /// Answers the browser's redirect to the loopback callback and sends its
@@ -356,19 +381,6 @@ fn post(
     Ok((status, text))
 }
 
-fn request_token(
-    p: &Provider,
-    client: &Client,
-    form: Vec<(&str, String)>,
-    previous: Option<&Token>,
-) -> Result<Token, String> {
-    let (status, text) = post(p, &p.token_url, form, Some(client))?;
-    if !status.is_success() {
-        return Err(format!("token endpoint answered {status}: {text}"));
-    }
-    token_from(p, &text, previous)
-}
-
 /// The token in a token endpoint's answer: at `token_path`, or at the top
 /// level when nothing with an `access_token` is there (a Slack refresh).
 fn token_from(p: &Provider, text: &str, previous: Option<&Token>) -> Result<Token, String> {
@@ -500,7 +512,13 @@ pub fn valid_token(name: &str, p: &Provider, force_refresh: bool) -> Result<Toke
             ("grant_type", "refresh_token".to_string()),
             ("refresh_token", refresh),
         ];
-        let new = request_token(p, &client, form, Some(&token))?;
+        let (status, text) = post(p, p.refresh_endpoint(), form, Some(&client))?;
+        if !status.is_success() {
+            return Err(format!(
+                "refresh endpoint answered {status}: {text}\nRun `sesame login {name}` again."
+            ));
+        }
+        let new = token_from(p, &text, Some(&token))?;
         store.save_token(name, &new)?;
         Ok(new)
     })

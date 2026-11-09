@@ -68,6 +68,10 @@ pub fn render(name: &str, p: &Provider) -> String {
             ),
         )
     } else {
+        let within = match p.code_seconds {
+            Some(s) => format!(" within {s} seconds, before the code in it expires"),
+            None => String::new(),
+        };
         (
             format!(
                 "sesame client {name} --client-id <client id>\n\
@@ -78,13 +82,13 @@ pub fn render(name: &str, p: &Provider) -> String {
                 Redirect::Loopback => format!(
                     "sesame login {name}\n\
                      On a remote machine (SSH): open the printed URL anywhere, then paste the address\n\
-                     the browser ends on back into the terminal."
+                     the browser ends on back into the terminal{within}."
                 ),
                 Redirect::HttpsPaste => format!(
                     "sesame login {name}\n\
                      After approving, the browser ends on {callback}?code=… and says it cannot open\n\
                      the page: that is expected. Copy the whole address from the address bar and paste\n\
-                     it into the terminal."
+                     it into the terminal{within}."
                 ),
             },
         )
@@ -223,6 +227,26 @@ mod tests {
         ] {
             assert!(out.contains(want), "missing {want:?} in:\n{out}");
         }
+    }
+
+    #[test]
+    fn figma() {
+        let out = render("figma", &built_in("figma"));
+        for want in [
+            "https://www.figma.com/developers/apps",
+            "Create a new app",
+            "OAuth credentials",
+            "Redirect URL: http://localhost:8753/callback",
+            "current_user:read, file_content:read, file_comments:read",
+            "Draft",
+            "Private",
+            "sesame client figma --client-id <client id>",
+            "sesame login figma",
+            "within 30 seconds",
+        ] {
+            assert!(out.contains(want), "missing {want:?} in:\n{out}");
+        }
+        assert!(!out.contains("{callback}") && !out.contains("{scopes}"));
     }
 
     #[test]
