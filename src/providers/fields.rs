@@ -37,7 +37,16 @@ pub enum Kind {
     Json,
     /// Repeatable JSON setup step `{"title": …, "page": …, "details": …}`.
     Steps,
+    /// `true` or `false`.
+    Bool,
+    /// A number of seconds, more than 0.
+    Seconds,
+    /// Repeatable service, by name; stored as one `services.<name>` field each.
+    Services,
 }
+
+/// The `sesame.db` field holding one service of a provider.
+pub const SERVICE_FIELD: &str = "services.";
 
 pub struct Field {
     /// The name `sesame.db` and `provider show` use.
@@ -79,10 +88,19 @@ pub const FIELDS: &[Field] = &[
         flag: "token-url",
         kind: Kind::Url,
         required: true,
-        help: "The OAuth token endpoint; refreshing goes there too.",
-        question: "Where is the token endpoint that exchanges the code, and does refreshing \
-                   (grant_type=refresh_token) go to the same one?",
-        look: "the OAuth guide's \"exchange the code\" and \"refresh\" steps, or the metadata's token_endpoint",
+        help: "The OAuth token endpoint.",
+        question: "Where is the token endpoint that exchanges the code for a token?",
+        look: "the OAuth guide's \"exchange the code\" step, or the metadata's token_endpoint",
+    },
+    Field {
+        name: "refresh_url",
+        flag: "refresh-url",
+        kind: Kind::Url,
+        required: false,
+        help: "The endpoint a refresh goes to; without it, the token endpoint.",
+        question: "Does refreshing (grant_type=refresh_token) go to the token endpoint, or to one \
+                   of its own (Figma: `/v1/oauth/refresh`)?",
+        look: "the OAuth guide's \"refresh\" step",
     },
     Field {
         name: "api_base",
@@ -113,6 +131,16 @@ pub const FIELDS: &[Field] = &[
         look: "the OAuth guide's scopes table, or the metadata's scopes_supported",
     },
     Field {
+        name: "scope_param",
+        flag: "scope-param",
+        kind: Kind::Name,
+        required: false,
+        help: "The authorization URL's parameter for the scopes (default `scope`; Slack `user_scope`).",
+        question: "Which authorization URL parameter carries the scopes: `scope`, or another \
+                   (Slack's user tokens: `user_scope`)?",
+        look: "the authorize step's parameter table",
+    },
+    Field {
         name: "scope_separator",
         flag: "scope-separator",
         kind: Kind::Separator,
@@ -132,6 +160,16 @@ pub const FIELDS: &[Field] = &[
         look: "the authorize step's parameter table",
     },
     Field {
+        name: "pkce",
+        flag: "pkce",
+        kind: Kind::Bool,
+        required: false,
+        help: "Whether login sends PKCE (`code_challenge` with S256, `code_verifier`).",
+        question: "Does the platform take PKCE with S256, or must the authorization-code flow go \
+                   without it (it refuses or mishandles `code_challenge`)?",
+        look: "the OAuth guide's PKCE section, or the metadata's code_challenge_methods_supported",
+    },
+    Field {
         name: "token_body",
         flag: "token-body",
         kind: Kind::Choice(&["form", "json"]),
@@ -149,6 +187,17 @@ pub const FIELDS: &[Field] = &[
         question: "Do client_id and client_secret go in the token request's body, or as HTTP Basic \
                    (Authorization: Basic base64(id:secret))?",
         look: "the token step's request example, or the metadata's token_endpoint_auth_methods_supported",
+    },
+    Field {
+        name: "token_path",
+        flag: "token-path",
+        kind: Kind::Text,
+        required: false,
+        help: "JSON pointer to the object holding `access_token` in the token response \
+               (Slack `/authed_user`); empty for the top level.",
+        question: "Where in the token response is `access_token`: at the top level, or inside an \
+                   object (Slack's user token: `/authed_user`)?",
+        look: "the token step's response example",
     },
     Field {
         name: "api_headers",
@@ -175,9 +224,21 @@ pub const FIELDS: &[Field] = &[
         flag: "site-name-field",
         kind: Kind::Name,
         required: false,
-        help: "The token response's field naming the site the login reached (Notion: `workspace_name`).",
+        help: "The token response's field naming the site the login reached (Notion: `workspace_name`); \
+               a JSON pointer when it starts with `/` (Slack: `/team/name`).",
         question: "Does the token response name the workspace the login reached, and in which field?",
         look: "the token step's response example",
+    },
+    Field {
+        name: "redirect",
+        flag: "redirect",
+        kind: Kind::Choice(&["loopback", "https-paste"]),
+        required: false,
+        help: "How the code comes back: `loopback` (sesame listens on http://localhost) or \
+               `https-paste` (https://localhost:<redirect-port>, the address pasted back).",
+        question: "May the callback be http on loopback, or must it be https (then `https-paste`, \
+                   with a fixed redirect_port)?",
+        look: "the app registration page's redirect URI rules",
     },
     Field {
         name: "redirect_port",
@@ -188,6 +249,17 @@ pub const FIELDS: &[Field] = &[
         question: "Does the platform match the callback's port exactly against the registered one \
                    (then fix a port no other provider uses), or take any port on loopback?",
         look: "the app registration page's redirect URI rules",
+    },
+    Field {
+        name: "code_seconds",
+        flag: "code-seconds",
+        kind: Kind::Seconds,
+        required: false,
+        help: "How many seconds the authorization code lasts; login tells the person \
+               to paste the address back within them.",
+        question: "Does the authorization code expire so fast the person must hurry to paste it \
+                   (Figma: 30 seconds)? How many seconds?",
+        look: "the token step's notes on the code",
     },
     Field {
         name: "redirect_host",
@@ -244,9 +316,8 @@ pub const FIELDS: &[Field] = &[
         required: false,
         help: "A top-level field of the API's JSON answer that, not empty, fails the \
                call despite a 2xx status (GraphQL: `errors`).",
-        question: "Can an API answer be HTTP 200 and still a failure (GraphQL `errors`)? \
-                   Which top-level field, present and not empty, says so? (A flag that says \
-                   success, like Slack's `\"ok\": false`, cannot be expressed yet.)",
+        question: "Can an API answer be HTTP 200 and still a failure (GraphQL `errors`, Slack `error`)? \
+                   Which top-level field, present and not empty, says so?",
         look: "the API reference's errors page",
     },
     Field {
@@ -260,6 +331,19 @@ pub const FIELDS: &[Field] = &[
                    which app type, where to enter the callback, where the client id and secret show? \
                    Anything that expires they must know about (a refresh token that dies after 7 days)?",
         look: "the platform's \"create an app\" or \"register an integration\" guide",
+    },
+    Field {
+        name: "services",
+        flag: "service",
+        kind: Kind::Services,
+        required: false,
+        help: "A service: an API reached with this provider's token, named like a provider. \
+               `name=…,api-base=…,scope=…` (`scope` repeats; `about` too), or JSON \
+               `{\"name\": …, \"api_base\": …, \"scopes\": […], \"about\": …, \"setup\": […]}`. \
+               On `set`, the keys given replace only those of that service; `--drop-service` removes one.",
+        question: "Does the one token reach several APIs, each with its own base URL and scopes \
+                   (Google: gmail, calendar), worth naming as services?",
+        look: "the platform's API list and each API's scopes",
     },
     Field {
         name: "sources",
@@ -277,28 +361,14 @@ pub const FIELDS: &[Field] = &[
 /// differs here cannot be signed in to with sesame yet.
 pub const FIXED: &[(&str, &str)] = &[
     (
-        "Does the platform support PKCE, and with which code_challenge_method?",
-        "sesame always sends PKCE with S256. Most platforms without PKCE ignore it; one that \
-         rejects the parameters cannot be signed in to yet.",
-    ),
-    (
-        "What is the authorization URL's scope parameter called?",
-        "sesame sends `scope` (Slack's user tokens use `user_scope`: not yet supported).",
-    ),
-    (
-        "Where in the token response are access_token, refresh_token and expires_in?",
-        "sesame reads them at the top level of the JSON answer.",
+        "With PKCE, which code_challenge_method does the platform take?",
+        "sesame sends S256 only. A platform taking only `plain` needs --pkce false, if it allows that.",
     ),
     (
         "How long do access and refresh tokens live, and does a refresh hand out a new refresh token?",
-        "sesame refreshes at token_url a minute before expires_in runs out, and after a 401; it \
-         keeps the old refresh token when a refresh brings none. Write a lifetime the person must \
-         know about into a --setup-step.",
-    ),
-    (
-        "Must every callback be https, or is http allowed for loopback?",
-        "sesame's browser login listens on http://<redirect_host>:<port>/callback. A platform \
-         that refuses http on loopback needs device_url, or cannot be signed in to yet.",
+        "sesame refreshes a minute before expires_in runs out, and after a 401; it keeps the old \
+         refresh token when a refresh brings none. Write a lifetime the person must know about \
+         (a refresh token that dies after 7 days) into a --setup-step.",
     ),
 ];
 
@@ -310,7 +380,13 @@ impl Kind {
     pub fn repeatable(self) -> bool {
         matches!(
             self,
-            Kind::Names | Kind::Urls | Kind::Hosts | Kind::Params | Kind::Headers | Kind::Steps
+            Kind::Names
+                | Kind::Urls
+                | Kind::Hosts
+                | Kind::Params
+                | Kind::Headers
+                | Kind::Steps
+                | Kind::Services
         )
     }
 
@@ -324,6 +400,9 @@ impl Kind {
             Kind::Params => "KEY=VALUE",
             Kind::Headers => "NAME: VALUE",
             Kind::Json | Kind::Steps => "JSON",
+            Kind::Bool => "BOOL",
+            Kind::Seconds => "SECONDS",
+            Kind::Services => "SERVICE",
         }
     }
 
@@ -341,6 +420,9 @@ impl Kind {
             Kind::Headers => "`Name: value`",
             Kind::Json => "JSON",
             Kind::Steps => "JSON step",
+            Kind::Bool => "true or false",
+            Kind::Seconds => "seconds, more than 0",
+            Kind::Services => "`name=…,api-base=…,scope=…` or JSON",
         };
         if self.repeatable() {
             format!("{one}; repeatable")
@@ -375,6 +457,21 @@ impl Kind {
             Kind::Json | Kind::Steps => {
                 serde_json::from_str(s).map_err(|e| format!("`{s}` is not JSON: {e}"))
             }
+            Kind::Bool => s
+                .parse::<bool>()
+                .map(Value::from)
+                .map_err(|_| format!("`{s}` is not true or false")),
+            Kind::Seconds => s
+                .parse::<u64>()
+                .map(Value::from)
+                .map_err(|_| format!("`{s}` is not a number of seconds")),
+            Kind::Services => {
+                let (name, fields) = service_flag(s)?;
+                Ok(Value::Object(Map::from_iter([(
+                    name,
+                    Value::Object(fields),
+                )])))
+            }
             _ => Ok(Value::String(s.into())),
         }
     }
@@ -382,7 +479,7 @@ impl Kind {
     /// The value of all of a flag's occurrences, in order.
     pub fn collect(self, mut given: Vec<Value>) -> Value {
         match self {
-            Kind::Params | Kind::Headers => {
+            Kind::Params | Kind::Headers | Kind::Services => {
                 let mut m = Map::new();
                 for v in given {
                     if let Value::Object(o) = v {
@@ -411,6 +508,16 @@ impl Kind {
             }
             (Kind::Json, v) => vec![v.to_string()],
             (Kind::Steps, Value::Array(a)) => a.iter().map(Value::to_string).collect(),
+            (Kind::Services, Value::Object(m)) => m
+                .iter()
+                .map(|(name, svc)| {
+                    let mut o = Map::from_iter([("name".to_string(), Value::from(name.as_str()))]);
+                    if let Value::Object(f) = svc {
+                        o.extend(f.clone());
+                    }
+                    Value::Object(o).to_string()
+                })
+                .collect(),
             (_, Value::Array(a)) => a.iter().map(text).collect(),
             (_, v) => vec![text(v)],
         }
@@ -488,15 +595,14 @@ impl Kind {
                     }
                 }
             }
-            Kind::Steps => {
-                for s in v.as_array().into_iter().flatten() {
-                    let title = s.get("title").and_then(Value::as_str).unwrap_or_default();
-                    if title.trim().is_empty() {
-                        return Err("a setup step has no title".into());
-                    }
-                    if let Some(page) = s.get("page").and_then(Value::as_str) {
-                        check_url("setup page", page)?;
-                    }
+            // Each step's title and page, and each service, need the whole
+            // definition: `Provider::check` checks them.
+            Kind::Steps | Kind::Services | Kind::Bool => {}
+            Kind::Seconds => {
+                if v.as_u64() == Some(0) {
+                    return Err(format!(
+                        "{name} 0: leave it out when the provider does not say"
+                    ));
                 }
             }
         }
@@ -504,7 +610,7 @@ impl Kind {
     }
 }
 
-fn check_url(field: &str, u: &str) -> Result<(), String> {
+pub fn check_url(field: &str, u: &str) -> Result<(), String> {
     let parsed = url::Url::parse(&u.replace("{resource_id}", "x"))
         .map_err(|e| format!("{field} `{u}`: {e}"))?;
     match parsed.scheme() {
@@ -535,9 +641,54 @@ pub fn quote(s: &str) -> String {
     }
 }
 
-/// `sesame provider add` and `set`: one flag per field of the table.
+/// A `--service` value as its name and the service's fields given.
+fn service_flag(spec: &str) -> Result<(String, Map<String, Value>), String> {
+    let mut f = if spec.trim_start().starts_with('{') {
+        match serde_json::from_str(spec) {
+            Ok(Value::Object(m)) => m,
+            Ok(_) => return Err(format!("--service `{spec}` is not a JSON object")),
+            Err(e) => return Err(format!("--service `{spec}` is not JSON: {e}")),
+        }
+    } else {
+        let mut m = Map::new();
+        let mut scopes = Vec::new();
+        for kv in spec.split(',') {
+            let (k, v) = kv
+                .split_once('=')
+                .ok_or_else(|| format!("--service `{spec}`: `{kv}` is not key=value"))?;
+            match k.trim() {
+                "scope" => scopes.push(Value::from(v.trim())),
+                k @ ("name" | "about") => {
+                    m.insert(k.into(), v.trim().into());
+                }
+                "api-base" => {
+                    m.insert("api_base".into(), v.trim().into());
+                }
+                k => {
+                    return Err(format!(
+                        "--service `{spec}`: unknown key `{k}`; use name, api-base, scope, about"
+                    ));
+                }
+            }
+        }
+        if !scopes.is_empty() {
+            m.insert("scopes".into(), Value::Array(scopes));
+        }
+        m
+    };
+    match f.remove("name") {
+        Some(Value::String(n)) => Ok((n, f)),
+        _ => Err(format!("--service `{spec}` has no name")),
+    }
+}
+
+/// `sesame provider add` and `set`: one flag per field of the table, and
+/// `--drop-service`. A service is stored as its own `services.<name>` field;
+/// a dropped one is that field set to null.
 #[derive(Debug, Default)]
 pub struct FieldFlags(pub Map<String, Value>);
+
+const DROP_SERVICE: &str = "drop_services";
 
 impl clap::FromArgMatches for FieldFlags {
     fn from_arg_matches(m: &clap::ArgMatches) -> Result<Self, clap::Error> {
@@ -550,8 +701,20 @@ impl clap::FromArgMatches for FieldFlags {
         for f in FIELDS {
             if let Some(given) = m.get_many::<Value>(f.name) {
                 let given: Vec<Value> = given.cloned().collect();
-                self.0.insert(f.name.into(), f.kind.collect(given));
+                match f.kind.collect(given) {
+                    Value::Object(services) if matches!(f.kind, Kind::Services) => {
+                        for (name, svc) in services {
+                            self.0.insert(format!("{SERVICE_FIELD}{name}"), svc);
+                        }
+                    }
+                    v => {
+                        self.0.insert(f.name.into(), v);
+                    }
+                }
             }
+        }
+        for name in m.get_many::<String>(DROP_SERVICE).into_iter().flatten() {
+            self.0.insert(format!("{SERVICE_FIELD}{name}"), Value::Null);
         }
         Ok(())
     }
@@ -582,7 +745,13 @@ impl clap::Args for FieldFlags {
                     }),
             );
         }
-        cmd
+        cmd.arg(
+            clap::Arg::new(DROP_SERVICE)
+                .long("drop-service")
+                .value_name("NAME")
+                .help("Remove the named service. [repeatable]")
+                .action(clap::ArgAction::Append),
+        )
     }
 
     fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
@@ -703,6 +872,12 @@ mod tests {
                 Kind::Json => &[r#"{"query":"{ x }"}"#],
                 Kind::Steps => &[r#"{"title":"T"}"#, r#"{"title":"U","details":"d"}"#],
                 Kind::Choice(w) => &w[..1],
+                Kind::Bool => &["false"],
+                Kind::Seconds => &["30"],
+                Kind::Services => &[
+                    "name=a,api-base=https://a.example,scope=r,scope=w",
+                    r#"{"name":"b","api_base":"https://b.example","about":"it's B"}"#,
+                ],
                 k if k.repeatable() => &["one", "two"],
                 _ => &["it's one"],
             };

@@ -91,7 +91,8 @@ fn discover_reads_rfc_8414_metadata() {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
     assert!(!out.contains("--auth-url:"), "{out}");
-    assert!(!out.contains("PKCE, and with which"), "{out}");
+    assert!(!out.contains("--pkce:"), "{out}");
+    assert!(!out.contains("which code_challenge_method"), "{out}");
 }
 
 #[test]
@@ -155,7 +156,8 @@ fn guide_lists_every_flag_and_help_points_to_it() {
     assert!(ok);
     let flags: Vec<&str> = help
         .split_whitespace()
-        .filter(|w| w.starts_with("--") && *w != "--help")
+        // `--drop-service` removes a service: it fills in no field.
+        .filter(|w| w.starts_with("--") && !["--help", "--drop-service"].contains(w))
         .collect();
     assert!(flags.len() > 15, "{help}");
     for flag in flags {
@@ -180,6 +182,20 @@ fn export_rebuilds_the_definition_in_an_empty_database() {
             "https://acme.example/authorize",
             "--token-url",
             "https://acme.example/token",
+            "--refresh-url",
+            "https://acme.example/refresh",
+            "--scope-param",
+            "user_scope",
+            "--pkce",
+            "false",
+            "--token-path",
+            "/authed_user",
+            "--redirect",
+            "https-paste",
+            "--code-seconds",
+            "30",
+            "--service",
+            "name=billing,api-base=https://api.acme.example/billing,scope=billing.read",
             "--api-base",
             "https://api.acme.example/{resource_id}",
             "--host",

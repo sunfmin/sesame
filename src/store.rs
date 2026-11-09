@@ -23,6 +23,8 @@ pub struct Token {
     pub scope: Option<String>,
     pub resource_id: Option<String>,
     pub resource_name: Option<String>,
+    /// Pasted by the person (`sesame login --token`), not from an OAuth login.
+    pub pasted: bool,
     /// Who signed in, from the provider's `identity_url`.
     pub account: Option<String>,
 }
@@ -57,6 +59,10 @@ const MIGRATIONS: &[&str] = &[
     "
     -- Who signed in, from the provider's identity_url.
     ALTER TABLE tokens ADD COLUMN account TEXT;
+",
+    "
+    -- 1 for a token the person pasted (`sesame login --token`).
+    ALTER TABLE tokens ADD COLUMN pasted INTEGER NOT NULL DEFAULT 0;
 ",
 ];
 
@@ -185,7 +191,7 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT access_token, refresh_token, expires_at, scope, resource_id, resource_name,
-                        account
+                        account, pasted
                  FROM tokens WHERE provider = ?1",
                 [provider],
                 |r| {
@@ -197,6 +203,7 @@ impl Store {
                         resource_id: r.get(4)?,
                         resource_name: r.get(5)?,
                         account: r.get(6)?,
+                        pasted: r.get(7)?,
                     })
                 },
             )
@@ -209,8 +216,8 @@ impl Store {
             .execute(
                 "INSERT OR REPLACE INTO tokens
                  (provider, access_token, refresh_token, expires_at, scope, resource_id, resource_name,
-                  account)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  account, pasted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     provider,
                     t.access_token,
@@ -219,7 +226,8 @@ impl Store {
                     t.scope,
                     t.resource_id,
                     t.resource_name,
-                    t.account
+                    t.account,
+                    t.pasted
                 ],
             )
             .map(drop)
@@ -340,6 +348,7 @@ mod tests {
             resource_id: None,
             resource_name: None,
             account: None,
+            pasted: false,
         };
         Store::open_at(db.clone())
             .unwrap()
@@ -379,6 +388,7 @@ mod tests {
             resource_id: Some("site".into()),
             resource_name: None,
             account: None,
+            pasted: true,
         };
         Store::open_at(db.clone())
             .unwrap()
@@ -392,8 +402,8 @@ mod tests {
         assert_eq!(v as usize, MIGRATIONS.len());
         let got = s.token("p").unwrap().unwrap();
         assert_eq!(
-            (got.expires_at, got.resource_id),
-            (Some(42), Some("site".into()))
+            (got.expires_at, got.resource_id, got.pasted),
+            (Some(42), Some("site".into()), true)
         );
         s.delete_token("p").unwrap();
         assert!(s.token("p").unwrap().is_none());

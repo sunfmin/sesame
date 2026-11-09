@@ -11,8 +11,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use fields::FIELDS;
 pub use fields::FieldFlags;
+use fields::{FIELDS, SERVICE_FIELD, check_url};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,17 +21,26 @@ pub struct Provider {
     pub about: String,
     pub auth_url: String,
     pub token_url: String,
+    /// The endpoint a refresh goes to, when not `token_url` (Figma: `/v1/oauth/refresh`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_url: Option<String>,
     /// Base for relative API paths; `{resource_id}` is the site picked at login.
     pub api_base: String,
     /// Hosts the token may be sent to; `*.example.com` matches subdomains.
     pub hosts: Vec<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// The authorization URL's parameter that carries the scopes (Slack: `user_scope`).
+    #[serde(default = "default_scope_param")]
+    pub scope_param: String,
     /// What joins the scopes in the authorization URL: a space (OAuth's own), `,` for some.
     #[serde(default = "space")]
     pub scope_separator: String,
     #[serde(default)]
     pub auth_params: BTreeMap<String, String>,
+    /// Send PKCE (`code_challenge`, `code_verifier`) with the authorization code.
+    #[serde(default = "yes")]
+    pub pkce: bool,
     #[serde(default)]
     pub token_body: TokenBody,
     /// How the client authenticates to the token endpoint.
@@ -41,15 +50,29 @@ pub struct Provider {
     /// a `-H` of the same name replaces one.
     #[serde(default)]
     pub api_headers: BTreeMap<String, String>,
+    /// JSON pointer to the object in the token response that holds
+    /// `access_token` (Slack: `/authed_user`); empty for the top level. A
+    /// response without `access_token` there (a refresh) is read at the top level.
+    #[serde(default)]
+    pub token_path: String,
     /// Lists the sites a token can reach (Atlassian); the first, or `--site`, is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources_url: Option<String>,
-    /// The token response's field naming the site the login reached (Notion: `workspace_name`).
+    /// The token response's field naming the site the login reached (Notion:
+    /// `workspace_name`); a JSON pointer when it starts with `/` (Slack: `/team/name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site_name_field: Option<String>,
-    /// Fixed loopback port, for providers that match the callback URL exactly.
+    /// How the authorization code comes back to sesame.
+    #[serde(default)]
+    pub redirect: Redirect,
+    /// Fixed callback port, for providers that match the callback URL exactly;
+    /// required for `https-paste`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_port: Option<u16>,
+    /// How many seconds the authorization code lasts, when it is short enough
+    /// to tell the person (Figma: 30); login says so where it asks for a paste.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_seconds: Option<u64>,
     /// The loopback redirect's host: `localhost` or `127.0.0.1`.
     #[serde(default)]
     pub redirect_host: RedirectHost,
@@ -74,16 +97,36 @@ pub struct Provider {
     /// How to register this provider's OAuth app, for `sesame setup`.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
+    /// The APIs reached with this provider's one token, by name (Google:
+    /// `gmail`, `calendar`, ...). A service's name is used like a provider's.
+    #[serde(default)]
+    pub services: BTreeMap<String, Service>,
     /// The documentation pages the definition was read from.
     #[serde(default)]
     pub sources: Vec<String>,
+}
+
+/// One API of a provider: its own base and scopes, the provider's client,
+/// hosts and token. `sesame login <service>` adds its scopes to those granted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Service {
+    #[serde(default)]
+    pub about: String,
+    /// Base for relative `sesame api <service>` paths; on one of the provider's hosts.
+    pub api_base: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// What `sesame setup` adds for this service (Google: enable its API).
+    #[serde(default)]
+    pub setup: Vec<SetupStep>,
 }
 
 fn space() -> String {
     " ".into()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SetupStep {
     pub title: String,
@@ -101,6 +144,27 @@ pub enum TokenBody {
     #[default]
     Form,
     Json,
+}
+
+/// How the authorization code gets back from the browser.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Redirect {
+    /// `http://localhost:<port>/callback`, which login listens on.
+    #[default]
+    Loopback,
+    /// `https://localhost:<redirect_port>/callback`, for providers that accept
+    /// only https callbacks: nothing listens, the browser fails to open it, and
+    /// the person pastes the address it ended on into the terminal.
+    HttpsPaste,
+}
+
+fn default_scope_param() -> String {
+    "scope".into()
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -145,15 +209,30 @@ pub fn config_dir() -> PathBuf {
 }
 
 /// The definition in force: `built_in` (if the name has one) with `user`'s
-/// fields over it. The one place a definition is validated: every value
+/// fields over it; a `services.<name>` field replaces that one service, or,
+/// when null, drops it. The one place a definition is validated: every value
 /// written to `sesame.db` passes through here first, each field by its kind
-/// in the field table, then the fields that go together.
+/// in the field table, then what the fields say together.
 fn effective(name: &str, built_in: Option<&Provider>, user: &Fields) -> Result<Provider, String> {
-    let mut fields = match built_in {
-        Some(p) => as_fields(p),
-        None => Fields::new(),
+    let mut fields = built_in.map(as_fields).unwrap_or_default();
+    let mut services = match fields.remove("services") {
+        Some(Value::Object(m)) => m,
+        _ => Map::new(),
     };
-    fields.extend(user.clone());
+    for (k, v) in user {
+        match k.strip_prefix(SERVICE_FIELD) {
+            Some(s) if v.is_null() => {
+                services.remove(s);
+            }
+            Some(s) => {
+                services.insert(s.into(), v.clone());
+            }
+            None => {
+                fields.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    fields.insert("services".into(), Value::Object(services));
     let err = |e: String| format!("provider `{name}`: {e}");
     fields::check(&fields).map_err(err)?;
     let p: Provider =
@@ -162,10 +241,10 @@ fn effective(name: &str, built_in: Option<&Provider>, user: &Fields) -> Result<P
     Ok(p)
 }
 
-fn as_fields(p: &Provider) -> Fields {
+fn as_fields<T: Serialize>(p: &T) -> Fields {
     match serde_json::to_value(p) {
         Ok(Value::Object(m)) => m,
-        _ => unreachable!("a Provider serializes to an object"),
+        _ => unreachable!("a Provider or Service serializes to an object"),
     }
 }
 
@@ -187,8 +266,19 @@ fn defaults() -> Fields {
     d
 }
 
-/// Every provider in force, given the stored fields of all of them.
-fn all_from(mut user: BTreeMap<String, Fields>) -> Result<BTreeMap<String, Provider>, String> {
+/// `base`'s value for a stored field name, reaching into `services` for a
+/// `services.<name>` field.
+fn base_value<'a>(base: &'a Fields, field: &str) -> Option<&'a Value> {
+    match field.strip_prefix(SERVICE_FIELD) {
+        Some(s) => base.get("services").and_then(|m| m.get(s)),
+        None => base.get(field),
+    }
+}
+
+/// Every provider in force, from the person's stored fields by provider. The
+/// one place names are checked across providers: a service's name is used
+/// like a provider's, so the two share one namespace.
+fn resolve(mut user: BTreeMap<String, Fields>) -> Result<BTreeMap<String, Provider>, String> {
     let mut map = BTreeMap::new();
     for (name, p) in built_in::all() {
         let f = user.remove(&name).unwrap_or_default();
@@ -197,78 +287,146 @@ fn all_from(mut user: BTreeMap<String, Fields>) -> Result<BTreeMap<String, Provi
     for (name, f) in user {
         map.insert(name.clone(), effective(&name, None, &f)?);
     }
+    let mut owner: BTreeMap<&str, &str> = BTreeMap::new();
+    for (provider, p) in &map {
+        for service in p.services.keys() {
+            if map.contains_key(service) {
+                return Err(format!(
+                    "service `{service}` of `{provider}`: `{service}` is already a provider, \
+                     and a service and a provider cannot share a name"
+                ));
+            }
+            if let Some(other) = owner.insert(service, provider) {
+                return Err(format!(
+                    "service `{service}`: both `{other}` and `{provider}` have one by that name"
+                ));
+            }
+        }
+    }
     Ok(map)
 }
 
 pub fn all() -> Result<BTreeMap<String, Provider>, String> {
-    all_from(Store::open()?.provider_fields()?)
+    resolve(Store::open()?.provider_fields()?)
 }
 
-fn unknown(name: &str, names: impl Iterator<Item = String>) -> String {
-    let names: Vec<String> = names.collect();
+fn unknown(name: &str, all: &BTreeMap<String, Provider>) -> String {
+    let names: Vec<&str> = all.keys().map(String::as_str).collect();
+    let mut services: Vec<&str> = all
+        .values()
+        .flat_map(|p| p.services.keys().map(String::as_str))
+        .collect();
+    services.sort();
+    let services = if services.is_empty() {
+        String::new()
+    } else {
+        format!("; or a service: {}", services.join(", "))
+    };
     format!(
-        "unknown provider `{name}`; choose one of: {}",
+        "unknown provider `{name}`; choose one of: {}{services}",
         names.join(", ")
     )
 }
 
-pub fn get(name: &str) -> Result<Provider, String> {
-    let mut all = all()?;
-    all.remove(name)
-        .ok_or_else(|| unknown(name, all.into_keys()))
+/// What a name on the command line means: a provider, or one of its services.
+/// The token, client and hosts are always the provider's.
+pub struct Target {
+    pub provider: String,
+    pub p: Provider,
+    pub service: Option<String>,
 }
 
-/// Validates `name`'s new stored fields against everything else stored, and
-/// writes them: a fixed callback port is one provider's only, since two
-/// logins cannot listen on it, and each registers it as its own.
-fn save(s: &Store, name: &str, built_in: Option<&Provider>, user: Fields) -> Result<(), String> {
-    let p = effective(name, built_in, &user)?;
-    if let Some(port) = p.redirect_port {
-        let mut stored = s.provider_fields()?;
-        stored.remove(name);
-        let others = all_from(stored)?;
-        if let Some((other, _)) = others
-            .iter()
-            .find(|(o, q)| o.as_str() != name && q.redirect_port == Some(port))
-        {
-            return Err(format!(
-                "provider `{name}`: redirect_port {port} is taken by `{other}`; \
-                 pick another port"
-            ));
-        }
+impl Target {
+    pub fn service(&self) -> Option<&Service> {
+        self.service.as_ref().and_then(|s| self.p.services.get(s))
     }
-    s.save_provider_fields(name, &user)
+
+    /// Base for relative API paths: the service's, else the provider's.
+    pub fn api_base(&self) -> &str {
+        self.service().map_or(&self.p.api_base, |s| &s.api_base)
+    }
 }
 
-/// `sesame provider add`: a new provider, all of whose fields are the person's.
-pub fn add(name: &str, fields: Fields) -> Result<(), String> {
+pub fn find(name: &str) -> Result<Target, String> {
+    let mut all = all()?;
+    if let Some(p) = all.remove(name) {
+        return Ok(Target {
+            provider: name.into(),
+            p,
+            service: None,
+        });
+    }
+    let provider = all
+        .iter()
+        .find(|(_, p)| p.services.contains_key(name))
+        .map(|(n, _)| n.clone());
+    match provider {
+        Some(provider) => Ok(Target {
+            p: all.remove(&provider).unwrap_or_else(|| unreachable!()),
+            provider,
+            service: Some(name.into()),
+        }),
+        None => Err(unknown(name, &all)),
+    }
+}
+
+/// Refuses `name`'s fixed callback port when another provider has it: two
+/// logins cannot listen on one port, and each registers it as its own.
+fn port_is_free(all: &BTreeMap<String, Provider>, name: &str) -> Result<(), String> {
+    let Some(port) = all.get(name).and_then(|p| p.redirect_port) else {
+        return Ok(());
+    };
+    match all
+        .iter()
+        .find(|(o, p)| o.as_str() != name && p.redirect_port == Some(port))
+    {
+        Some((other, _)) => Err(format!(
+            "provider `{name}`: redirect_port {port} is taken by `{other}`; pick another port"
+        )),
+        None => Ok(()),
+    }
+}
+
+fn check_name(what: &str, name: &str) -> Result<(), String> {
     if name.is_empty()
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err(format!(
-            "provider name `{name}`: use letters, digits, `-` and `_`"
+            "{what} name `{name}`: use letters, digits, `-` and `_`"
         ));
     }
+    Ok(())
+}
+
+/// `sesame provider add`: a new provider, all of whose fields are the person's.
+pub fn add(name: &str, mut fields: Fields) -> Result<(), String> {
+    check_name("provider", name)?;
     if built_in::all().contains_key(name) {
         return Err(format!(
             "`{name}` is a built-in provider; change its fields with `sesame provider set {name}`"
         ));
     }
+    // A new provider has no service to drop.
+    fields.retain(|_, v| !v.is_null());
     let store = Store::open()?;
     store.locked(|s| {
-        if s.provider_fields()?.contains_key(name) {
+        let mut all = s.provider_fields()?;
+        if all.contains_key(name) {
             return Err(format!(
                 "provider `{name}` exists; change it with `sesame provider set {name}`"
             ));
         }
-        save(s, name, None, fields)
+        all.insert(name.into(), fields.clone());
+        port_is_free(&resolve(all)?, name)?;
+        s.save_provider_fields(name, &fields)
     })
 }
 
-/// `sesame provider set`: changes the given fields. For a built-in provider
-/// only the fields that differ from the built-in definition are stored.
+/// `sesame provider set`: changes the given fields; a service's given keys
+/// replace only those of that service. For a built-in provider only the
+/// fields that differ from the built-in definition are stored.
 pub fn set(name: &str, fields: Fields) -> Result<(), String> {
     let built_in = built_in::all().remove(name);
     let store = Store::open()?;
@@ -283,12 +441,32 @@ pub fn set(name: &str, fields: Fields) -> Result<(), String> {
                 ));
             }
         };
-        user.extend(fields);
-        if let Some(p) = &built_in {
-            let base = as_fields(p);
-            user.retain(|k, v| base.get(k) != Some(v));
+        let services = effective(name, built_in.as_ref(), &user)
+            .map(|p| p.services)
+            .unwrap_or_default();
+        for (k, v) in fields {
+            let v = match (k.strip_prefix(SERVICE_FIELD), v) {
+                (Some(svc), Value::Null) if !services.contains_key(svc) => {
+                    return Err(format!("provider `{name}` has no service `{svc}`"));
+                }
+                (Some(svc), Value::Object(given)) => {
+                    let mut m = services.get(svc).map(as_fields).unwrap_or_default();
+                    m.extend(given);
+                    Value::Object(m)
+                }
+                (_, v) => v,
+            };
+            user.insert(k, v);
         }
-        save(s, name, built_in.as_ref(), user)
+        let base = built_in.as_ref().map(as_fields).unwrap_or_default();
+        user.retain(|k, v| match base_value(&base, k) {
+            // Dropping a service only means something for one the built-in has.
+            b if v.is_null() => b.is_some(),
+            b => b != Some(v),
+        });
+        all.insert(name.into(), user.clone());
+        port_is_free(&resolve(all)?, name)?;
+        s.save_provider_fields(name, &user)
     })
 }
 
@@ -301,7 +479,7 @@ fn layers(name: &str) -> Result<(Option<Provider>, Fields, Provider), String> {
         .remove(name)
         .unwrap_or_default();
     if built_in.is_none() && user.is_empty() {
-        return Err(unknown(name, all()?.into_keys()));
+        return Err(unknown(name, &all()?));
     }
     let p = effective(name, built_in.as_ref(), &user)?;
     Ok((built_in, user, p))
@@ -309,26 +487,32 @@ fn layers(name: &str) -> Result<(Option<Provider>, Fields, Provider), String> {
 
 /// `sesame provider show`: the definition in force, field by field of the
 /// table, each with where it comes from: `built-in`, `user`, or `default`
-/// (unset, so the default holds). A field without a value is left out.
+/// (unset, so the default holds); a field without a value is left out.
+/// Each service is its own field, `services.<name>`, as `sesame.db` keeps it.
 pub fn show(name: &str) -> Result<Value, String> {
     let (built_in, user, p) = layers(name)?;
-    let mut values = as_fields(&p);
-    let mut shown = Fields::new();
-    for f in FIELDS {
-        let Some(value) = values.remove(f.name) else {
-            continue;
-        };
-        let from = if user.contains_key(f.name) {
+    let from = |k: &str| {
+        if user.contains_key(k) {
             "user"
         } else if built_in.is_some() {
             "built-in"
         } else {
             "default"
-        };
-        shown.insert(
-            f.name.into(),
-            serde_json::json!({ "value": value, "from": from }),
-        );
+        }
+    };
+    let mut values = as_fields(&p);
+    let mut shown = Map::new();
+    for f in FIELDS {
+        if f.name == "services" {
+            for (svc, s) in &p.services {
+                let k = format!("{SERVICE_FIELD}{svc}");
+                let entry = serde_json::json!({ "value": s, "from": from(&k) });
+                shown.insert(k, entry);
+            }
+        } else if let Some(value) = values.remove(f.name) {
+            let entry = serde_json::json!({ "value": value, "from": from(f.name) });
+            shown.insert(f.name.into(), entry);
+        }
     }
     Ok(Value::Object(shown))
 }
@@ -354,12 +538,8 @@ pub fn export(name: &str) -> Result<String, String> {
         if defaults.get(f.name) == Some(v) && !user.contains_key(f.name) {
             continue;
         }
-        let given = f.kind.flag_values(v);
-        if given.is_empty() {
-            // An empty list the person gave is the default: no flag says it.
-            continue;
-        }
-        for g in given {
+        // An empty list the person gave is the default: no flag says it.
+        for g in f.kind.flag_values(v) {
             out.push_str(&format!(" \\\n  --{} {}", f.flag, fields::quote(&g)));
         }
     }
@@ -382,17 +562,25 @@ pub fn remove(name: &str) -> Result<String, String> {
         (true, true) => Ok(format!("`{name}` is back to its built-in definition.")),
         (true, false) => Ok(format!("`{name}` already has its built-in definition.")),
         (false, true) => Ok(format!("Removed the provider `{name}`.")),
-        (false, false) => Err(unknown(name, all()?.into_keys())),
+        (false, false) => Err(unknown(name, &all()?)),
     }
 }
 
-/// The loopback redirect URL login listens on, for the port it bound.
-pub fn redirect_uri(host: RedirectHost, port: u16) -> String {
-    format!("http://{}:{port}/callback", host.as_str())
+fn check_steps(steps: &[SetupStep]) -> Result<(), String> {
+    for s in steps {
+        if s.title.trim().is_empty() {
+            return Err("a setup step has no title".into());
+        }
+        if let Some(page) = &s.page {
+            check_url("setup page", page)?;
+        }
+    }
+    Ok(())
 }
 
 impl Provider {
-    /// What one field's kind does not say: the fields that go together.
+    /// What one field's kind in the table does not say: the fields that go
+    /// together, the steps and the services.
     fn check(&self) -> Result<(), String> {
         match (&self.identity_url, &self.identity_field) {
             (None, None) => {}
@@ -412,15 +600,64 @@ impl Provider {
         if self.identity_body.is_some() && self.identity_url.is_none() {
             return Err("identity_body without identity_url: give the URL it goes to".into());
         }
+        if self.redirect == Redirect::HttpsPaste && self.redirect_port.is_none() {
+            return Err(
+                "redirect https-paste needs a redirect_port: the callback URL registered with the provider"
+                    .into(),
+            );
+        }
+        if self.scope_param.is_empty() || self.scope_param.contains([' ', '&', '=']) {
+            return Err(format!(
+                "scope_param `{}`: a URL parameter name",
+                self.scope_param
+            ));
+        }
+        if !self.token_path.is_empty() && !self.token_path.starts_with('/') {
+            return Err(format!(
+                "token_path `{}`: a JSON pointer, e.g. `/authed_user`; empty for the top level",
+                self.token_path
+            ));
+        }
+        check_steps(&self.setup)?;
+        for (n, s) in &self.services {
+            check_name("service", n)?;
+            let base = s.api_base.replace("{resource_id}", "x");
+            check_url(&format!("service `{n}` api_base"), &base)?;
+            let host = url::Url::parse(&base)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from))
+                .unwrap_or_default();
+            if !self.allows_host(&host) {
+                return Err(format!(
+                    "service `{n}` api_base `{}`: the token goes only to hosts, and {host} is not one",
+                    s.api_base
+                ));
+            }
+            check_steps(&s.setup).map_err(|e| format!("service `{n}`: {e}"))?;
+        }
         Ok(())
+    }
+
+    /// The redirect URL login sends, for the port it uses.
+    pub fn redirect_uri(&self, port: u16) -> String {
+        let scheme = match self.redirect {
+            Redirect::Loopback => "http",
+            Redirect::HttpsPaste => "https",
+        };
+        format!("{scheme}://{}:{port}/callback", self.redirect_host.as_str())
     }
 
     /// The redirect URL to register with the provider: fixed when `redirect_port` is.
     pub fn callback(&self) -> String {
         match self.redirect_port {
-            Some(port) => redirect_uri(self.redirect_host, port),
-            None => format!("http://{}:<any port>/callback", self.redirect_host.as_str()),
+            Some(port) => self.redirect_uri(port),
+            None => self.redirect_uri(0).replace(":0/", ":<any port>/"),
         }
+    }
+
+    /// Where a refresh goes: `refresh_url`, or else the token endpoint.
+    pub fn refresh_endpoint(&self) -> &str {
+        self.refresh_url.as_deref().unwrap_or(&self.token_url)
     }
 
     /// The first of `error_fields` a 2xx JSON answer carries with a value that
@@ -462,6 +699,14 @@ mod tests {
         v.as_object().unwrap().clone()
     }
 
+    /// The fields `sesame provider add` makes of these flags.
+    fn flags(args: &[&str]) -> Result<Value, String> {
+        use clap::{Args, FromArgMatches};
+        let cmd = FieldFlags::augment_args(clap::Command::new("t").no_binary_name(true));
+        let m = cmd.try_get_matches_from(args).map_err(|e| e.to_string())?;
+        Ok(Value::Object(FieldFlags::from_arg_matches(&m).unwrap().0))
+    }
+
     /// Every field of `Provider` has a row in the field table, and every row
     /// is a field: the struct literal stops compiling when a field is added,
     /// and this test then fails until the table has its row, question included.
@@ -471,17 +716,23 @@ mod tests {
             about: "a".into(),
             auth_url: "https://a.example/auth".into(),
             token_url: "https://a.example/token".into(),
+            refresh_url: Some("https://a.example/refresh".into()),
             api_base: "https://a.example".into(),
             hosts: vec!["a.example".into()],
             scopes: vec!["s".into()],
+            scope_param: "user_scope".into(),
             scope_separator: ",".into(),
+            pkce: false,
+            token_path: "/authed_user".into(),
             auth_params: BTreeMap::from([("k".into(), "v".into())]),
             token_body: TokenBody::Json,
             client_auth: ClientAuth::Basic,
             api_headers: BTreeMap::from([("X-A".into(), "1".into())]),
             resources_url: Some("https://a.example/sites".into()),
             site_name_field: Some("site".into()),
+            redirect: Redirect::HttpsPaste,
             redirect_port: Some(9),
+            code_seconds: Some(30),
             redirect_host: RedirectHost::Loopback,
             device_url: Some("https://a.example/device".into()),
             identity_url: Some("https://a.example/me".into()),
@@ -493,6 +744,15 @@ mod tests {
                 page: None,
                 details: String::new(),
             }],
+            services: BTreeMap::from([(
+                "svc".into(),
+                Service {
+                    about: String::new(),
+                    api_base: "https://a.example/svc".into(),
+                    scopes: vec![],
+                    setup: vec![],
+                },
+            )]),
             sources: vec!["https://a.example/docs".into()],
         };
         let mut have: Vec<String> = as_fields(&every).keys().cloned().collect();
@@ -536,6 +796,8 @@ mod tests {
                         "api_base": "https://a.example", "hosts": ["a.example"],
                     }));
                     ok.insert(f.name.into(), json!(w));
+                    // https-paste needs its fixed port.
+                    ok.insert("redirect_port".into(), json!(9));
                     let p = effective("a", None, &ok).unwrap();
                     assert_eq!(as_fields(&p)[f.name], json!(w), "{}", f.name);
                 }
@@ -558,12 +820,128 @@ mod tests {
     #[test]
     fn built_ins_are_valid() {
         let all = built_in::all();
-        for name in ["github", "google", "jira", "linear", "notion"] {
+        for name in [
+            "figma", "github", "google", "jira", "linear", "notion", "slack",
+        ] {
             assert!(all.contains_key(name), "{name}");
         }
         for (name, p) in &all {
             effective(name, Some(p), &Fields::new()).unwrap();
         }
+    }
+
+    #[test]
+    fn google_services() {
+        let g = built_in("google");
+        assert_eq!(g.scopes, ["openid", "email"]);
+        assert_eq!(g.auth_params["include_granted_scopes"], "true");
+        let auth = |s: &str| format!("https://www.googleapis.com/auth/{s}");
+        for (name, base, scopes) in [
+            (
+                "drive",
+                "https://www.googleapis.com/drive/v3",
+                vec!["drive.readonly"],
+            ),
+            (
+                "docs",
+                "https://docs.googleapis.com/v1",
+                vec!["documents.readonly"],
+            ),
+            (
+                "youtube",
+                "https://www.googleapis.com/youtube/v3",
+                vec!["youtube.readonly"],
+            ),
+            (
+                "calendar",
+                "https://www.googleapis.com/calendar/v3",
+                vec!["calendar.readonly", "calendar.events"],
+            ),
+            (
+                "gmail",
+                "https://gmail.googleapis.com/gmail/v1",
+                vec!["gmail.readonly", "gmail.send"],
+            ),
+        ] {
+            let s = &g.services[name];
+            assert_eq!(s.api_base, base, "{name}");
+            let want: Vec<String> = scopes.iter().map(|s| auth(s)).collect();
+            assert_eq!(s.scopes, want, "{name}");
+            assert!(!s.setup.is_empty(), "{name}");
+        }
+        assert_eq!(g.services.len(), 5);
+    }
+
+    #[test]
+    fn a_changed_service_is_stored_alone() {
+        let g = built_in("google");
+        let base = as_fields(&g);
+        let mut gmail = as_fields(&g.services["gmail"]);
+        assert_eq!(
+            base_value(&base, "services.gmail"),
+            Some(&Value::Object(gmail.clone()))
+        );
+        gmail.insert("scopes".into(), json!(["x"]));
+        let user = fields(json!({"services.gmail": gmail, "services.youtube": null}));
+        let p = effective("google", Some(&g), &user).unwrap();
+        assert_eq!(p.services["gmail"].scopes, ["x"]);
+        assert_eq!(p.services["drive"], g.services["drive"]);
+        assert!(!p.services.contains_key("youtube"));
+    }
+
+    #[test]
+    fn service_flags() {
+        assert_eq!(
+            flags(&[
+                "--service",
+                "name=a,api-base=https://a.example/v1,scope=r,scope=w,about=A",
+                "--service",
+                r#"{"name": "b", "api_base": "https://b.example"}"#,
+                "--drop-service",
+                "c",
+            ])
+            .unwrap(),
+            json!({
+                "services.a": {"api_base": "https://a.example/v1", "scopes": ["r", "w"], "about": "A"},
+                "services.b": {"api_base": "https://b.example"},
+                "services.c": null,
+            })
+        );
+        for (bad, want) in [
+            ("api-base=https://a.example", "has no name"),
+            ("name=a,base=x", "unknown key `base`"),
+            ("name=a,x", "not key=value"),
+            ("[1]", "not key=value"),
+        ] {
+            let e = flags(&["--service", bad]).unwrap_err();
+            assert!(e.contains(want), "{bad}: {e}");
+        }
+        let ok = json!({
+            "auth_url": "https://a.example/auth",
+            "token_url": "https://a.example/token",
+            "api_base": "https://api.a.example",
+            "hosts": ["*.a.example"],
+        });
+        for (svc, want) in [
+            (
+                json!({"api_base": "https://evil.example"}),
+                "evil.example is not one",
+            ),
+            (json!({"api_base": "nope"}), "service `s` api_base"),
+            (json!({"scopes": []}), "missing field `api_base`"),
+        ] {
+            let mut f = fields(ok.clone());
+            f.insert("services.s".into(), svc);
+            let e = effective("a", None, &f).unwrap_err();
+            assert!(e.contains(want), "{e}");
+        }
+        let mut f = fields(ok);
+        f.insert(
+            "services.b d".into(),
+            json!({"api_base": "https://x.a.example"}),
+        );
+        let e = effective("a", None, &f).unwrap_err();
+        assert!(e.contains("service name `b d`"), "{e}");
     }
 
     #[test]
@@ -612,6 +990,17 @@ mod tests {
             ),
             ("site_name_field", json!(""), "site_name_field is empty"),
             ("redirect_port", json!(0), "redirect_port 0"),
+            ("redirect", json!("https-paste"), "needs a redirect_port"),
+            (
+                "redirect",
+                json!("carrier-pigeon"),
+                "not one of loopback, https-paste",
+            ),
+            ("scope_param", json!(""), "scope_param"),
+            ("token_path", json!("authed_user"), "JSON pointer"),
+            ("pkce", json!("maybe"), "expected a boolean"),
+            ("refresh_url", json!("nope"), "refresh_url"),
+            ("code_seconds", json!(0), "code_seconds 0"),
             (
                 "redirect_host",
                 json!("example.com"),

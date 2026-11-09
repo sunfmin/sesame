@@ -6,26 +6,36 @@ their REST APIs with the stored token.
 ```sh
 sesame setup google                          # first time: how to register the OAuth app
 sesame client google --client-id <id>        # once: the OAuth app to sign in with (secret is prompted)
-sesame login google                          # opens the provider's OAuth page; token goes to ~/.config/sesame/sesame.db
-sesame api google /drive/v3/files            # GET, token attached, refreshed when it expires
-sesame api google https://docs.googleapis.com/v1/documents/<id>
-sesame api google '/youtube/v3/channels?part=snippet&mine=true'
+sesame login drive                           # opens Google's OAuth page; token goes to ~/.config/sesame/sesame.db
+sesame api drive /files                      # GET https://www.googleapis.com/drive/v3/files, refreshed when it expires
+sesame login gmail                           # adds Gmail's scopes to the same Google token
+sesame api gmail /users/me/messages          # https://gmail.googleapis.com/gmail/v1/users/me/messages
+sesame login calendar
+sesame api calendar /calendars/primary/events
+sesame api docs /documents/<id>
+sesame api youtube '/channels?part=snippet&mine=true'
+sesame api google https://www.googleapis.com/drive/v3/about?fields=user   # a full URL on the provider's hosts
 sesame api jira /rest/api/3/myself
 sesame login github                          # device flow: prints a code to enter on github.com/login/device
 sesame api github /user
 sesame api github /graphql -d '{"query":"{ viewer { login } }"}'
 sesame api jira /rest/api/3/issue -d @issue.json      # -d implies POST; -X, -H, -i as in curl
+sesame api slack /conversations.list                  # as yourself, with a Slack user token
+sesame api slack /chat.postMessage -d '{"channel":"C…","text":"hi"}'
+sesame login slack --token                            # or store a token you copied (hidden input)
 sesame api notion /search -d '{}'             # Notion-Version is sent for you; -H replaces it
+sesame api figma /me
+sesame api figma /files/<key>
 sesame api linear /graphql -d '{"query":"{ viewer { id name } }"}'   # GraphQL `errors` exit non-zero
 curl -H "Authorization: Bearer $(sesame token jira)" ...
-sesame providers                              # who you are signed in to
+sesame providers                              # who you are signed in to, and each service's access
 sesame logout jira                            # forgets the local token only
 ```
 
 ## How it works
 
-- **Provider** = one OAuth realm: one login, one token. The built-ins (github, google,
-  jira, linear, notion) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
+- **Provider** = one OAuth realm: one login, one token. The built-ins (figma, github, google,
+  jira, linear, notion, slack) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
   Your own providers, and your changes to a built-in one, are stored in
   `sesame.db` and managed with commands; there is no config file to edit:
 
@@ -43,7 +53,12 @@ sesame logout jira                            # forgets the local token only
   sends the client as HTTP Basic instead of in the body; `--api-header
   'Name: value'` goes on every `sesame api` request (a `-H` of that name
   replaces it); `--site-name-field` names the token response's field that
-  `sesame providers` shows as the site (Notion's `workspace_name`).
+  `sesame providers` shows as the site (Notion's `workspace_name`);
+  `--refresh-url` sends refreshes to their own endpoint (Figma's
+  `/v1/oauth/refresh`; without it, the token endpoint); `--code-seconds`
+  says how long the authorization code lasts (Figma: 30), so login asks for
+  the pasted address within that time and a refused exchange says the code
+  most likely expired.
 
   A built-in provider's fields you did not `set` follow each new version of
   sesame. Among the fields: how the scopes are joined in the authorization
@@ -62,6 +77,24 @@ sesame logout jira                            # forgets the local token only
   provider add`. Store each doc page with `--source`; `sesame provider export
   <name>` prints the `add` command that makes the definition again, to share
   it or turn it into a built-in.
+- **Service** = one API of a provider, reached with the provider's client and
+  token: Google's are `drive`, `docs`, `youtube`, `calendar` and `gmail`. A
+  service has its own `api_base` and scopes, and its name is used like a
+  provider's (the two share one namespace). `sesame login <service>` signs in
+  to the provider asking for the scopes already granted plus the service's
+  (Google adds `include_granted_scopes=true`), and the new token replaces the
+  old one; `sesame login google` alone asks only for `openid email`. A call
+  refused with a 403 for a missing scope says which `sesame login <service>`
+  adds it. Add or change one with `--service`:
+
+  ```sh
+  sesame provider set acme --service 'name=billing,api-base=https://api.acme.example/billing,scope=billing.read'
+  sesame provider set google --service 'name=gmail,scope=https://www.googleapis.com/auth/gmail.readonly'  # only the keys given change
+  sesame provider set acme --drop-service billing
+  ```
+
+  `sesame provider show` lists each as `services.<name>`. A service with steps
+  of its own (enabling its API in Google Cloud) adds them to `sesame setup`.
 - **Login** is the authorization-code flow with PKCE and a loopback redirect
   (`http://localhost:<port>/callback`, or `127.0.0.1` for a provider whose
   `redirect_host` says so). On a remote machine (SSH), open the printed URL
@@ -70,6 +103,14 @@ sesame logout jira                            # forgets the local token only
   prints a code to enter on the provider's page, from any machine, and needs no
   client secret; `sesame login <provider> --browser` takes the loopback redirect.
   A provider with an `identity_url` records who signed in, shown by `sesame providers`.
+  A provider that takes only https callbacks (`--redirect https-paste`,
+  as slack) uses `https://localhost:<redirect-port>/callback`: nothing listens
+  there, the browser says it cannot open the page, and you paste its address.
+  The fields `scope_param`, `pkce`, `token_path`, `site_name_field` and `error_fields`
+  describe the rest of a provider's OAuth dialect (`sesame provider add --help`).
+- **`login --token`** (or `--token-stdin`) stores a token you got another way,
+  such as a Slack app's User OAuth Token; it has no refresh, and `sesame
+  providers` marks it `pasted token`.
 - **Secrets** (clients and tokens) and provider definitions are stored **in plaintext** in one SQLite
   database, `~/.config/sesame/sesame.db` (`$SESAME_CONFIG_DIR/sesame.db` when
   set), protected only by file permissions, as gcloud does: the file is 0600,
@@ -77,7 +118,8 @@ sesame logout jira                            # forgets the local token only
   synced folder.
 - **`logout`** deletes the local token only; to revoke it, remove the app's
   access on the provider's side (Google account permissions, Atlassian
-  connected apps, Notion's Settings > Connections, GitHub's Settings > Applications).
+  connected apps, Notion's Settings > Connections, GitHub's Settings > Applications,
+  the Slack app's page).
 - **`api`** sends the token only to the provider's `hosts`; a 401 triggers one
   refresh and retry. It exits non-zero on a non-2xx status, and on a 2xx whose
   JSON carries one of the provider's `error_fields` not empty.

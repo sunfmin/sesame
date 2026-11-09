@@ -182,14 +182,18 @@ fn draft(url: &url::Url, m: &serde_json::Map<String, Value>) -> String {
     let mut pkce_answered = false;
     if let Some(ms) = words("code_challenge_methods_supported") {
         pkce_answered = true;
-        notes.push(if ms.contains(&"S256") {
-            "PKCE: S256 is supported, which sesame sends.".into()
+        if ms.contains(&"S256") {
+            notes.push(
+                "PKCE: S256 is supported, which sesame sends (pkce is on by default).".into(),
+            );
+            answered.push("pkce");
         } else {
-            format!(
-                "PKCE: only {} listed, and sesame sends S256: login may be refused.",
+            notes.push(format!(
+                "PKCE: only {} listed, and sesame sends S256 only: try --pkce false if the \
+                 platform allows the code flow without PKCE.",
                 ms.join(", ")
-            )
-        });
+            ));
+        }
     }
     if let Some(scopes) = words("scopes_supported") {
         notes.push(format!(
