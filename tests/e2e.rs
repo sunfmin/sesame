@@ -278,7 +278,7 @@ fn first_use_points_to_setup() {
     assert!(!ok);
     assert!(out.contains("unknown provider `nope`"), "{out}");
     assert!(
-        out.contains("acme, figma, github, google, jira, linear, notion"),
+        out.contains("acme, figma, github, google, hubspot, jira, linear, notion"),
         "{out}"
     );
 
@@ -1751,5 +1751,234 @@ fn services_share_one_token() {
         log.iter().any(|l| l.starts_with("/beta/v2/mail ")),
         "{log:?}"
     );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A HubSpot-shaped fake: the code is exchanged and refreshed at
+/// `/oauth/v3/token` with the client credentials in the form body, access
+/// tokens last 30 minutes, and the account is the number `portalId`.
+fn fake_hubspot() -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        let mut n = 1;
+        for stream in listener.incoming().flatten() {
+            let (target, headers, body) = read_request(&stream);
+            let auth = header(&headers, "authorization").unwrap_or_default();
+            log2.lock().unwrap().push(format!("{target} {auth} {body}"));
+            let mut s = stream;
+            let token = |n: i32| {
+                format!(
+                    r#"{{"access_token":"access-{n}","refresh_token":"refresh-1","expires_in":1800,"hub_id":247935561,"token_type":"bearer"}}"#
+                )
+            };
+            if target.starts_with("/oauth/authorize") {
+                let loc = format!(
+                    "{}?code=the-code&state={}",
+                    query(&target, "redirect_uri").unwrap(),
+                    query(&target, "state").unwrap()
+                );
+                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
+            } else if target == "/oauth/v3/token" {
+                let body_creds = body.contains("client_id=cid")
+                    && body.contains("client_secret=the-secret")
+                    && !auth.starts_with("Basic");
+                if !body_creds {
+                    reply(&mut s, "401 Unauthorized", "", r#"{"status":"error"}"#);
+                } else if body.contains("grant_type=authorization_code") {
+                    reply(&mut s, "200 OK", "", &token(n));
+                } else if body.contains("grant_type=refresh_token")
+                    && body.contains("refresh_token=refresh-1")
+                {
+                    n += 1;
+                    reply(&mut s, "200 OK", "", &token(n));
+                } else {
+                    reply(&mut s, "400 Bad Request", "", r#"{"status":"BAD_GRANT"}"#);
+                }
+            } else if auth != format!("Bearer access-{n}") {
+                reply(&mut s, "401 Unauthorized", "", r#"{"status":"error"}"#);
+            } else if target == "/account-info/v3/details" {
+                reply(
+                    &mut s,
+                    "200 OK",
+                    "",
+                    r#"{"portalId":247935561,"uiDomain":"app-na2.hubspot.com"}"#,
+                );
+            } else if target.starts_with("/crm/v3/objects/contacts") {
+                reply(&mut s, "200 OK", "", r#"{"results":[{"id":"1"}]}"#);
+            } else {
+                reply(&mut s, "404 Not Found", "", "");
+            }
+        }
+    });
+    (port, log)
+}
+
+/// Someone who added `hubspot` themselves (`sesame provider add`, every field
+/// stored) upgrades to the version where it is built in: the fields equal to
+/// the built-in show as `built-in`, only real changes as `user`. Login reads
+/// the numeric `portalId`; a token about to expire refreshes at the same v3
+/// endpoint with the credentials in the body. `setup` prints the built-in's steps.
+#[test]
+fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
+    let (port, log) = fake_hubspot();
+    let tmp = std::env::temp_dir().join(format!("sesame-hubspot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let sesame = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        c.args(args).env("SESAME_CONFIG_DIR", &config);
+        c
+    };
+    let run = |args: &[&str]| {
+        let out = sesame(args).output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let db = || rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    };
+
+    // The built-in's setup: its four steps, the fixed localhost callback, the scopes.
+    let (ok, out, err) = run(&["setup", "hubspot"]);
+    assert!(ok, "{err}");
+    for want in [
+        "Install the HubSpot CLI and sign it in",
+        "Create a private OAuth app project",
+        "Set the redirect URL and scopes, then upload",
+        "Copy the client ID and secret",
+        r#""redirectUrls" to ["http://localhost:8754/callback"]"#,
+        "hs project upload --forceCreate",
+        "oauth, crm.objects.contacts.read, crm.objects.contacts.write",
+        "crm.objects.owners.read, crm.objects.tickets.read, crm.objects.tickets.write",
+    ] {
+        assert!(out.contains(want), "no `{want}` in:\n{out}");
+    }
+
+    // Before the upgrade: every field of the definition stored as the person's,
+    // as `sesame provider add hubspot` left it, but pointed at the fake.
+    let (ok, out, err) = run(&["provider", "show", "hubspot"]);
+    assert!(ok, "{err}");
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let free = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let changed = serde_json::json!({
+        "auth_url": format!("{base}/oauth/authorize"),
+        "token_url": format!("{base}/oauth/v3/token"),
+        "api_base": base,
+        "hosts": ["127.0.0.1"],
+        "redirect_port": free,
+        "identity_url": format!("{base}/account-info/v3/details"),
+    });
+    {
+        let db = db();
+        for (field, entry) in shown.as_object().unwrap() {
+            let value = changed.get(field).unwrap_or(&entry["value"]);
+            db.execute(
+                "INSERT INTO provider_fields (provider, field, value) VALUES ('hubspot', ?1, ?2)",
+                [field, &value.to_string()],
+            )
+            .unwrap();
+        }
+    }
+    let (ok, out, err) = run(&["provider", "show", "hubspot"]);
+    assert!(ok, "{err}");
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    for (field, entry) in shown.as_object().unwrap() {
+        let from = if changed.get(field).is_some() {
+            "user"
+        } else {
+            "built-in"
+        };
+        assert_eq!(entry["from"], from, "{field}: {entry}");
+    }
+    assert_eq!(shown["client_auth"]["value"], "body");
+    assert_eq!(shown["redirect_host"]["value"], "localhost");
+
+    let mut c = sesame(&["client", "hubspot", "--client-id", "cid", "--secret-stdin"]);
+    let mut child = c.stdin(Stdio::piped()).spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"the-secret\n")
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let (auth, rest) = browser_login(&sesame, &["login", "hubspot", "--no-browser"]);
+    let q = |k: &str| {
+        auth.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.into_owned())
+    };
+    assert_eq!(
+        q("redirect_uri").unwrap(),
+        format!("http://localhost:{free}/callback")
+    );
+    assert!(
+        q("scope")
+            .unwrap()
+            .starts_with("oauth crm.objects.contacts.read ")
+    );
+    assert_eq!(q("code_challenge_method").as_deref(), Some("S256"));
+    assert!(
+        rest.contains("Logged in to `hubspot` (247935561)"),
+        "{rest}"
+    );
+    let (_, out, _) = run(&["providers"]);
+    assert!(out.contains("logged in (247935561)"), "{out}");
+
+    let expires = || {
+        db().query_row(
+            "SELECT expires_at FROM tokens WHERE provider = 'hubspot'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    assert!((expires() - now() - 1800).abs() < 60, "{}", expires());
+
+    let (ok, out, err) = run(&["api", "hubspot", "/crm/v3/objects/contacts?limit=1"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(r#""id":"1""#), "{out}");
+
+    // 29 and a half minutes later: the token has 30 seconds left and is refreshed first.
+    db().execute(
+        "UPDATE tokens SET expires_at = ?1 WHERE provider = 'hubspot'",
+        [now() + 30],
+    )
+    .unwrap();
+    let (ok, out, err) = run(&["api", "hubspot", "/crm/v3/objects/contacts?limit=1"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(r#""id":"1""#), "{out}");
+    assert!(expires() > now() + 1700);
+
+    let log = log.lock().unwrap();
+    let refreshes: Vec<_> = log
+        .iter()
+        .filter(|l| l.contains("grant_type=refresh_token"))
+        .collect();
+    assert_eq!(refreshes.len(), 1, "{log:?}");
+    assert!(refreshes[0].starts_with("/oauth/v3/token "), "{log:?}");
+    assert!(refreshes[0].contains("client_secret=the-secret"), "{log:?}");
+    // Before the expiry, not after a 401: each API call went out once, the
+    // second already with the refreshed token.
+    let calls: Vec<_> = log.iter().filter(|l| l.starts_with("/crm")).collect();
+    assert_eq!(calls.len(), 2, "{log:?}");
+    assert!(calls[1].contains("Bearer access-2"), "{log:?}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
