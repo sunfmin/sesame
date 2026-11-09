@@ -1,15 +1,17 @@
-//! Secrets live in the OS keychain (service `sesame`), or, when SESAME_STORE_DIR is
-//! set, in 0600 files there (headless hosts and tests).
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::path::PathBuf;
+//! Clients and tokens live in one plaintext SQLite database, `<config_dir>/sesame.db`,
+//! guarded by file permissions as gcloud's are: the directory 0700, the file 0600.
+use rusqlite::{Connection, OptionalExtension, params};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Client {
     pub client_id: String,
     pub client_secret: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Token {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -20,78 +22,306 @@ pub struct Token {
     pub resource_name: Option<String>,
 }
 
-pub enum Kind {
-    Client,
-    Token,
+/// The schema, one step per `PRAGMA user_version`: append a step, never edit one.
+const MIGRATIONS: &[&str] = &["
+    CREATE TABLE clients (
+        provider TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        client_secret TEXT
+    );
+    CREATE TABLE tokens (
+        provider TEXT PRIMARY KEY,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT,
+        expires_at INTEGER,
+        scope TEXT,
+        resource_id TEXT,
+        resource_name TEXT
+    );
+"];
+
+/// How long a process waits for another's write (a refresh holds the lock
+/// across its HTTP request, which reqwest gives up on after 30s).
+const BUSY_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub struct Store {
+    conn: Connection,
+    path: PathBuf,
 }
 
-fn key(provider: &str, kind: Kind) -> String {
-    match kind {
-        Kind::Client => format!("{provider}/client"),
-        Kind::Token => format!("{provider}/token"),
+pub fn path() -> PathBuf {
+    crate::providers::config_dir().join("sesame.db")
+}
+
+/// Makes the directory 0700 if missing and the file 0600, tightening a wider one.
+fn prepare(path: &Path) -> Result<(), String> {
+    let at = |e: std::io::Error, p: &Path| format!("{}: {e}", p.display());
+    if let Some(dir) = path.parent() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| at(e, dir))?;
     }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| at(e, path))?;
+    let mode = file
+        .metadata()
+        .map_err(|e| at(e, path))?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| at(e, path))?;
+    }
+    Ok(())
 }
 
-fn dir() -> Option<PathBuf> {
-    std::env::var_os("SESAME_STORE_DIR").map(PathBuf::from)
-}
+impl Store {
+    pub fn open() -> Result<Store, String> {
+        Store::open_at(path())
+    }
 
-pub fn load<T: DeserializeOwned>(provider: &str, kind: Kind) -> Result<Option<T>, String> {
-    let key = key(provider, kind);
-    let text = match dir() {
-        Some(d) => match std::fs::read_to_string(d.join(key.replace('/', "__"))) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.to_string()),
-        },
-        None => match keyring::Entry::new("sesame", &key).and_then(|e| e.get_password()) {
-            Ok(t) => t,
-            Err(keyring::Error::NoEntry) => return Ok(None),
-            Err(e) => return Err(format!("keychain: {e}")),
-        },
-    };
-    serde_json::from_str(&text)
-        .map(Some)
-        .map_err(|e| format!("stored {key}: {e}"))
-}
+    fn open_at(path: PathBuf) -> Result<Store, String> {
+        prepare(&path)?;
+        let conn = Connection::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let store = Store { conn, path };
+        // No WAL: the rollback journal SQLite makes takes the database's 0600.
+        store
+            .conn
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(|e| store.err(e))?;
+        store.locked(|s| {
+            let version: i64 = s
+                .conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .map_err(|e| s.err(e))?;
+            for (i, step) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+                s.conn.execute_batch(step).map_err(|e| s.err(e))?;
+                s.conn
+                    .pragma_update(None, "user_version", i as i64 + 1)
+                    .map_err(|e| s.err(e))?;
+            }
+            Ok(())
+        })?;
+        Ok(store)
+    }
 
-pub fn save<T: Serialize>(provider: &str, kind: Kind, value: &T) -> Result<(), String> {
-    let key = key(provider, kind);
-    let text = serde_json::to_string(value).map_err(|e| e.to_string())?;
-    match dir() {
-        Some(d) => {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(d.join(key.replace('/', "__")))
-                .map_err(|e| e.to_string())?;
-            f.write_all(text.as_bytes()).map_err(|e| e.to_string())
+    fn err(&self, e: rusqlite::Error) -> String {
+        format!("{}: {e}", self.path.display())
+    }
+
+    /// Runs `f` holding the database's write lock, so a read-then-write (a
+    /// refresh) in another process waits for this one rather than racing it.
+    pub fn locked<T>(&self, f: impl FnOnce(&Store) -> Result<T, String>) -> Result<T, String> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| self.err(e))?;
+        match f(self) {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT").map_err(|e| self.err(e))?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
-        None => keyring::Entry::new("sesame", &key)
-            .and_then(|e| e.set_password(&text))
-            .map_err(|e| {
-                format!(
-                    "keychain: {e}. Over SSH the login keychain is locked: run `security unlock-keychain`, or set SESAME_STORE_DIR to keep secrets in 0600 files instead"
-                )
-            }),
+    }
+
+    pub fn client(&self, provider: &str) -> Result<Option<Client>, String> {
+        self.conn
+            .query_row(
+                "SELECT client_id, client_secret FROM clients WHERE provider = ?1",
+                [provider],
+                |r| {
+                    Ok(Client {
+                        client_id: r.get(0)?,
+                        client_secret: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| self.err(e))
+    }
+
+    pub fn save_client(&self, provider: &str, c: &Client) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO clients (provider, client_id, client_secret)
+                 VALUES (?1, ?2, ?3)",
+                params![provider, c.client_id, c.client_secret],
+            )
+            .map(drop)
+            .map_err(|e| self.err(e))
+    }
+
+    pub fn token(&self, provider: &str) -> Result<Option<Token>, String> {
+        self.conn
+            .query_row(
+                "SELECT access_token, refresh_token, expires_at, scope, resource_id, resource_name
+                 FROM tokens WHERE provider = ?1",
+                [provider],
+                |r| {
+                    Ok(Token {
+                        access_token: r.get(0)?,
+                        refresh_token: r.get(1)?,
+                        expires_at: r.get::<_, Option<i64>>(2)?.map(|t| t as u64),
+                        scope: r.get(3)?,
+                        resource_id: r.get(4)?,
+                        resource_name: r.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| self.err(e))
+    }
+
+    pub fn save_token(&self, provider: &str, t: &Token) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO tokens
+                 (provider, access_token, refresh_token, expires_at, scope, resource_id, resource_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    provider,
+                    t.access_token,
+                    t.refresh_token,
+                    t.expires_at.map(|t| t as i64),
+                    t.scope,
+                    t.resource_id,
+                    t.resource_name
+                ],
+            )
+            .map(drop)
+            .map_err(|e| self.err(e))
+    }
+
+    pub fn delete_token(&self, provider: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM tokens WHERE provider = ?1", [provider])
+            .map(drop)
+            .map_err(|e| self.err(e))
     }
 }
 
-pub fn delete(provider: &str, kind: Kind) -> Result<(), String> {
-    let key = key(provider, kind);
-    match dir() {
-        Some(d) => match std::fs::remove_file(d.join(key.replace('/', "__"))) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
-            _ => Ok(()),
-        },
-        None => match keyring::Entry::new("sesame", &key).and_then(|e| e.delete_credential()) {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(format!("keychain: {e}")),
-        },
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sesame-store-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn new_database_is_0600_in_a_0700_directory() {
+        let dir = tmp("new").join("sesame");
+        let db = dir.join("sesame.db");
+        let s = Store::open_at(db.clone()).unwrap();
+        s.save_client(
+            "p",
+            &Client {
+                client_id: "id".into(),
+                client_secret: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&db), 0o600);
+        assert_eq!(s.client("p").unwrap().unwrap().client_id, "id");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn wider_existing_file_is_tightened() {
+        let dir = tmp("wide");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("sesame.db");
+        std::fs::write(&db, b"").unwrap();
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        Store::open_at(db.clone()).unwrap();
+        assert_eq!(mode(&db), 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_read_then_write_waits_instead_of_failing() {
+        let dir = tmp("race");
+        let db = dir.join("sesame.db");
+        let t = |n: u64| Token {
+            access_token: "a".into(),
+            refresh_token: None,
+            expires_at: Some(n),
+            scope: None,
+            resource_id: None,
+            resource_name: None,
+        };
+        Store::open_at(db.clone())
+            .unwrap()
+            .save_token("p", &t(0))
+            .unwrap();
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let db = db.clone();
+                std::thread::spawn(move || {
+                    let s = Store::open_at(db).unwrap();
+                    s.locked(|s| {
+                        let n = s.token("p")?.unwrap().expires_at.unwrap();
+                        // A refresh's HTTP request, while the lock is held.
+                        std::thread::sleep(Duration::from_millis(200));
+                        s.save_token("p", &t(n + 1))
+                    })
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap().unwrap();
+        }
+        let s = Store::open_at(db).unwrap();
+        assert_eq!(s.token("p").unwrap().unwrap().expires_at, Some(4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reopening_keeps_rows_and_schema_version() {
+        let dir = tmp("reopen");
+        let db = dir.join("sesame.db");
+        let t = Token {
+            access_token: "a".into(),
+            refresh_token: Some("r".into()),
+            expires_at: Some(42),
+            scope: None,
+            resource_id: Some("site".into()),
+            resource_name: None,
+        };
+        Store::open_at(db.clone())
+            .unwrap()
+            .save_token("p", &t)
+            .unwrap();
+        let s = Store::open_at(db).unwrap();
+        let v: i64 = s
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v as usize, MIGRATIONS.len());
+        let got = s.token("p").unwrap().unwrap();
+        assert_eq!(
+            (got.expires_at, got.resource_id),
+            (Some(42), Some("site".into()))
+        );
+        s.delete_token("p").unwrap();
+        assert!(s.token("p").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

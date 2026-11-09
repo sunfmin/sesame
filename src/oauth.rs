@@ -1,6 +1,6 @@
 //! Authorization-code flow with PKCE and a loopback redirect, plus refresh.
 use crate::providers::{self, Provider, TokenBody};
-use crate::store::{self, Client, Kind, Token};
+use crate::store::{Client, Store, Token};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use sha2::{Digest, Sha256};
@@ -34,7 +34,8 @@ pub fn no_client(name: &str) -> String {
 }
 
 pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, String> {
-    let client: Client = store::load(name, Kind::Client)?.ok_or_else(|| no_client(name))?;
+    let store = Store::open()?;
+    let client = store.client(name)?.ok_or_else(|| no_client(name))?;
     let listener = TcpListener::bind(("127.0.0.1", p.redirect_port.unwrap_or(0)))
         .map_err(|e| format!("cannot listen for the redirect: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -129,7 +130,7 @@ pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, Str
     if let Some(resources_url) = &p.resources_url {
         pick_resource(&mut token, resources_url, opts.site.as_deref())?;
     }
-    store::save(name, Kind::Token, &token)?;
+    store.save_token(name, &token)?;
     Ok(token)
 }
 
@@ -225,28 +226,32 @@ fn pick_resource(token: &mut Token, url: &str, site: Option<&str>) -> Result<(),
 }
 
 /// The stored token, refreshed first when it expires within a minute (or when forced).
+/// The read, the refresh and the write hold the database's lock, so a second
+/// process refreshing the same provider waits and then sees the new token.
 pub fn valid_token(name: &str, p: &Provider, force_refresh: bool) -> Result<Token, String> {
-    let Some(token) = store::load::<Token>(name, Kind::Token)? else {
-        if store::load::<Client>(name, Kind::Client)?.is_none() {
-            return Err(no_client(name));
+    Store::open()?.locked(|store| {
+        let Some(token) = store.token(name)? else {
+            if store.client(name)?.is_none() {
+                return Err(no_client(name));
+            }
+            return Err(format!(
+                "not logged in to `{name}`; run `sesame login {name}`"
+            ));
+        };
+        let fresh = token.expires_at.is_none_or(|t| t > now() + 60);
+        if fresh && !force_refresh {
+            return Ok(token);
         }
-        return Err(format!(
-            "not logged in to `{name}`; run `sesame login {name}`"
-        ));
-    };
-    let fresh = token.expires_at.is_none_or(|t| t > now() + 60);
-    if fresh && !force_refresh {
-        return Ok(token);
-    }
-    let refresh = token.refresh_token.clone().ok_or_else(|| {
-        format!("`{name}` token expired and has no refresh token; run `sesame login {name}`")
-    })?;
-    let client: Client = store::load(name, Kind::Client)?.ok_or_else(|| no_client(name))?;
-    let mut form = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh),
-    ];
-    let new = request_token(p, &client, &mut form, Some(&token))?;
-    store::save(name, Kind::Token, &new)?;
-    Ok(new)
+        let refresh = token.refresh_token.clone().ok_or_else(|| {
+            format!("`{name}` token expired and has no refresh token; run `sesame login {name}`")
+        })?;
+        let client = store.client(name)?.ok_or_else(|| no_client(name))?;
+        let mut form = vec![
+            ("grant_type", "refresh_token".to_string()),
+            ("refresh_token", refresh),
+        ];
+        let new = request_token(p, &client, &mut form, Some(&token))?;
+        store.save_token(name, &new)?;
+        Ok(new)
+    })
 }
