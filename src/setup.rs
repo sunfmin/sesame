@@ -1,6 +1,6 @@
 //! `sesame setup <provider>`: the numbered steps from nothing to a working
 //! `login`, written for an AI walking a person through them, and for the person.
-use crate::providers::Provider;
+use crate::providers::{Provider, Redirect};
 use std::fmt::Write;
 
 pub fn render(name: &str, p: &Provider) -> String {
@@ -44,8 +44,9 @@ pub fn render(name: &str, p: &Provider) -> String {
             &format!(
                 "No setup steps are written for `{name}`. To print them here, add them with\n\
                  sesame provider set {name} --setup-step '{{\"title\": …, \"page\": …, \"details\": …}}'\n\
-                 Register an authorization-code (PKCE) app with callback URL {callback}\n\
-                 and the scopes: {scopes}"
+                 Register an authorization-code{} app with callback URL {callback}\n\
+                 and the scopes: {scopes}",
+                if p.pkce { " (PKCE)" } else { "" }
             ),
         );
     }
@@ -66,11 +67,19 @@ pub fn render(name: &str, p: &Provider) -> String {
         &mut out,
         "Log in: the person approves access in the browser",
         None,
-        &format!(
-            "sesame login {name}\n\
-             On a remote machine (SSH): open the printed URL anywhere, then paste the address\n\
-             the browser ends on back into the terminal."
-        ),
+        &match p.redirect {
+            Redirect::Loopback => format!(
+                "sesame login {name}\n\
+                 On a remote machine (SSH): open the printed URL anywhere, then paste the address\n\
+                 the browser ends on back into the terminal."
+            ),
+            Redirect::HttpsPaste => format!(
+                "sesame login {name}\n\
+                 After approving, the browser ends on {callback}?code=… and says it cannot open\n\
+                 the page: that is expected. Copy the whole address from the address bar and paste\n\
+                 it into the terminal."
+            ),
+        },
     );
     step(
         &mut out,
@@ -78,7 +87,9 @@ pub fn render(name: &str, p: &Provider) -> String {
         None,
         &format!(
             "sesame providers        # `{name}` shows logged in\n\
-             sesame api {name} <path>"
+             sesame api {name} <path>\n\
+             A token you got another way can be stored instead of logging in:\n\
+             sesame login {name} --token   (hidden input; no refresh, paste a new one when it stops working)"
         ),
     );
     out.trim_end().to_string() + "\n"
@@ -130,6 +141,31 @@ mod tests {
         ] {
             assert!(out.contains(want), "missing {want:?} in:\n{out}");
         }
+    }
+
+    #[test]
+    fn slack() {
+        let out = render("slack", &built_in("slack"));
+        for want in [
+            "https://api.slack.com/apps",
+            "Create New App",
+            "From scratch",
+            "OAuth & Permissions",
+            "User Token Scopes",
+            "channels:read, groups:read",
+            "chat:write",
+            "Redirect URLs",
+            "enter https://localhost:8751/callback",
+            "Install to Workspace",
+            "xoxp-",
+            "sesame login slack --token",
+            "Basic Information",
+            "sesame client slack --client-id <client id>",
+            "ends on https://localhost:8751/callback?code=",
+        ] {
+            assert!(out.contains(want), "missing {want:?} in:\n{out}");
+        }
+        assert!(!out.contains("http://localhost"), "{out}");
     }
 
     #[test]

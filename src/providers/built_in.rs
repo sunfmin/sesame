@@ -9,7 +9,7 @@
 //! and pick. In `details`, `{callback}` is the redirect URL login uses and
 //! `{scopes}` the provider's `scopes`, so neither is written twice. sesame adds
 //! the closing steps itself (store the client, log in, call the API).
-use super::{Provider, SetupStep, TokenBody};
+use super::{Provider, Redirect, SetupStep, TokenBody};
 use std::collections::BTreeMap;
 
 fn strings(xs: &[&str]) -> Vec<String> {
@@ -31,7 +31,11 @@ fn step(title: &str, page: Option<&str>, details: &str) -> SetupStep {
 }
 
 pub fn all() -> BTreeMap<String, Provider> {
-    BTreeMap::from([("google".into(), google()), ("jira".into(), jira())])
+    BTreeMap::from([
+        ("google".into(), google()),
+        ("jira".into(), jira()),
+        ("slack".into(), slack()),
+    ])
 }
 
 fn google() -> Provider {
@@ -48,10 +52,16 @@ fn google() -> Provider {
             "https://www.googleapis.com/auth/documents.readonly",
             "https://www.googleapis.com/auth/youtube.readonly",
         ]),
+        scope_param: "scope".into(),
         auth_params: params(&[("access_type", "offline"), ("prompt", "consent")]),
+        pkce: true,
         token_body: TokenBody::Form,
+        token_path: String::new(),
+        account_path: None,
         resources_url: None,
+        redirect: Redirect::Loopback,
         redirect_port: None,
+        ok_field: None,
         setup: vec![
             step(
                 "Create or pick a Google Cloud project",
@@ -125,10 +135,16 @@ fn jira() -> Provider {
             "read:jira-user",
             "offline_access",
         ]),
+        scope_param: "scope".into(),
         auth_params: params(&[("audience", "api.atlassian.com"), ("prompt", "consent")]),
+        pkce: true,
         token_body: TokenBody::Json,
+        token_path: String::new(),
+        account_path: None,
         resources_url: Some("https://api.atlassian.com/oauth/token/accessible-resources".into()),
+        redirect: Redirect::Loopback,
         redirect_port: Some(8749),
+        ok_field: None,
         setup: vec![
             step(
                 "Create an OAuth 2.0 integration in the Atlassian developer console",
@@ -158,6 +174,78 @@ It must match exactly, so do not change localhost or the port. Click Save change
                 "Copy the client ID and secret (left menu: Settings)",
                 None,
                 "The authentication details show the Client ID and Secret. Keep the page open for the next step.",
+            ),
+        ],
+    }
+}
+
+/// Slack Web API with a user token: sesame acts as the person, not as a bot.
+/// Slack's OAuth (https://docs.slack.dev/authentication/installing-with-oauth):
+/// user scopes go in `user_scope`, the user token comes back under
+/// `authed_user`, the redirect URL must be https, and a failed call is often
+/// HTTP 200 with `"ok": false`. PKCE is off: Slack accepts it only once the
+/// app opts in, which only Slack support can undo
+/// (https://docs.slack.dev/authentication/using-pkce).
+fn slack() -> Provider {
+    Provider {
+        about: "Slack Web API, as yourself (user token)".into(),
+        auth_url: "https://slack.com/oauth/v2/authorize".into(),
+        token_url: "https://slack.com/api/oauth.v2.access".into(),
+        api_base: "https://slack.com/api".into(),
+        hosts: strings(&["slack.com"]),
+        scopes: strings(&[
+            "channels:read",
+            "groups:read",
+            "im:read",
+            "mpim:read",
+            "channels:history",
+            "groups:history",
+            "im:history",
+            "mpim:history",
+            "chat:write",
+            "users:read",
+        ]),
+        scope_param: "user_scope".into(),
+        auth_params: BTreeMap::new(),
+        pkce: false,
+        token_body: TokenBody::Form,
+        token_path: "/authed_user".into(),
+        account_path: Some("/team/name".into()),
+        resources_url: None,
+        redirect: Redirect::HttpsPaste,
+        redirect_port: Some(8751),
+        ok_field: Some("ok".into()),
+        setup: vec![
+            step(
+                "Create a Slack app",
+                Some("https://api.slack.com/apps"),
+                "\
+Click Create New App, choose From scratch, enter an App Name (e.g. \"sesame\") and pick the
+workspace you will sign in to, then click Create App. The app's page opens with a left menu.",
+            ),
+            step(
+                "Add the User Token Scopes (left menu: OAuth & Permissions)",
+                None,
+                "\
+Under Scopes > User Token Scopes (not Bot Token Scopes: sesame acts as you), click
+Add an OAuth Scope for each one sesame asks for: {scopes}",
+            ),
+            step(
+                "Add the redirect URL (left menu: OAuth & Permissions)",
+                None,
+                "\
+Under Redirect URLs click Add New Redirect URL, enter {callback}, click Add, then Save URLs.
+Slack takes only https redirect URLs, so nothing listens there: at login the browser ends on a
+page it cannot open, and you paste that page's address into the terminal.
+If the console refuses this URL, sign in with a pasted token instead and skip the steps below:
+on the same page click Install to Workspace and Allow, copy the User OAuth Token (it starts
+with xoxp-), and run `sesame login slack --token` in your own terminal; it asks for the token
+with hidden input.",
+            ),
+            step(
+                "Copy the client ID and secret (left menu: Basic Information)",
+                None,
+                "Under App Credentials: the Client ID, and the Client Secret (click Show). Keep the page open for the next step.",
             ),
         ],
     }
