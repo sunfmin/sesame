@@ -51,7 +51,7 @@ pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, Str
         q.append_pair("response_type", "code")
             .append_pair("client_id", &client.client_id)
             .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("scope", &scopes.join(" "))
+            .append_pair("scope", &scopes.join(&p.scope_separator))
             .append_pair("state", &state)
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256");
@@ -130,6 +130,13 @@ pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, Str
     if let Some(resources_url) = &p.resources_url {
         pick_resource(&mut token, resources_url, opts.site.as_deref())?;
     }
+    if let Some(w) = &p.whoami {
+        // The login stands without a name: a failed lookup only warns.
+        match whoami(p, w, &token) {
+            Ok(name) => token.account = Some(name),
+            Err(e) => eprintln!("Could not learn who signed in: {e}"),
+        }
+    }
     store.save_token(name, &token)?;
     Ok(token)
 }
@@ -181,7 +188,32 @@ fn request_token(
         scope: t.scope.or_else(|| previous.and_then(|p| p.scope.clone())),
         resource_id: previous.and_then(|p| p.resource_id.clone()),
         resource_name: previous.and_then(|p| p.resource_name.clone()),
+        account: previous.and_then(|p| p.account.clone()),
     })
+}
+
+fn whoami(p: &Provider, w: &providers::Whoami, token: &Token) -> Result<String, String> {
+    let url = p.resolve(token.resource_id.as_deref(), &w.path)?;
+    let http = reqwest::blocking::Client::new();
+    let req = match &w.body {
+        Some(b) => http.post(url.clone()).json(b),
+        None => http.get(url.clone()),
+    };
+    let resp = req
+        .bearer_auth(&token.access_token)
+        .header("Accept", "application/json")
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("{url}: {e}"))?;
+    let bytes = resp.bytes().map_err(|e| e.to_string())?;
+    if let Some(f) = p.error_in(&bytes) {
+        return Err(format!(
+            "{url}: `{f}` in {}",
+            String::from_utf8_lossy(&bytes)
+        ));
+    }
+    let answer = serde_json::from_slice(&bytes).map_err(|e| format!("{url}: {e}"))?;
+    w.name_in(&answer)
 }
 
 fn pick_resource(token: &mut Token, url: &str, site: Option<&str>) -> Result<(), String> {

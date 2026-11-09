@@ -91,7 +91,7 @@ enum ProviderCmd {
     Add {
         name: String,
         #[command(flatten)]
-        fields: providers::FieldFlags,
+        fields: Box<providers::FieldFlags>,
     },
     /// Change a provider's fields; a repeatable flag replaces its whole list.
     /// For a built-in provider only the changed fields are stored: the rest
@@ -99,7 +99,7 @@ enum ProviderCmd {
     Set {
         name: String,
         #[command(flatten)]
-        fields: providers::FieldFlags,
+        fields: Box<providers::FieldFlags>,
     },
     /// Print the definition in force as JSON, each field marked `built-in`, `user` or `default`.
     Show { name: String },
@@ -129,10 +129,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     (Some(_), None) => {
                         ("not logged in".to_string(), format!("sesame login {name}"))
                     }
-                    (Some(_), Some(t)) => match &t.resource_name {
-                        Some(site) => (format!("logged in ({site})"), String::new()),
-                        None => ("logged in".to_string(), String::new()),
-                    },
+                    (Some(_), Some(t)) => (format!("logged in{}", who(t)), String::new()),
                 };
                 let next = if next.is_empty() {
                     next
@@ -144,11 +141,11 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Provider { cmd } => match cmd {
             ProviderCmd::Add { name, fields } => {
-                providers::add(&name, fields.fields()?)?;
+                providers::add(&name, (*fields).fields()?)?;
                 eprintln!("Added the provider `{name}`; next: sesame setup {name}");
             }
             ProviderCmd::Set { name, fields } => {
-                providers::set(&name, fields.fields()?)?;
+                providers::set(&name, (*fields).fields()?)?;
                 eprintln!(
                     "Changed the provider `{name}`; see it with `sesame provider show {name}`."
                 );
@@ -205,11 +202,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 site,
             };
             let t = oauth::login(&provider, &p, &opts)?;
-            let site = t
-                .resource_name
-                .map(|s| format!(" ({s})"))
-                .unwrap_or_default();
-            eprintln!("Logged in to `{provider}`{site}.");
+            eprintln!("Logged in to `{provider}`{}.", who(&t));
         }
         Cmd::Logout { provider } => {
             Store::open()?.delete_token(&provider)?;
@@ -243,7 +236,7 @@ fn api(
 ) -> Result<ExitCode, String> {
     let p = providers::get(name)?;
     let mut token = oauth::valid_token(name, &p, false)?;
-    let url = resolve(&p, &token, path)?;
+    let url = p.resolve(token.resource_id.as_deref(), path)?;
     let body = match data.as_deref() {
         None => None,
         Some("@-") => {
@@ -308,35 +301,24 @@ fn api(
         None => out.write_all(&bytes),
     }
     .map_err(|e| e.to_string())?;
-    Ok(if status.is_success() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    if !status.is_success() {
+        return Ok(ExitCode::FAILURE);
+    }
+    if let Some(f) = p.error_in(&bytes) {
+        eprintln!("sesame: the answer carries `{f}`: the call failed despite {status}");
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
-fn resolve(p: &providers::Provider, token: &Token, path: &str) -> Result<url::Url, String> {
-    let url = if path.starts_with("https://") || path.starts_with("http://") {
-        url::Url::parse(path).map_err(|e| e.to_string())?
-    } else {
-        let mut base = p.api_base.clone();
-        if base.contains("{resource_id}") {
-            let id = token
-                .resource_id
-                .as_deref()
-                .ok_or("no site stored; log in again")?;
-            base = base.replace("{resource_id}", id);
-        }
-        let sep = if path.starts_with('/') { "" } else { "/" };
-        url::Url::parse(&format!("{}{sep}{path}", base.trim_end_matches('/')))
-            .map_err(|e| e.to_string())?
-    };
-    let host = url.host_str().unwrap_or("");
-    if !p.allows_host(host) {
-        return Err(format!(
-            "refusing to send the token to {host}: not one of {:?}",
-            p.hosts
-        ));
+/// ` as <account> (<site>)`, each part when known: who from `whoami`, the site (Jira).
+fn who(t: &Token) -> String {
+    let mut s = String::new();
+    if let Some(a) = &t.account {
+        s += &format!(" as {a}");
     }
-    Ok(url)
+    if let Some(site) = &t.resource_name {
+        s += &format!(" ({site})");
+    }
+    s
 }

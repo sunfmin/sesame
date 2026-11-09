@@ -23,6 +23,9 @@ pub struct Provider {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// What joins the scopes in the authorization URL: a space (OAuth's own), `,` for some.
+    #[serde(default = "space")]
+    pub scope_separator: String,
     #[serde(default)]
     pub auth_params: BTreeMap<String, String>,
     #[serde(default)]
@@ -33,9 +36,32 @@ pub struct Provider {
     /// Fixed loopback port, for providers that match the callback URL exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_port: Option<u16>,
+    /// Top-level fields of an API's JSON answer that, present and not empty,
+    /// mean the call failed although the status is 2xx (GraphQL's `errors`).
+    #[serde(default)]
+    pub error_fields: Vec<String>,
+    /// The call login makes to learn who signed in, for `sesame providers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whoami: Option<Whoami>,
     /// How to register this provider's OAuth app, for `sesame setup`.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
+}
+
+fn space() -> String {
+    " ".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Whoami {
+    /// Path under `api_base`, or a full URL on one of `hosts`.
+    pub path: String,
+    /// JSON body; with one the call is a POST, without it a GET.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Value>,
+    /// The account's name, with `{/json/pointer}` filled in from the answer.
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +108,9 @@ pub struct FieldFlags {
     /// A scope login asks for; repeatable.
     #[arg(long = "scope")]
     scopes: Vec<String>,
+    /// What joins the scopes in the authorization URL (default: a space).
+    #[arg(long)]
+    scope_separator: Option<String>,
     /// `key=value` added to the authorization URL; repeatable.
     #[arg(long = "auth-param")]
     auth_params: Vec<String>,
@@ -94,6 +123,14 @@ pub struct FieldFlags {
     /// Fixed loopback port for the callback, for providers that match it exactly.
     #[arg(long)]
     redirect_port: Option<u16>,
+    /// A top-level field of the API's JSON answer that, not empty, fails the
+    /// call despite a 2xx status (GraphQL: `errors`); repeatable.
+    #[arg(long = "error-field")]
+    error_fields: Vec<String>,
+    /// The call login makes to learn who signed in, as JSON:
+    /// `{"path": …, "body": …, "name": "{/json/pointer} …"}`; body makes it a POST.
+    #[arg(long)]
+    whoami: Option<String>,
     /// A step for `sesame setup`, as JSON: `{"title": …, "page": …, "details": …}`;
     /// repeatable, in order. `{callback}` and `{scopes}` in details are filled in.
     #[arg(long = "setup-step")]
@@ -117,6 +154,8 @@ impl FieldFlags {
             ("api_base", opt(self.api_base)),
             ("hosts", list(self.hosts)),
             ("scopes", list(self.scopes)),
+            ("scope_separator", opt(self.scope_separator)),
+            ("error_fields", list(self.error_fields)),
             ("token_body", opt(self.token_body)),
             ("resources_url", opt(self.resources_url)),
             ("redirect_port", self.redirect_port.map(Value::from)),
@@ -134,6 +173,11 @@ impl FieldFlags {
                 m.insert(k.into(), v.into());
             }
             put("auth_params", Value::Object(m));
+        }
+        if let Some(w) = self.whoami {
+            let v =
+                serde_json::from_str(&w).map_err(|e| format!("--whoami `{w}` is not JSON: {e}"))?;
+            put("whoami", v);
         }
         if !self.setup.is_empty() {
             let steps = self
@@ -344,6 +388,23 @@ impl Provider {
         if self.redirect_port == Some(0) {
             return Err("redirect_port 0: leave it out for any free port".into());
         }
+        if self.scope_separator.is_empty() {
+            return Err("scope_separator is empty: give a space or a character such as `,`".into());
+        }
+        if self.error_fields.iter().any(|f| f.trim().is_empty()) {
+            return Err("an error_fields entry is empty".into());
+        }
+        if let Some(w) = &self.whoami {
+            if w.path.trim().is_empty() {
+                return Err("whoami has no path".into());
+            }
+            if !w.name.contains("{/") {
+                return Err(format!(
+                    "whoami name `{}` has no `{{/json/pointer}}` to fill in",
+                    w.name
+                ));
+            }
+        }
         for s in &self.setup {
             if s.title.trim().is_empty() {
                 return Err("a setup step has no title".into());
@@ -363,11 +424,76 @@ impl Provider {
         }
     }
 
+    /// The URL for `path` (relative to `api_base`, or full), refused unless on one of `hosts`.
+    pub fn resolve(&self, resource_id: Option<&str>, path: &str) -> Result<url::Url, String> {
+        let url = if path.starts_with("https://") || path.starts_with("http://") {
+            url::Url::parse(path).map_err(|e| e.to_string())?
+        } else {
+            let mut base = self.api_base.clone();
+            if base.contains("{resource_id}") {
+                let id = resource_id.ok_or("no site stored; log in again")?;
+                base = base.replace("{resource_id}", id);
+            }
+            let sep = if path.starts_with('/') { "" } else { "/" };
+            url::Url::parse(&format!("{}{sep}{path}", base.trim_end_matches('/')))
+                .map_err(|e| e.to_string())?
+        };
+        let host = url.host_str().unwrap_or("");
+        if !self.allows_host(host) {
+            return Err(format!(
+                "refusing to send the token to {host}: not one of {:?}",
+                self.hosts
+            ));
+        }
+        Ok(url)
+    }
+
+    /// The first of `error_fields` a 2xx JSON answer carries with a value that
+    /// is not empty (`null`, `false`, `""`, `[]` and `{}` are empty).
+    pub fn error_in<'a>(&'a self, body: &[u8]) -> Option<&'a str> {
+        let v: Value = serde_json::from_slice(body).ok()?;
+        self.error_fields
+            .iter()
+            .find(|f| match v.get(f.as_str()) {
+                None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+                Some(Value::String(s)) => !s.is_empty(),
+                Some(Value::Array(a)) => !a.is_empty(),
+                Some(Value::Object(o)) => !o.is_empty(),
+                Some(_) => true,
+            })
+            .map(String::as_str)
+    }
+
     pub fn allows_host(&self, host: &str) -> bool {
         self.hosts.iter().any(|h| match h.strip_prefix("*.") {
             Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
             None => host == h,
         })
+    }
+}
+
+impl Whoami {
+    /// `name` with each `{/pointer}` filled in from `answer`.
+    pub fn name_in(&self, answer: &Value) -> Result<String, String> {
+        let mut out = String::new();
+        let mut rest = self.name.as_str();
+        while let Some(i) = rest.find("{/") {
+            out.push_str(&rest[..i]);
+            let end = rest[i..]
+                .find('}')
+                .ok_or_else(|| format!("whoami name `{}`: unclosed `{{`", self.name))?;
+            let pointer = &rest[i + 1..i + end];
+            match answer.pointer(pointer) {
+                Some(Value::String(s)) => out.push_str(s),
+                Some(Value::Null) | None => {
+                    return Err(format!("the answer has no {pointer}: {answer}"));
+                }
+                Some(v) => out.push_str(&v.to_string()),
+            }
+            rest = &rest[i + end + 1..];
+        }
+        out.push_str(rest);
+        Ok(out)
     }
 }
 
@@ -389,7 +515,9 @@ mod tests {
     #[test]
     fn built_ins_are_valid() {
         let all = built_in::all();
-        assert!(all.contains_key("google") && all.contains_key("jira"));
+        for name in ["google", "jira", "linear"] {
+            assert!(all.contains_key(name), "{name}");
+        }
         for (name, p) in &all {
             effective(name, Some(p), &Fields::new()).unwrap();
         }
@@ -429,6 +557,19 @@ mod tests {
             ("token_body", json!("xml"), "unknown variant `xml`"),
             ("redirect_port", json!(0), "redirect_port 0"),
             ("setup", json!([{"title": ""}]), "no title"),
+            ("scope_separator", json!(""), "scope_separator is empty"),
+            ("error_fields", json!([""]), "error_fields entry is empty"),
+            (
+                "whoami",
+                json!({"path": "/me", "name": "me"}),
+                "no `{/json/pointer}`",
+            ),
+            (
+                "whoami",
+                json!({"path": "", "name": "{/n}"}),
+                "whoami has no path",
+            ),
+            ("whoami", json!({"name": "{/n}"}), "missing field `path`"),
             ("nope", json!(1), "unknown field `nope`"),
         ] {
             let mut f = fields(ok.clone());
@@ -443,11 +584,45 @@ mod tests {
     }
 
     #[test]
+    fn error_fields_fail_only_when_not_empty() {
+        let p = built_in("linear");
+        assert_eq!(
+            p.error_in(br#"{"errors":[{"message":"x"}]}"#),
+            Some("errors")
+        );
+        for ok in [
+            &br#"{"data":{}}"#[..],
+            br#"{"data":{},"errors":[]}"#,
+            br#"{"errors":null}"#,
+            br#"[1]"#,
+            b"not json",
+        ] {
+            assert_eq!(p.error_in(ok), None, "{}", String::from_utf8_lossy(ok));
+        }
+        assert_eq!(built_in("google").error_in(br#"{"errors":[1]}"#), None);
+    }
+
+    #[test]
+    fn whoami_name_fills_pointers() {
+        let w = built_in("linear").whoami.unwrap();
+        let answer =
+            json!({"data": {"viewer": {"name": "Felix"}, "organization": {"name": "Acme"}}});
+        assert_eq!(w.name_in(&answer).unwrap(), "Felix (Acme)");
+        let e = w
+            .name_in(&json!({"data": {"viewer": {"name": "F"}}}))
+            .unwrap_err();
+        assert!(e.contains("/data/organization/name"), "{e}");
+    }
+
+    #[test]
     fn flags_become_fields() {
         let flags = FieldFlags {
             scopes: vec!["a".into(), "b".into()],
             auth_params: vec!["prompt=consent".into()],
             redirect_port: Some(9000),
+            scope_separator: Some(",".into()),
+            error_fields: vec!["errors".into()],
+            whoami: Some(r#"{"path":"/graphql","name":"{/data/viewer/name}"}"#.into()),
             setup: vec![r#"{"title":"T","page":"https://x.example"}"#.into()],
             ..Default::default()
         };
@@ -457,6 +632,9 @@ mod tests {
                 "scopes": ["a", "b"],
                 "auth_params": {"prompt": "consent"},
                 "redirect_port": 9000,
+                "scope_separator": ",",
+                "error_fields": ["errors"],
+                "whoami": {"path": "/graphql", "name": "{/data/viewer/name}"},
                 "setup": [{"title": "T", "page": "https://x.example"}],
             })
         );

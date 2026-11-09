@@ -12,6 +12,7 @@ sesame api google https://docs.googleapis.com/v1/documents/<id>
 sesame api google '/youtube/v3/channels?part=snippet&mine=true'
 sesame api jira /rest/api/3/myself
 sesame api jira /rest/api/3/issue -d @issue.json      # -d implies POST; -X, -H, -i as in curl
+sesame api linear /graphql -d '{"query":"{ viewer { id name } }"}'   # GraphQL `errors` exit non-zero
 curl -H "Authorization: Bearer $(sesame token jira)" ...
 sesame providers                              # who you are signed in to
 sesame logout jira                            # forgets the local token only
@@ -20,7 +21,7 @@ sesame logout jira                            # forgets the local token only
 ## How it works
 
 - **Provider** = one OAuth realm: one login, one token. The built-ins (google,
-  jira) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
+  jira, linear) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
   Your own providers, and your changes to a built-in one, are stored in
   `sesame.db` and managed with commands; there is no config file to edit:
 
@@ -34,7 +35,11 @@ sesame logout jira                            # forgets the local token only
   ```
 
   A built-in provider's fields you did not `set` follow each new version of
-  sesame. `sesame provider add --help` lists every field; `add` and `set`
+  sesame. Besides the endpoints and scopes, a definition can say how its scopes
+  are joined (`--scope-separator ,` for Linear), which fields of a 2xx JSON
+  answer still mean failure (`--error-field errors` for GraphQL), and the call
+  login makes to learn who signed in (`--whoami`), which `sesame providers`
+  shows. `sesame provider add --help` lists every field; `add` and `set`
   refuse an invalid value before writing anything.
 - **Login** is the authorization-code flow with PKCE and a loopback redirect
   (`http://localhost:<port>/callback`). On a remote machine (SSH), open the
@@ -49,7 +54,8 @@ sesame logout jira                            # forgets the local token only
   access on the provider's side (Google account permissions, Atlassian
   connected apps).
 - **`api`** sends the token only to the provider's `hosts`; a 401 triggers one
-  refresh and retry.
+  refresh and retry. It exits non-zero on a non-2xx status, and on a 2xx whose
+  JSON carries one of the provider's `error_fields` not empty.
 
 ## Registering the OAuth apps
 

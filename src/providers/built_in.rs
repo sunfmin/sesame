@@ -9,7 +9,7 @@
 //! and pick. In `details`, `{callback}` is the redirect URL login uses and
 //! `{scopes}` the provider's `scopes`, so neither is written twice. sesame adds
 //! the closing steps itself (store the client, log in, call the API).
-use super::{Provider, SetupStep, TokenBody};
+use super::{Provider, SetupStep, TokenBody, Whoami};
 use std::collections::BTreeMap;
 
 fn strings(xs: &[&str]) -> Vec<String> {
@@ -31,7 +31,11 @@ fn step(title: &str, page: Option<&str>, details: &str) -> SetupStep {
 }
 
 pub fn all() -> BTreeMap<String, Provider> {
-    BTreeMap::from([("google".into(), google()), ("jira".into(), jira())])
+    BTreeMap::from([
+        ("google".into(), google()),
+        ("jira".into(), jira()),
+        ("linear".into(), linear()),
+    ])
 }
 
 fn google() -> Provider {
@@ -49,9 +53,12 @@ fn google() -> Provider {
             "https://www.googleapis.com/auth/youtube.readonly",
         ]),
         auth_params: params(&[("access_type", "offline"), ("prompt", "consent")]),
+        scope_separator: " ".into(),
         token_body: TokenBody::Form,
         resources_url: None,
         redirect_port: None,
+        error_fields: vec![],
+        whoami: None,
         setup: vec![
             step(
                 "Create or pick a Google Cloud project",
@@ -126,9 +133,12 @@ fn jira() -> Provider {
             "offline_access",
         ]),
         auth_params: params(&[("audience", "api.atlassian.com"), ("prompt", "consent")]),
+        scope_separator: " ".into(),
         token_body: TokenBody::Json,
         resources_url: Some("https://api.atlassian.com/oauth/token/accessible-resources".into()),
         redirect_port: Some(8749),
+        error_fields: vec![],
+        whoami: None,
         setup: vec![
             step(
                 "Create an OAuth 2.0 integration in the Atlassian developer console",
@@ -158,6 +168,54 @@ It must match exactly, so do not change localhost or the port. Click Save change
                 "Copy the client ID and secret (left menu: Settings)",
                 None,
                 "The authentication details show the Client ID and Secret. Keep the page open for the next step.",
+            ),
+        ],
+    }
+}
+
+/// Linear: GraphQL only, at `/graphql`. Scopes are comma-separated; the access
+/// token lasts 24 hours and each refresh hands out a new refresh token.
+/// https://linear.app/developers/oauth-2-0-authentication
+fn linear() -> Provider {
+    Provider {
+        about: "Linear (GraphQL API)".into(),
+        auth_url: "https://linear.app/oauth/authorize".into(),
+        token_url: "https://api.linear.app/oauth/token".into(),
+        api_base: "https://api.linear.app".into(),
+        hosts: strings(&["api.linear.app"]),
+        scopes: strings(&["read", "write"]),
+        scope_separator: ",".into(),
+        auth_params: BTreeMap::new(),
+        token_body: TokenBody::Form,
+        resources_url: None,
+        // Linear documents no rule for the callback, so it is matched as registered.
+        redirect_port: Some(8752),
+        // A GraphQL error comes back as 200 with `errors`.
+        error_fields: strings(&["errors"]),
+        whoami: Some(Whoami {
+            path: "/graphql".into(),
+            body: Some(serde_json::json!({
+                "query": "{ viewer { name } organization { name } }"
+            })),
+            name: "{/data/viewer/name} ({/data/organization/name})".into(),
+        }),
+        setup: vec![
+            step(
+                "Create an OAuth application in Linear (Settings > API > OAuth applications)",
+                Some("https://linear.app/settings/api/applications/new"),
+                "\
+Sign in to the Linear workspace sesame should reach; every admin of that workspace can see the app.
+- Application name: anything, e.g. \"sesame\"; Developer name and URL as you like.
+- Callback URLs: {callback}
+  It must match exactly, so do not change localhost or the port.
+Leave the webhooks off and click Create.",
+            ),
+            step(
+                "Copy the client ID and secret",
+                None,
+                "\
+The application's page shows the Client ID and the Client secret. Keep it open for the next step.
+The scopes sesame asks for at login: {scopes} (Linear asks for no scopes on this page).",
             ),
         ],
     }

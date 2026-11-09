@@ -133,6 +133,22 @@ mod tests {
     }
 
     #[test]
+    fn linear() {
+        let out = render("linear", &built_in("linear"));
+        for want in [
+            "Settings > API > OAuth applications",
+            "https://linear.app/settings/api/applications/new",
+            "Callback URLs: http://localhost:8752/callback",
+            "Client ID and the Client secret",
+            "read, write",
+            "sesame client linear --client-id <client id>",
+            "sesame login linear",
+        ] {
+            assert!(out.contains(want), "missing {want:?} in:\n{out}");
+        }
+    }
+
+    #[test]
     fn steps_are_numbered_in_order() {
         let out = render("jira", &built_in("jira"));
         let firsts: Vec<&str> = out
