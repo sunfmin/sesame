@@ -53,33 +53,53 @@ pub fn render(name: &str, p: &Provider) -> String {
     for s in &p.setup {
         step(&mut out, &s.title, s.page.as_deref(), &fill(&s.details));
     }
+    let (client, login) = if p.device_url.is_some() {
+        (
+            format!(
+                "sesame client {name} --client-id <client id> --no-secret\n\
+                 The device flow needs no client secret. To also sign in with `--browser`, or to\n\
+                 refresh expiring tokens, leave out --no-secret: it prompts for the secret without echoing it."
+            ),
+            format!(
+                "sesame login {name}\n\
+                 It prints a code and a page: the person opens the page (anywhere, also from a\n\
+                 remote machine), enters the code and approves access.\n\
+                 sesame login {name} --browser signs in through the redirect to {callback} instead."
+            ),
+        )
+    } else {
+        (
+            format!(
+                "sesame client {name} --client-id <client id>\n\
+                 It prompts for the client secret without echoing it.\n\
+                 (An app without a secret: add --no-secret.)"
+            ),
+            match p.redirect {
+                Redirect::Loopback => format!(
+                    "sesame login {name}\n\
+                     On a remote machine (SSH): open the printed URL anywhere, then paste the address\n\
+                     the browser ends on back into the terminal."
+                ),
+                Redirect::HttpsPaste => format!(
+                    "sesame login {name}\n\
+                     After approving, the browser ends on {callback}?code=… and says it cannot open\n\
+                     the page: that is expected. Copy the whole address from the address bar and paste\n\
+                     it into the terminal."
+                ),
+            },
+        )
+    };
     step(
         &mut out,
         "Store the client in sesame: the person runs this in their own terminal",
         None,
-        &format!(
-            "sesame client {name} --client-id <client id>\n\
-             It prompts for the client secret without echoing it.\n\
-             (An app without a secret: add --no-secret.)"
-        ),
+        &client,
     );
     step(
         &mut out,
         "Log in: the person approves access in the browser",
         None,
-        &match p.redirect {
-            Redirect::Loopback => format!(
-                "sesame login {name}\n\
-                 On a remote machine (SSH): open the printed URL anywhere, then paste the address\n\
-                 the browser ends on back into the terminal."
-            ),
-            Redirect::HttpsPaste => format!(
-                "sesame login {name}\n\
-                 After approving, the browser ends on {callback}?code=… and says it cannot open\n\
-                 the page: that is expected. Copy the whole address from the address bar and paste\n\
-                 it into the terminal."
-            ),
-        },
+        &login,
     );
     step(
         &mut out,
@@ -141,6 +161,27 @@ mod tests {
         ] {
             assert!(out.contains(want), "missing {want:?} in:\n{out}");
         }
+    }
+
+    #[test]
+    fn github() {
+        let out = render("github", &built_in("github"));
+        for want in [
+            "https://github.com/settings/developers",
+            "New OAuth App",
+            "Authorization callback URL: http://127.0.0.1/callback",
+            "http://127.0.0.1:<any port>/callback",
+            "Enable Device Flow",
+            "Expire user access tokens",
+            "Client ID",
+            "repo, read:org",
+            "sesame client github --client-id <client id> --no-secret",
+            "sesame login github --browser",
+            "enters the code",
+        ] {
+            assert!(out.contains(want), "missing {want:?} in:\n{out}");
+        }
+        assert!(!out.contains("{callback}") && !out.contains("{scopes}"));
     }
 
     #[test]

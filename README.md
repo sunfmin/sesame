@@ -11,6 +11,9 @@ sesame api google /drive/v3/files            # GET, token attached, refreshed wh
 sesame api google https://docs.googleapis.com/v1/documents/<id>
 sesame api google '/youtube/v3/channels?part=snippet&mine=true'
 sesame api jira /rest/api/3/myself
+sesame login github                          # device flow: prints a code to enter on github.com/login/device
+sesame api github /user
+sesame api github /graphql -d '{"query":"{ viewer { login } }"}'
 sesame api jira /rest/api/3/issue -d @issue.json      # -d implies POST; -X, -H, -i as in curl
 sesame api slack /conversations.list                  # as yourself, with a Slack user token
 sesame api slack /chat.postMessage -d '{"channel":"C…","text":"hi"}'
@@ -23,7 +26,7 @@ sesame logout jira                            # forgets the local token only
 
 ## How it works
 
-- **Provider** = one OAuth realm: one login, one token. The built-ins (google,
+- **Provider** = one OAuth realm: one login, one token. The built-ins (github, google,
   jira, notion, slack) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
   Your own providers, and your changes to a built-in one, are stored in
   `sesame.db` and managed with commands; there is no config file to edit:
@@ -48,9 +51,14 @@ sesame logout jira                            # forgets the local token only
   sesame. `sesame provider add --help` lists every field; `add` and `set`
   refuse an invalid value before writing anything.
 - **Login** is the authorization-code flow with PKCE and a loopback redirect
-  (`http://localhost:<port>/callback`). On a remote machine (SSH), open the
-  printed URL anywhere and paste the address the browser ends on back into the
-  terminal. A provider that takes only https callbacks (`--redirect https-paste`,
+  (`http://localhost:<port>/callback`, or `127.0.0.1` for a provider whose
+  `redirect_host` says so). On a remote machine (SSH), open the printed URL
+  anywhere and paste the address the browser ends on back into the terminal.
+  A provider with a `device_url` (github) uses the device flow instead: login
+  prints a code to enter on the provider's page, from any machine, and needs no
+  client secret; `sesame login <provider> --browser` takes the loopback redirect.
+  A provider with an `identity_url` records who signed in, shown by `sesame providers`.
+  A provider that takes only https callbacks (`--redirect https-paste`,
   as slack) uses `https://localhost:<redirect-port>/callback`: nothing listens
   there, the browser says it cannot open the page, and you paste its address.
   The fields `scope_param`, `pkce`, `token_path`, `site_name_field` and `ok_field`
@@ -65,7 +73,8 @@ sesame logout jira                            # forgets the local token only
   synced folder.
 - **`logout`** deletes the local token only; to revoke it, remove the app's
   access on the provider's side (Google account permissions, Atlassian
-  connected apps, Notion's Settings > Connections, the Slack app's page).
+  connected apps, Notion's Settings > Connections, GitHub's Settings > Applications,
+  the Slack app's page).
 - **`api`** sends the token only to the provider's `hosts`; a 401 triggers one
   refresh and retry. With an `ok_field` (slack: `ok`), a JSON answer whose field
   is `false` exits non-zero even on HTTP 200.

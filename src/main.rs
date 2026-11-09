@@ -50,17 +50,18 @@ enum Cmd {
         #[arg(long, conflicts_with = "secret_stdin")]
         no_secret: bool,
     },
-    /// Sign in through the provider's OAuth page and store the token, or store
-    /// a token you paste (`--token`).
+    /// Sign in through the provider's OAuth page and store the token. A provider
+    /// with a device endpoint (github) prints a code to enter on its page instead.
+    /// `--token` stores a token you paste instead.
     Login {
         provider: String,
         /// Store a token you got another way (e.g. from the provider's app page)
         /// instead of the OAuth login; asks for it with hidden input. It has no
         /// refresh: when it stops working, paste a new one.
-        #[arg(long, conflicts_with_all = ["scopes", "no_browser", "site"])]
+        #[arg(long, conflicts_with_all = ["scopes", "no_browser", "browser", "site"])]
         token: bool,
         /// Like --token, reading the token from stdin.
-        #[arg(long, conflicts_with_all = ["token", "scopes", "no_browser", "site"])]
+        #[arg(long, conflicts_with_all = ["token", "scopes", "no_browser", "browser", "site"])]
         token_stdin: bool,
         /// Scope to ask for instead of the provider's defaults; repeatable.
         #[arg(long = "scope")]
@@ -68,6 +69,10 @@ enum Cmd {
         /// Print the URL only; do not try to open a browser.
         #[arg(long)]
         no_browser: bool,
+        /// Sign in through the loopback redirect even when the provider offers
+        /// the device flow (needs the client secret where the provider does).
+        #[arg(long)]
+        browser: bool,
         /// Which site to use when the login reaches several (Jira).
         #[arg(long)]
         site: Option<String>,
@@ -135,19 +140,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 let token = store.token(&name)?;
                 let client = store.client(&name)?;
                 let (state, next) = match (&client, &token) {
-                    (_, Some(t)) => {
-                        let notes: Vec<&str> = [t.resource_name.as_deref()]
-                            .into_iter()
-                            .flatten()
-                            .chain(t.pasted.then_some("pasted token"))
-                            .collect();
-                        let state = if notes.is_empty() {
-                            "logged in".to_string()
-                        } else {
-                            format!("logged in ({})", notes.join("; "))
-                        };
-                        (state, String::new())
-                    }
+                    (_, Some(t)) => (format!("logged in{}", who(t)), String::new()),
                     (None, None) => ("no client".to_string(), format!("sesame setup {name}")),
                     (Some(_), None) => {
                         ("not logged in".to_string(), format!("sesame login {name}"))
@@ -217,7 +210,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             token_stdin,
             ..
         } if token || token_stdin => {
-            providers::get(&provider)?;
+            let p = providers::get(&provider)?;
             let pasted = if token_stdin {
                 let mut s = String::new();
                 std::io::stdin()
@@ -227,13 +220,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             } else {
                 rpassword::prompt_password("Token: ").map_err(|e| e.to_string())?
             };
-            oauth::save_pasted(&provider, &pasted)?;
-            eprintln!("Stored the pasted `{provider}` token.");
+            let t = oauth::save_pasted(&provider, &p, &pasted)?;
+            eprintln!("Stored the pasted `{provider}` token{}.", who(&t));
         }
         Cmd::Login {
             provider,
             scopes,
             no_browser,
+            browser,
             site,
             ..
         } => {
@@ -242,13 +236,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 scopes: (!scopes.is_empty()).then_some(scopes),
                 open_browser: !no_browser && std::env::var_os("SSH_CONNECTION").is_none(),
                 site,
+                loopback: browser,
             };
             let t = oauth::login(&provider, &p, &opts)?;
-            let site = t
-                .resource_name
-                .map(|s| format!(" ({s})"))
-                .unwrap_or_default();
-            eprintln!("Logged in to `{provider}`{site}.");
+            eprintln!("Logged in to `{provider}`{}.", who(&t));
         }
         Cmd::Logout { provider } => {
             Store::open()?.delete_token(&provider)?;
@@ -270,6 +261,22 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// ` (site, account)` for a token, from what login learned, and whether it
+/// was pasted; empty if nothing.
+fn who(t: &Token) -> String {
+    let parts: Vec<&str> = [&t.resource_name, &t.account]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .chain(t.pasted.then_some("pasted token"))
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
 }
 
 fn api(
@@ -300,7 +307,7 @@ fn api(
     let method = method.unwrap_or_else(|| if body.is_some() { "POST" } else { "GET" }.into());
     let method =
         reqwest::Method::from_bytes(method.to_uppercase().as_bytes()).map_err(|e| e.to_string())?;
-    let http = reqwest::blocking::Client::new();
+    let http = oauth::http();
     let send = |token: &Token| {
         let mut req = http
             .request(method.clone(), url.clone())

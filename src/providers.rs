@@ -63,6 +63,19 @@ pub struct Provider {
     /// failed, even with HTTP 200 (Slack: `ok`); `api` then exits non-zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ok_field: Option<String>,
+    /// The loopback redirect's host: `localhost` or `127.0.0.1`.
+    #[serde(default)]
+    pub redirect_host: RedirectHost,
+    /// Device authorization endpoint (RFC 8628): when set, login uses the
+    /// device flow, and `--browser` the loopback redirect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_url: Option<String>,
+    /// A JSON endpoint on one of `hosts` naming who signed in, read after login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_url: Option<String>,
+    /// The field of `identity_url`'s answer that names the account (e.g. `login`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_field: Option<String>,
     /// How to register this provider's OAuth app, for `sesame setup`.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
@@ -107,6 +120,24 @@ fn default_scope_param() -> String {
 
 fn yes() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub enum RedirectHost {
+    #[default]
+    #[serde(rename = "localhost")]
+    Localhost,
+    #[serde(rename = "127.0.0.1")]
+    Loopback,
+}
+
+impl RedirectHost {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RedirectHost::Localhost => "localhost",
+            RedirectHost::Loopback => "127.0.0.1",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -183,6 +214,19 @@ pub struct FieldFlags {
     /// Fixed loopback port for the callback, for providers that match it exactly.
     #[arg(long)]
     redirect_port: Option<u16>,
+    /// The loopback redirect's host: `localhost` (the default) or `127.0.0.1`.
+    #[arg(long)]
+    redirect_host: Option<String>,
+    /// Device authorization endpoint (RFC 8628); login then uses the device
+    /// flow by default, and `--browser` the loopback redirect.
+    #[arg(long)]
+    device_url: Option<String>,
+    /// JSON endpoint naming who signed in, read after login (on one of the hosts).
+    #[arg(long)]
+    identity_url: Option<String>,
+    /// The field of the identity answer naming the account, e.g. `login`.
+    #[arg(long)]
+    identity_field: Option<String>,
     /// A step for `sesame setup`, as JSON: `{"title": …, "page": …, "details": …}`;
     /// repeatable, in order. `{callback}` and `{scopes}` in details are filled in.
     #[arg(long = "setup-step")]
@@ -216,6 +260,10 @@ impl FieldFlags {
             ("redirect", opt(self.redirect)),
             ("redirect_port", self.redirect_port.map(Value::from)),
             ("ok_field", opt(self.ok_field)),
+            ("redirect_host", opt(self.redirect_host)),
+            ("device_url", opt(self.device_url)),
+            ("identity_url", opt(self.identity_url)),
+            ("identity_field", opt(self.identity_field)),
         ] {
             if let Some(v) = v {
                 put(k, v);
@@ -442,6 +490,28 @@ impl Provider {
         }) {
             return Err(format!("host `{h}`: a host name, or `*.` and a domain"));
         }
+        if let Some(u) = &self.device_url {
+            check_url("device_url", u)?;
+        }
+        match (&self.identity_url, &self.identity_field) {
+            (None, None) => {}
+            (Some(u), Some(f)) => {
+                check_url("identity_url", u)?;
+                let host = url::Url::parse(u)
+                    .ok()
+                    .and_then(|u| u.host_str().map(String::from))
+                    .unwrap_or_default();
+                if !self.allows_host(&host) {
+                    return Err(format!(
+                        "identity_url `{u}`: the token goes only to hosts, and {host} is not one"
+                    ));
+                }
+                if f.trim().is_empty() {
+                    return Err("identity_field is empty".into());
+                }
+            }
+            _ => return Err("identity_url and identity_field go together: give both".into()),
+        }
         for (k, v) in &self.api_headers {
             reqwest::header::HeaderName::from_bytes(k.as_bytes())
                 .map_err(|_| format!("api header `{k}`: not a header name"))?;
@@ -495,10 +565,11 @@ impl Provider {
 
     /// The redirect URL login sends, for the port it uses.
     pub fn redirect_uri(&self, port: u16) -> String {
-        match self.redirect {
-            Redirect::Loopback => format!("http://localhost:{port}/callback"),
-            Redirect::HttpsPaste => format!("https://localhost:{port}/callback"),
-        }
+        let scheme = match self.redirect {
+            Redirect::Loopback => "http",
+            Redirect::HttpsPaste => "https",
+        };
+        format!("{scheme}://{}:{port}/callback", self.redirect_host.as_str())
     }
 
     /// The redirect URL to register with the provider: fixed when `redirect_port` is.
@@ -535,7 +606,7 @@ mod tests {
     #[test]
     fn built_ins_are_valid() {
         let all = built_in::all();
-        for name in ["google", "jira", "notion", "slack"] {
+        for name in ["github", "google", "jira", "notion", "slack"] {
             assert!(all.contains_key(name), "{name}");
         }
         for (name, p) in &all {
@@ -591,6 +662,18 @@ mod tests {
             ("token_path", json!("authed_user"), "JSON pointer"),
             ("ok_field", json!(""), "ok_field is empty"),
             ("pkce", json!("maybe"), "expected a boolean"),
+            (
+                "redirect_host",
+                json!("example.com"),
+                "unknown variant `example.com`",
+            ),
+            ("device_url", json!("nope"), "device_url"),
+            (
+                "identity_url",
+                json!("https://api.a.example/me"),
+                "go together",
+            ),
+            ("identity_field", json!("login"), "go together"),
             ("setup", json!([{"title": ""}]), "no title"),
             ("nope", json!(1), "unknown field `nope`"),
         ] {
@@ -599,6 +682,11 @@ mod tests {
             let e = effective("a", None, &f).unwrap_err();
             assert!(e.contains(want), "{k}: {e}");
         }
+        let mut f = fields(ok.clone());
+        f.insert("identity_url".into(), json!("https://evil.example/me"));
+        f.insert("identity_field".into(), json!("login"));
+        let e = effective("a", None, &f).unwrap_err();
+        assert!(e.contains("evil.example is not one"), "{e}");
         let mut f = fields(ok);
         f.remove("token_url");
         let e = effective("a", None, &f).unwrap_err();
@@ -616,6 +704,8 @@ mod tests {
             redirect: Some("https-paste".into()),
             pkce: Some(false),
             token_path: Some("/authed_user".into()),
+            redirect_host: Some("127.0.0.1".into()),
+            device_url: Some("https://x.example/device".into()),
             setup: vec![r#"{"title":"T","page":"https://x.example"}"#.into()],
             ..Default::default()
         };
@@ -630,6 +720,8 @@ mod tests {
                 "redirect": "https-paste",
                 "pkce": false,
                 "token_path": "/authed_user",
+                "redirect_host": "127.0.0.1",
+                "device_url": "https://x.example/device",
                 "setup": [{"title": "T", "page": "https://x.example"}],
             })
         );

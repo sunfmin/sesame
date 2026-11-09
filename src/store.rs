@@ -25,6 +25,8 @@ pub struct Token {
     pub resource_name: Option<String>,
     /// Pasted by the person (`sesame login --token`), not from an OAuth login.
     pub pasted: bool,
+    /// Who signed in, from the provider's `identity_url`.
+    pub account: Option<String>,
 }
 
 /// The schema, one step per `PRAGMA user_version`: append a step, never edit one.
@@ -53,6 +55,10 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL,
         PRIMARY KEY (provider, field)
     );
+",
+    "
+    -- Who signed in, from the provider's identity_url.
+    ALTER TABLE tokens ADD COLUMN account TEXT;
 ",
     "
     -- 1 for a token the person pasted (`sesame login --token`).
@@ -184,7 +190,8 @@ impl Store {
     pub fn token(&self, provider: &str) -> Result<Option<Token>, String> {
         self.conn
             .query_row(
-                "SELECT access_token, refresh_token, expires_at, scope, resource_id, resource_name, pasted
+                "SELECT access_token, refresh_token, expires_at, scope, resource_id, resource_name,
+                        account, pasted
                  FROM tokens WHERE provider = ?1",
                 [provider],
                 |r| {
@@ -195,7 +202,8 @@ impl Store {
                         scope: r.get(3)?,
                         resource_id: r.get(4)?,
                         resource_name: r.get(5)?,
-                        pasted: r.get(6)?,
+                        account: r.get(6)?,
+                        pasted: r.get(7)?,
                     })
                 },
             )
@@ -207,8 +215,9 @@ impl Store {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO tokens
-                 (provider, access_token, refresh_token, expires_at, scope, resource_id, resource_name, pasted)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (provider, access_token, refresh_token, expires_at, scope, resource_id, resource_name,
+                  account, pasted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     provider,
                     t.access_token,
@@ -217,6 +226,7 @@ impl Store {
                     t.scope,
                     t.resource_id,
                     t.resource_name,
+                    t.account,
                     t.pasted
                 ],
             )
@@ -337,6 +347,7 @@ mod tests {
             scope: None,
             resource_id: None,
             resource_name: None,
+            account: None,
             pasted: false,
         };
         Store::open_at(db.clone())
@@ -376,6 +387,7 @@ mod tests {
             scope: None,
             resource_id: Some("site".into()),
             resource_name: None,
+            account: None,
             pasted: true,
         };
         Store::open_at(db.clone())
