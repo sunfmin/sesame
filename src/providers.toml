@@ -1,0 +1,31 @@
+# Built-in providers. A provider is one OAuth realm: one login, one token.
+# ~/.config/saas/providers.toml may add providers or replace one by name.
+
+[google]
+about = "Google APIs: Drive, Docs, Sheets, YouTube, ..."
+auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+api_base = "https://www.googleapis.com"
+hosts = ["*.googleapis.com"]
+scopes = [
+  "openid",
+  "email",
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/documents.readonly",
+  "https://www.googleapis.com/auth/youtube.readonly",
+]
+auth_params = { access_type = "offline", prompt = "consent" }
+register = "https://console.cloud.google.com/apis/credentials -> Create OAuth client ID -> Desktop app"
+
+[jira]
+about = "Jira Cloud (Atlassian OAuth 2.0 3LO)"
+auth_url = "https://auth.atlassian.com/authorize"
+token_url = "https://auth.atlassian.com/oauth/token"
+token_body = "json"
+api_base = "https://api.atlassian.com/ex/jira/{resource_id}"
+hosts = ["api.atlassian.com"]
+scopes = ["read:jira-work", "write:jira-work", "read:jira-user", "offline_access"]
+auth_params = { audience = "api.atlassian.com", prompt = "consent" }
+resources_url = "https://api.atlassian.com/oauth/token/accessible-resources"
+redirect_port = 8749
+register = "https://developer.atlassian.com/console/myapp/ -> OAuth 2.0 integration; callback URL http://localhost:8749/callback; add the Jira API scopes"
