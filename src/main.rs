@@ -49,7 +49,8 @@ enum Cmd {
         #[arg(long, conflicts_with = "secret_stdin")]
         no_secret: bool,
     },
-    /// Sign in through the provider's OAuth page and store the token.
+    /// Sign in through the provider's OAuth page and store the token. A provider
+    /// with a device endpoint (github) prints a code to enter on its page instead.
     Login {
         provider: String,
         /// Scope to ask for instead of the provider's defaults; repeatable.
@@ -58,6 +59,10 @@ enum Cmd {
         /// Print the URL only; do not try to open a browser.
         #[arg(long)]
         no_browser: bool,
+        /// Sign in through the loopback redirect even when the provider offers
+        /// the device flow (needs the client secret where the provider does).
+        #[arg(long)]
+        browser: bool,
         /// Which site to use when the login reaches several (Jira).
         #[arg(long)]
         site: Option<String>,
@@ -129,10 +134,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     (Some(_), None) => {
                         ("not logged in".to_string(), format!("sesame login {name}"))
                     }
-                    (Some(_), Some(t)) => match &t.resource_name {
-                        Some(site) => (format!("logged in ({site})"), String::new()),
-                        None => ("logged in".to_string(), String::new()),
-                    },
+                    (Some(_), Some(t)) => (format!("logged in{}", who(t)), String::new()),
                 };
                 let next = if next.is_empty() {
                     next
@@ -196,6 +198,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             provider,
             scopes,
             no_browser,
+            browser,
             site,
         } => {
             let p = providers::get(&provider)?;
@@ -203,13 +206,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 scopes: (!scopes.is_empty()).then_some(scopes),
                 open_browser: !no_browser && std::env::var_os("SSH_CONNECTION").is_none(),
                 site,
+                loopback: browser,
             };
             let t = oauth::login(&provider, &p, &opts)?;
-            let site = t
-                .resource_name
-                .map(|s| format!(" ({s})"))
-                .unwrap_or_default();
-            eprintln!("Logged in to `{provider}`{site}.");
+            eprintln!("Logged in to `{provider}`{}.", who(&t));
         }
         Cmd::Logout { provider } => {
             Store::open()?.delete_token(&provider)?;
@@ -231,6 +231,20 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// ` (site, account)` for a token, from what login learned; empty if nothing.
+fn who(t: &Token) -> String {
+    let parts: Vec<&str> = [&t.resource_name, &t.account]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
 }
 
 fn api(
@@ -261,7 +275,7 @@ fn api(
     let method = method.unwrap_or_else(|| if body.is_some() { "POST" } else { "GET" }.into());
     let method =
         reqwest::Method::from_bytes(method.to_uppercase().as_bytes()).map_err(|e| e.to_string())?;
-    let http = reqwest::blocking::Client::new();
+    let http = oauth::http();
     let send = |token: &Token| {
         let mut req = http
             .request(method.clone(), url.clone())
