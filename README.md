@@ -69,7 +69,7 @@ sesame logout jira                            # forgets the local token only
   synced folder.
 - **`logout`** deletes the local token only; to revoke it, remove the app's
   access on the provider's side (Google account permissions, Atlassian
-  connected apps, Notion's Settings > Connections, Figma's Settings > Security > Connected apps, GitHub's Settings > Applications).
+  connected apps, Notion's Settings > Connections, GitHub's Settings > Applications).
 - **`api`** sends the token only to the provider's `hosts`; a 401 triggers one
   refresh and retry.
 
