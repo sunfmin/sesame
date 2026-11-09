@@ -758,6 +758,124 @@ mod tests {
     }
 
     #[test]
+    fn google_services() {
+        let g = built_in("google");
+        assert_eq!(g.scopes, ["openid", "email"]);
+        assert_eq!(g.auth_params["include_granted_scopes"], "true");
+        let auth = |s: &str| format!("https://www.googleapis.com/auth/{s}");
+        for (name, base, scopes) in [
+            (
+                "drive",
+                "https://www.googleapis.com/drive/v3",
+                vec!["drive.readonly"],
+            ),
+            (
+                "docs",
+                "https://docs.googleapis.com/v1",
+                vec!["documents.readonly"],
+            ),
+            (
+                "youtube",
+                "https://www.googleapis.com/youtube/v3",
+                vec!["youtube.readonly"],
+            ),
+            (
+                "calendar",
+                "https://www.googleapis.com/calendar/v3",
+                vec!["calendar.readonly", "calendar.events"],
+            ),
+            (
+                "gmail",
+                "https://gmail.googleapis.com/gmail/v1",
+                vec!["gmail.readonly", "gmail.send"],
+            ),
+        ] {
+            let s = &g.services[name];
+            assert_eq!(s.api_base, base, "{name}");
+            let want: Vec<String> = scopes.iter().map(|s| auth(s)).collect();
+            assert_eq!(s.scopes, want, "{name}");
+            assert!(!s.setup.is_empty(), "{name}");
+        }
+        assert_eq!(g.services.len(), 5);
+    }
+
+    #[test]
+    fn a_changed_service_is_stored_alone() {
+        let g = built_in("google");
+        let base = as_fields(&g);
+        let mut gmail = as_fields(&g.services["gmail"]);
+        assert_eq!(
+            base_value(&base, "services.gmail"),
+            Some(&Value::Object(gmail.clone()))
+        );
+        gmail.insert("scopes".into(), json!(["x"]));
+        let user = fields(json!({"services.gmail": gmail, "services.youtube": null}));
+        let p = effective("google", Some(&g), &user).unwrap();
+        assert_eq!(p.services["gmail"].scopes, ["x"]);
+        assert_eq!(p.services["drive"], g.services["drive"]);
+        assert!(!p.services.contains_key("youtube"));
+    }
+
+    #[test]
+    fn service_flags() {
+        let flags = FieldFlags {
+            services: vec![
+                "name=a,api-base=https://a.example/v1,scope=r,scope=w,about=A".into(),
+                r#"{"name": "b", "api_base": "https://b.example"}"#.into(),
+            ],
+            drop_services: vec!["c".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            Value::Object(flags.fields().unwrap()),
+            json!({
+                "services.a": {"api_base": "https://a.example/v1", "scopes": ["r", "w"], "about": "A"},
+                "services.b": {"api_base": "https://b.example"},
+                "services.c": null,
+            })
+        );
+        for (bad, want) in [
+            ("api-base=https://a.example", "has no name"),
+            ("name=a,base=x", "unknown key `base`"),
+            ("name=a,x", "not key=value"),
+            ("[1]", "not key=value"),
+        ] {
+            let flags = FieldFlags {
+                services: vec![bad.into()],
+                ..Default::default()
+            };
+            let e = flags.fields().unwrap_err();
+            assert!(e.contains(want), "{bad}: {e}");
+        }
+        let ok = json!({
+            "auth_url": "https://a.example/auth",
+            "token_url": "https://a.example/token",
+            "api_base": "https://api.a.example",
+            "hosts": ["*.a.example"],
+        });
+        for (svc, want) in [
+            (
+                json!({"api_base": "https://evil.example"}),
+                "evil.example is not one",
+            ),
+            (json!({"api_base": "nope"}), "service `s` api_base"),
+            (json!({"scopes": []}), "missing field `api_base`"),
+        ] {
+            let mut f = fields(ok.clone());
+            f.insert("services.s".into(), svc);
+            let e = effective("a", None, &f).unwrap_err();
+            assert!(e.contains(want), "{e}");
+        }
+        let mut f = fields(ok);
+        f.insert(
+            "services.b d".into(),
+            json!({"api_base": "https://x.a.example"}),
+        );
+        let e = effective("a", None, &f).unwrap_err();
+        assert!(e.contains("service name `b d`"), "{e}");
+    }
+
+    #[test]
     fn host_patterns() {
         let p = built_in("google");
         assert!(p.allows_host("docs.googleapis.com"));
