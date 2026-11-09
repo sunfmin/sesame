@@ -405,3 +405,221 @@ fn provider_set_show_rm() {
     assert!(!ok && err.contains("sesame provider add nope"), "{err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A fake OAuth server: `answer(target, body)` gives the status line and the
+/// JSON body for each request; every `target body` is logged.
+fn serve(
+    mut answer: impl FnMut(&str, &str) -> (&'static str, String) + Send + 'static,
+) -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            let body = String::from_utf8(body).unwrap();
+            log2.lock().unwrap().push(format!("{target} {body}"));
+            let mut s = stream;
+            if target.starts_with("/authorize") {
+                // Play the provider's consent page: straight back to the redirect.
+                let u = url::Url::parse(&format!("http://x{target}")).unwrap();
+                let q = |k: &str| {
+                    u.query_pairs()
+                        .find(|(n, _)| n == k)
+                        .unwrap()
+                        .1
+                        .into_owned()
+                };
+                let loc = format!("{}?code=the-code&state={}", q("redirect_uri"), q("state"));
+                write!(s, "HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                continue;
+            }
+            let (status, b) = answer(&target, &body);
+            write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len()).unwrap();
+        }
+    });
+    (port, log)
+}
+
+/// The device flow end to end with a client that has no secret: pending, then
+/// slow_down, then a token; the account read after login; an expired code; and
+/// `--browser` taking the loopback redirect on 127.0.0.1.
+#[test]
+fn device_flow_and_browser_fallback() {
+    let mut devices = 0;
+    let mut polls = 0;
+    let (port, log) = serve(move |target, body| match target {
+        "/device" => {
+            devices += 1;
+            let code = if devices == 1 {
+                "dev-ok"
+            } else {
+                "dev-expired"
+            };
+            let b = format!(
+                r#"{{"device_code":"{code}","user_code":"WDJB-MJHT","verification_uri":"https://example.com/device","expires_in":60,"interval":0}}"#
+            );
+            ("200 OK", b)
+        }
+        "/token" if body.contains("device_code=dev-expired") => {
+            ("400 Bad Request", r#"{"error":"expired_token"}"#.into())
+        }
+        "/token" if body.contains("grant_type=urn") => {
+            polls += 1;
+            match polls {
+                // RFC 8628 answers 400; GitHub answers 200 with the error.
+                1 => (
+                    "400 Bad Request",
+                    r#"{"error":"authorization_pending"}"#.into(),
+                ),
+                2 => ("200 OK", r#"{"error":"slow_down","interval":1}"#.into()),
+                _ => (
+                    "200 OK",
+                    r#"{"access_token":"device-token","scope":"repo"}"#.into(),
+                ),
+            }
+        }
+        "/token" => ("200 OK", r#"{"access_token":"browser-token"}"#.into()),
+        "/user" => ("200 OK", r#"{"login":"octo","id":1}"#.into()),
+        _ => ("404 Not Found", "{}".into()),
+    });
+    let tmp = std::env::temp_dir().join(format!("sesame-device-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let sesame = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sesame"))
+            .args(args)
+            .env("SESAME_CONFIG_DIR", &config)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok, out) = sesame(&[
+        "provider",
+        "add",
+        "hub",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/token"),
+        "--api-base",
+        &base,
+        "--host",
+        "127.0.0.1",
+        "--scope",
+        "repo",
+        "--device-url",
+        &format!("{base}/device"),
+        "--redirect-host",
+        "127.0.0.1",
+        "--identity-url",
+        &format!("{base}/user"),
+        "--identity-field",
+        "login",
+    ]);
+    assert!(ok, "{out}");
+    let (ok, out) = sesame(&["provider", "show", "hub"]);
+    assert!(ok, "{out}");
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(shown["redirect_host"]["value"], "127.0.0.1");
+    assert_eq!(shown["device_url"]["from"], "user");
+    assert_eq!(shown["identity_field"]["value"], "login");
+    let (ok, out) = sesame(&["setup", "hub"]);
+    assert!(
+        ok && out.contains("--no-secret") && out.contains("enters the code"),
+        "{out}"
+    );
+
+    let (ok, out) = sesame(&["client", "hub", "--client-id", "cid", "--no-secret"]);
+    assert!(ok, "{out}");
+
+    let started = std::time::Instant::now();
+    let (ok, out) = sesame(&["login", "hub", "--no-browser"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("https://example.com/device") && out.contains("WDJB-MJHT"),
+        "{out}"
+    );
+    assert!(out.contains("Logged in to `hub` (octo)"), "{out}");
+    // The slow_down's interval of 1s was kept to.
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+    let (_, out) = sesame(&["providers"]);
+    assert!(out.contains("logged in (octo)"), "{out}");
+    let (ok, out) = sesame(&["token", "hub"]);
+    assert!(ok && out.trim() == "device-token", "{out}");
+
+    let (ok, out) = sesame(&["login", "hub", "--no-browser"]);
+    assert!(!ok && out.contains("expired"), "{out}");
+
+    // --browser: the loopback redirect, on 127.0.0.1 rather than localhost.
+    let mut login = Command::new(env!("CARGO_BIN_EXE_sesame"))
+        .args(["login", "hub", "--browser", "--no-browser"])
+        .env("SESAME_CONFIG_DIR", &config)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(login.stderr.take().unwrap());
+    let auth_url = loop {
+        let mut l = String::new();
+        assert!(
+            err.read_line(&mut l).unwrap() > 0,
+            "login ended before printing a URL"
+        );
+        if let Some(u) = l.trim().strip_prefix("http") {
+            break format!("http{u}");
+        }
+    };
+    let redirect = url::Url::parse(&auth_url)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "redirect_uri")
+        .unwrap()
+        .1
+        .into_owned();
+    assert!(redirect.starts_with("http://127.0.0.1:"), "{redirect}");
+    let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
+    assert!(page.contains("Signed in"));
+    let status = login.wait().unwrap();
+    let mut rest = String::new();
+    err.read_to_string(&mut rest).unwrap();
+    assert!(status.success(), "login --browser failed: {rest}");
+    let (_, out) = sesame(&["token", "hub"]);
+    assert_eq!(out.trim(), "browser-token");
+
+    let log = log.lock().unwrap();
+    assert!(log.iter().all(|l| !l.contains("client_secret")), "{log:?}");
+    let device = log.iter().find(|l| l.starts_with("/device ")).unwrap();
+    assert!(
+        device.contains("client_id=cid") && device.contains("scope=repo"),
+        "{device}"
+    );
+    let polls = log
+        .iter()
+        .filter(|l| l.contains("device_code=dev-ok"))
+        .count();
+    assert_eq!(polls, 3, "{log:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
