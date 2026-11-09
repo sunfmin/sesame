@@ -9,7 +9,7 @@
 //! and pick. In `details`, `{callback}` is the redirect URL login uses and
 //! `{scopes}` the provider's `scopes`, so neither is written twice. sesame adds
 //! the closing steps itself (store the client, log in, call the API).
-use super::{ClientAuth, Provider, RedirectHost, SetupStep, TokenBody};
+use super::{ClientAuth, Provider, Redirect, RedirectHost, SetupStep, TokenBody};
 use std::collections::BTreeMap;
 
 fn strings(xs: &[&str]) -> Vec<String> {
@@ -38,6 +38,7 @@ pub fn all() -> BTreeMap<String, Provider> {
         ("jira".into(), jira()),
         ("linear".into(), linear()),
         ("notion".into(), notion()),
+        ("slack".into(), slack()),
     ])
 }
 
@@ -55,8 +56,11 @@ fn github() -> Provider {
         hosts: strings(&["api.github.com", "uploads.github.com"]),
         scope_separator: " ".into(),
         scopes: strings(&["repo", "read:org"]),
+        scope_param: "scope".into(),
         auth_params: BTreeMap::new(),
+        pkce: true,
         token_body: TokenBody::Form,
+        token_path: String::new(),
         client_auth: ClientAuth::Body,
         api_headers: params(&[
             ("Accept", "application/vnd.github+json"),
@@ -64,6 +68,7 @@ fn github() -> Provider {
         ]),
         resources_url: None,
         site_name_field: None,
+        redirect: Redirect::Loopback,
         redirect_port: None,
         code_seconds: None,
         redirect_host: RedirectHost::Loopback,
@@ -117,12 +122,16 @@ fn google() -> Provider {
             "https://www.googleapis.com/auth/documents.readonly",
             "https://www.googleapis.com/auth/youtube.readonly",
         ]),
+        scope_param: "scope".into(),
         auth_params: params(&[("access_type", "offline"), ("prompt", "consent")]),
+        pkce: true,
         token_body: TokenBody::Form,
+        token_path: String::new(),
         client_auth: ClientAuth::Body,
         api_headers: BTreeMap::new(),
         resources_url: None,
         site_name_field: None,
+        redirect: Redirect::Loopback,
         redirect_port: None,
         code_seconds: None,
         redirect_host: RedirectHost::Localhost,
@@ -206,12 +215,16 @@ fn jira() -> Provider {
             "read:jira-user",
             "offline_access",
         ]),
+        scope_param: "scope".into(),
         auth_params: params(&[("audience", "api.atlassian.com"), ("prompt", "consent")]),
+        pkce: true,
         token_body: TokenBody::Json,
+        token_path: String::new(),
         client_auth: ClientAuth::Body,
         api_headers: BTreeMap::new(),
         resources_url: Some("https://api.atlassian.com/oauth/token/accessible-resources".into()),
         site_name_field: None,
+        redirect: Redirect::Loopback,
         redirect_port: Some(8749),
         code_seconds: None,
         redirect_host: RedirectHost::Localhost,
@@ -254,6 +267,91 @@ It must match exactly, so do not change localhost or the port. Click Save change
     }
 }
 
+/// Slack Web API with a user token: sesame acts as the person, not as a bot.
+/// Slack's OAuth (https://docs.slack.dev/authentication/installing-with-oauth):
+/// user scopes go in `user_scope`, the user token comes back under
+/// `authed_user`, the redirect URL must be https, and a failed call is often
+/// HTTP 200 with `"ok": false`. PKCE is off: Slack accepts it only once the
+/// app opts in, which only Slack support can undo
+/// (https://docs.slack.dev/authentication/using-pkce).
+fn slack() -> Provider {
+    Provider {
+        about: "Slack Web API, as yourself (user token)".into(),
+        auth_url: "https://slack.com/oauth/v2/authorize".into(),
+        token_url: "https://slack.com/api/oauth.v2.access".into(),
+        refresh_url: None,
+        api_base: "https://slack.com/api".into(),
+        hosts: strings(&["slack.com"]),
+        scopes: strings(&[
+            "channels:read",
+            "groups:read",
+            "im:read",
+            "mpim:read",
+            "channels:history",
+            "groups:history",
+            "im:history",
+            "mpim:history",
+            "chat:write",
+            "users:read",
+        ]),
+        scope_param: "user_scope".into(),
+        scope_separator: ",".into(),
+        auth_params: BTreeMap::new(),
+        pkce: false,
+        token_body: TokenBody::Form,
+        token_path: "/authed_user".into(),
+        client_auth: ClientAuth::Body,
+        api_headers: BTreeMap::new(),
+        resources_url: None,
+        site_name_field: Some("/team/name".into()),
+        redirect: Redirect::HttpsPaste,
+        redirect_port: Some(8751),
+        code_seconds: None,
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        // https://docs.slack.dev/reference/methods/auth.test: who the token is,
+        // also for a pasted one.
+        identity_url: Some("https://slack.com/api/auth.test".into()),
+        identity_field: Some("user".into()),
+        identity_body: None,
+        // A failed call is HTTP 200 with `"ok": false` and an `error` code.
+        error_fields: strings(&["error"]),
+        setup: vec![
+            step(
+                "Create a Slack app",
+                Some("https://api.slack.com/apps"),
+                "\
+Click Create New App, choose From scratch, enter an App Name (e.g. \"sesame\") and pick the
+workspace you will sign in to, then click Create App. The app's page opens with a left menu.",
+            ),
+            step(
+                "Add the User Token Scopes (left menu: OAuth & Permissions)",
+                None,
+                "\
+Under Scopes > User Token Scopes (not Bot Token Scopes: sesame acts as you), click
+Add an OAuth Scope for each one sesame asks for: {scopes}",
+            ),
+            step(
+                "Add the redirect URL (left menu: OAuth & Permissions)",
+                None,
+                "\
+Under Redirect URLs click Add New Redirect URL, enter {callback}, click Add, then Save URLs.
+Slack takes only https redirect URLs, so nothing listens there: at login the browser ends on a
+page it cannot open, and you paste that page's address into the terminal.
+If the console refuses this URL, sign in with a pasted token instead, then go to the last step:
+on the same page click Install to Workspace and Allow, copy the User OAuth Token (it starts
+with xoxp-), and run `sesame login slack --token` in your own terminal; it asks for the token
+with hidden input.",
+            ),
+            step(
+                "Copy the client ID and secret (left menu: Basic Information)",
+                None,
+                "Under App Credentials: the Client ID, and the Client Secret (click Show). Keep the page open for the next step.",
+            ),
+        ],
+    }
+}
+
 /// Notion's public integration: no scopes (the person picks the pages on the
 /// consent page), HTTP Basic at the token endpoint, and a `Notion-Version` on
 /// every API request. Steps from https://developers.notion.com/docs/authorization.
@@ -266,13 +364,17 @@ fn notion() -> Provider {
         api_base: "https://api.notion.com/v1".into(),
         hosts: strings(&["api.notion.com"]),
         scopes: Vec::new(),
+        scope_param: "scope".into(),
         scope_separator: " ".into(),
         auth_params: params(&[("owner", "user")]),
+        pkce: true,
         token_body: TokenBody::Json,
+        token_path: String::new(),
         client_auth: ClientAuth::Basic,
         api_headers: params(&[("Notion-Version", "2026-03-11")]),
         resources_url: None,
         site_name_field: Some("workspace_name".into()),
+        redirect: Redirect::Loopback,
         // Notion allows http only for localhost, and matches the port and path exactly.
         redirect_port: Some(8750),
         code_seconds: None,
@@ -328,13 +430,17 @@ fn figma() -> Provider {
             "file_content:read",
             "file_comments:read",
         ]),
+        scope_param: "scope".into(),
         scope_separator: " ".into(),
         auth_params: BTreeMap::new(),
+        pkce: true,
         token_body: TokenBody::Form,
+        token_path: String::new(),
         client_auth: ClientAuth::Basic,
         api_headers: BTreeMap::new(),
         resources_url: None,
         site_name_field: None,
+        redirect: Redirect::Loopback,
         // Figma accepts only registered redirect URLs, so the port is fixed.
         redirect_port: Some(8753),
         code_seconds: Some(30),
@@ -390,13 +496,17 @@ fn linear() -> Provider {
         api_base: "https://api.linear.app".into(),
         hosts: strings(&["api.linear.app"]),
         scopes: strings(&["read", "write"]),
+        scope_param: "scope".into(),
         scope_separator: ",".into(),
         auth_params: BTreeMap::new(),
+        pkce: true,
         token_body: TokenBody::Form,
+        token_path: String::new(),
         client_auth: ClientAuth::Body,
         api_headers: BTreeMap::new(),
         resources_url: None,
         site_name_field: None,
+        redirect: Redirect::Loopback,
         // Linear documents no rule for the callback, so it is matched as registered.
         redirect_port: Some(8752),
         code_seconds: None,

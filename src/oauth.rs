@@ -1,9 +1,12 @@
-//! Login: the authorization-code flow with PKCE and a loopback redirect, or
-//! the device flow (RFC 8628); plus refresh.
-use crate::providers::{self, ClientAuth, Provider, TokenBody};
+//! Login: the authorization-code flow (with PKCE unless the provider turns it
+//! off), the code coming back on a loopback redirect or pasted from an https
+//! one; or the device flow (RFC 8628). Plus refresh, and storing a token the
+//! person pasted.
+use crate::providers::{ClientAuth, Provider, Redirect, TokenBody};
 use crate::store::{Client, Store, Token};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -78,12 +81,17 @@ fn loopback_flow(
     scopes: &[String],
     open_browser: bool,
 ) -> Result<Token, String> {
-    let listener = TcpListener::bind(("127.0.0.1", p.redirect_port.unwrap_or(0)))
-        .map_err(|e| format!("cannot listen for the redirect: {e}"))?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    let redirect_uri = providers::redirect_uri(p.redirect_host, port);
+    let (listener, redirect_uri) = match p.redirect {
+        Redirect::Loopback => {
+            let listener = TcpListener::bind(("127.0.0.1", p.redirect_port.unwrap_or(0)))
+                .map_err(|e| format!("cannot listen for the redirect: {e}"))?;
+            let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+            (Some((listener, port)), p.redirect_uri(port))
+        }
+        // `Provider::check` makes https-paste carry a port.
+        Redirect::HttpsPaste => (None, p.callback()),
+    };
     let verifier = random();
-    let challenge = B64.encode(Sha256::digest(verifier.as_bytes()));
     let state = random();
 
     let mut url = url::Url::parse(&p.auth_url).map_err(|e| e.to_string())?;
@@ -93,11 +101,14 @@ fn loopback_flow(
             .append_pair("client_id", &client.client_id)
             .append_pair("redirect_uri", &redirect_uri);
         if !scopes.is_empty() {
-            q.append_pair("scope", &scopes.join(&p.scope_separator));
+            q.append_pair(&p.scope_param, &scopes.join(&p.scope_separator));
         }
-        q.append_pair("state", &state)
-            .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256");
+        q.append_pair("state", &state);
+        if p.pkce {
+            let challenge = B64.encode(Sha256::digest(verifier.as_bytes()));
+            q.append_pair("code_challenge", &challenge)
+                .append_pair("code_challenge_method", "S256");
+        }
         for (k, v) in &p.auth_params {
             q.append_pair(k, v);
         }
@@ -108,39 +119,27 @@ fn loopback_flow(
         Some(s) => format!(" within {s} seconds: the code in it expires then"),
         None => String::new(),
     };
-    eprintln!(
-        "Waiting for the redirect to {redirect_uri}.\n\
-         On another machine than this one? Paste the address the browser ended on here{within}."
-    );
+    match p.redirect {
+        Redirect::Loopback => eprintln!(
+            "Waiting for the redirect to {redirect_uri}.\n\
+             On another machine than this one? Paste the address the browser ended on here{within}."
+        ),
+        Redirect::HttpsPaste => eprintln!(
+            "After you approve, the browser goes to {redirect_uri}?code=… and says it cannot\n\
+             open the page: that is expected. Copy the whole address from its address bar and\n\
+             paste it here{within}."
+        ),
+    }
     if open_browser {
         let _ = open::that_detached(url.as_str());
     }
 
     let (tx, rx) = mpsc::channel::<String>();
     let tx2 = tx.clone();
-    let origin = format!("http://{}:{port}", p.redirect_host.as_str());
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let mut stream = stream;
-            let mut line = String::new();
-            if BufReader::new(&stream).read_line(&mut line).is_err() {
-                continue;
-            }
-            let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
-            if !target.starts_with("/callback") {
-                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
-                continue;
-            }
-            let body = "Signed in. You can close this tab and return to the terminal.";
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = tx.send(format!("{origin}{target}"));
-            return;
-        }
-    });
+    if let Some((listener, port)) = listener {
+        let origin = format!("http://{}:{port}", p.redirect_host.as_str());
+        std::thread::spawn(move || listen(listener, &origin, tx));
+    }
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
             if line.contains("code=") || line.contains("error=") {
@@ -168,12 +167,14 @@ fn loopback_flow(
     }
     let code = param("code").ok_or("redirect carried no code")?;
 
-    let form = vec![
+    let mut form = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code),
         ("redirect_uri", redirect_uri),
-        ("code_verifier", verifier),
     ];
+    if p.pkce {
+        form.push(("code_verifier", verifier));
+    }
     let (status, text) = post(p, &p.token_url, form, Some(client))?;
     if !status.is_success() {
         return Err(code_refused(name, p, status, &text));
@@ -195,6 +196,31 @@ fn code_refused(name: &str, p: &Provider, status: reqwest::StatusCode, text: &st
         ));
     }
     e
+}
+
+/// Answers the browser's redirect to the loopback callback and sends its
+/// address, as `origin` and the path, to `tx`.
+fn listen(listener: TcpListener, origin: &str, tx: mpsc::Sender<String>) {
+    for stream in listener.incoming().flatten() {
+        let mut stream = stream;
+        let mut line = String::new();
+        if BufReader::new(&stream).read_line(&mut line).is_err() {
+            continue;
+        }
+        let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
+        if !target.starts_with("/callback") {
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            continue;
+        }
+        let body = "Signed in. You can close this tab and return to the terminal.";
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = tx.send(format!("{origin}{target}"));
+        return;
+    }
 }
 
 /// The device authorization grant (RFC 8628): the person enters a code on the
@@ -355,17 +381,28 @@ fn post(
     Ok((status, text))
 }
 
+/// The token in a token endpoint's answer: at `token_path`, or at the top
+/// level when nothing with an `access_token` is there (a Slack refresh).
 fn token_from(p: &Provider, text: &str, previous: Option<&Token>) -> Result<Token, String> {
+    if let Some(f) = p.error_in(text.as_bytes()) {
+        return Err(format!("token endpoint answered with `{f}`: {text}"));
+    }
     let v: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("token response: {e}: {text}"))?;
     let site_name = p
         .site_name_field
-        .as_ref()
-        .and_then(|f| v.get(f))
+        .as_deref()
+        .and_then(|f| match f.starts_with('/') {
+            true => v.pointer(f),
+            false => v.get(f),
+        })
         .and_then(|n| n.as_str())
         .map(String::from);
-    let t: TokenResponse =
-        serde_json::from_value(v).map_err(|e| format!("token response: {e}: {text}"))?;
+    let at = v
+        .pointer(&p.token_path)
+        .filter(|t| t.get("access_token").is_some())
+        .unwrap_or(&v);
+    let t = TokenResponse::deserialize(at).map_err(|e| format!("token response: {e}: {text}"))?;
     Ok(Token {
         access_token: t.access_token,
         // Providers that do not rotate refresh tokens omit it on refresh.
@@ -377,7 +414,36 @@ fn token_from(p: &Provider, text: &str, previous: Option<&Token>) -> Result<Toke
         resource_id: previous.and_then(|p| p.resource_id.clone()),
         resource_name: site_name.or_else(|| previous.and_then(|p| p.resource_name.clone())),
         account: previous.and_then(|p| p.account.clone()),
+        pasted: false,
     })
+}
+
+/// `sesame login --token`: stores a token the person got another way. It has
+/// no refresh token and no expiry: when it stops working, paste a new one.
+/// Who it belongs to is read from `identity_url`, as after a login.
+pub fn save_pasted(name: &str, p: &Provider, access_token: &str) -> Result<Token, String> {
+    let access_token = access_token.trim();
+    if access_token.is_empty() || access_token.contains(char::is_whitespace) {
+        return Err("the pasted token is empty or contains spaces".into());
+    }
+    let mut token = Token {
+        access_token: access_token.into(),
+        refresh_token: None,
+        expires_at: None,
+        scope: None,
+        resource_id: None,
+        resource_name: None,
+        account: None,
+        pasted: true,
+    };
+    if let (Some(url), Some(field)) = (&p.identity_url, &p.identity_field) {
+        match identify(p, &token, url, field) {
+            Ok(account) => token.account = Some(account),
+            Err(e) => eprintln!("Stored, but could not read who the token belongs to: {e}"),
+        }
+    }
+    Store::open()?.save_token(name, &token)?;
+    Ok(token)
 }
 
 fn pick_resource(token: &mut Token, url: &str, site: Option<&str>) -> Result<(), String> {

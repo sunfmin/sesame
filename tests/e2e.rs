@@ -1281,3 +1281,228 @@ fn separate_refresh_endpoint_and_expired_code() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+/// A provider shaped like Slack's: the user token under `authed_user` next
+/// to a bot token, the team name nested, and failures as HTTP 200 with
+/// `"ok": false` and an `error` code.
+fn fake_slack_provider() -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let (target, headers, body) = read_request(&stream);
+            let auth = header(&headers, "authorization").unwrap_or_default();
+            log2.lock().unwrap().push(format!("{target} {body}"));
+            let mut s = stream;
+            let t = target.as_str();
+            if t.starts_with("/authorize") {
+                let loc = format!(
+                    "{}?code=the-code&state={}",
+                    query(t, "redirect_uri").unwrap(),
+                    query(t, "state").unwrap()
+                );
+                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
+            } else if t == "/token" {
+                reply(
+                    &mut s,
+                    "200 OK",
+                    "",
+                    r#"{"ok":true,"access_token":"xoxb-bot","team":{"id":"T1","name":"Acme"},
+                       "authed_user":{"id":"U1","access_token":"xoxp-1","token_type":"user"}}"#,
+                );
+            } else if t == "/api/auth.test" {
+                let b = if ["Bearer xoxp-1", "Bearer xoxp-pasted"].contains(&auth.as_str()) {
+                    r#"{"ok":true,"user":"felix"}"#
+                } else {
+                    r#"{"ok":false,"error":"invalid_auth"}"#
+                };
+                reply(&mut s, "200 OK", "", b);
+            } else if t.starts_with("/api/chat.postMessage") {
+                reply(
+                    &mut s,
+                    "200 OK",
+                    "",
+                    r#"{"ok":false,"error":"channel_not_found"}"#,
+                );
+            } else {
+                reply(&mut s, "404 Not Found", "", "");
+            }
+        }
+    });
+    (port, log)
+}
+
+fn query(target: &str, k: &str) -> Option<String> {
+    let u = url::Url::parse(&format!("http://x{target}")).unwrap();
+    u.query_pairs()
+        .find(|(n, _)| n == k)
+        .map(|(_, v)| v.into_owned())
+}
+
+/// A provider shaped like Slack: scopes in `user_scope`, no PKCE, the user
+/// token under `authed_user`, an https callback whose address the person
+/// pastes, failures as HTTP 200 with `"ok": false` and an `error` code; then a pasted token.
+#[test]
+fn https_paste_user_token_error_field_pasted_token() {
+    let (port, log) = fake_slack_provider();
+    let tmp = std::env::temp_dir().join(format!("sesame-paste-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let sesame = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        c.args(args).env("SESAME_CONFIG_DIR", &config);
+        c
+    };
+    let run = |args: &[&str]| {
+        let out = sesame(args).output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok_, _, err) = run(&[
+        "provider",
+        "add",
+        "chat",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/token"),
+        "--api-base",
+        &format!("{base}/api"),
+        "--host",
+        "127.0.0.1",
+        "--scope",
+        "channels:read",
+        "--scope",
+        "chat:write",
+        "--scope-param",
+        "user_scope",
+        "--pkce",
+        "false",
+        "--token-path",
+        "/authed_user",
+        "--site-name-field",
+        "/team/name",
+        "--redirect",
+        "https-paste",
+        "--redirect-port",
+        "8751",
+        "--error-field",
+        "error",
+    ]);
+    assert!(ok_, "{err}");
+    let (_, out, _) = run(&["provider", "show", "chat"]);
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    for (k, v) in [
+        ("scope_param", serde_json::json!("user_scope")),
+        ("pkce", serde_json::json!(false)),
+        ("token_path", serde_json::json!("/authed_user")),
+        ("site_name_field", serde_json::json!("/team/name")),
+        ("redirect", serde_json::json!("https-paste")),
+        ("error_fields", serde_json::json!(["error"])),
+    ] {
+        assert_eq!(
+            shown[k],
+            serde_json::json!({"value": v, "from": "user"}),
+            "{k}"
+        );
+    }
+    let (_, out, _) = run(&["setup", "chat"]);
+    assert!(out.contains("https://localhost:8751/callback"), "{out}");
+    assert!(run(&["client", "chat", "--client-id", "cid", "--no-secret"]).0);
+
+    // Login: play the browser up to the https redirect, which nothing answers,
+    // and paste the address it would end on. `tamper` edits that address.
+    let login = |tamper: &dyn Fn(String) -> String| {
+        let mut login = sesame(&["login", "chat", "--no-browser"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut err = BufReader::new(login.stderr.take().unwrap());
+        let auth_url = loop {
+            let mut l = String::new();
+            assert!(err.read_line(&mut l).unwrap() > 0, "no URL printed");
+            if let Some(u) = l.trim().strip_prefix("http") {
+                break format!("http{u}");
+            }
+        };
+        let no_follow = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let resp = no_follow.get(&auth_url).send().unwrap();
+        let landed = resp.headers()["location"].to_str().unwrap().to_string();
+        assert!(
+            landed.starts_with("https://localhost:8751/callback?code="),
+            "{landed}"
+        );
+        let mut stdin = login.stdin.take().unwrap();
+        writeln!(stdin, "{}", tamper(landed)).unwrap();
+        drop(stdin);
+        let status = login.wait().unwrap();
+        let mut rest = String::new();
+        err.read_to_string(&mut rest).unwrap();
+        (status.success(), rest, auth_url)
+    };
+
+    let (ok_, err, _) = login(&|u| {
+        let (head, _) = u.split_once("state=").unwrap();
+        format!("{head}state=forged")
+    });
+    assert!(!ok_ && err.contains("state mismatch"), "{err}");
+    assert!(!run(&["token", "chat"]).0, "a forged state stored a token");
+
+    let (ok_, err, auth_url) = login(&|u| u);
+    assert!(ok_, "{err}");
+    assert!(err.contains("Logged in to `chat` (Acme)"), "{err}");
+    assert_eq!(
+        query(&auth_url[base.len()..], "user_scope").as_deref(),
+        Some("channels:read chat:write")
+    );
+    for absent in ["scope", "code_challenge"] {
+        assert_eq!(query(&auth_url[base.len()..], absent), None, "{auth_url}");
+    }
+    assert!(
+        !log.lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("code_verifier")),
+        "PKCE sent"
+    );
+    assert_eq!(run(&["token", "chat"]).1.trim(), "xoxp-1");
+    let (_, out, _) = run(&["providers"]);
+    assert!(out.contains("logged in (Acme)"), "{out}");
+
+    let (ok_, out, err) = run(&["api", "chat", "/auth.test"]);
+    assert!(ok_ && out.contains(r#""user":"felix""#), "{out}{err}");
+    let (ok_, out, err) = run(&[
+        "api",
+        "chat",
+        "/chat.postMessage",
+        "-d",
+        r#"{"channel":"C1","text":"hi"}"#,
+    ]);
+    assert!(!ok_, "ok:false exited zero");
+    assert!(out.contains("channel_not_found"), "{out}");
+    assert!(err.contains("carries `error`"), "{err}");
+
+    // The fallback: a token pasted on stdin, no OAuth login.
+    assert!(run(&["logout", "chat"]).0);
+    let mut paste = sesame(&["login", "chat", "--token-stdin"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(paste.stdin.take().unwrap(), "xoxp-pasted").unwrap();
+    assert!(paste.wait().unwrap().success());
+    let (ok_, out, err) = run(&["api", "chat", "/auth.test"]);
+    assert!(ok_ && out.contains("felix"), "{out}{err}");
+    let (_, out, _) = run(&["providers"]);
+    assert!(out.contains("logged in (pasted token)"), "{out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

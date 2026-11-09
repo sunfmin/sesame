@@ -26,11 +26,17 @@ pub struct Provider {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// The authorization URL's parameter that carries the scopes (Slack: `user_scope`).
+    #[serde(default = "default_scope_param")]
+    pub scope_param: String,
     /// What joins the scopes in the authorization URL: a space (OAuth's own), `,` for some.
     #[serde(default = "space")]
     pub scope_separator: String,
     #[serde(default)]
     pub auth_params: BTreeMap<String, String>,
+    /// Send PKCE (`code_challenge`, `code_verifier`) with the authorization code.
+    #[serde(default = "yes")]
+    pub pkce: bool,
     #[serde(default)]
     pub token_body: TokenBody,
     /// How the client authenticates to the token endpoint.
@@ -40,13 +46,23 @@ pub struct Provider {
     /// a `-H` of the same name replaces one.
     #[serde(default)]
     pub api_headers: BTreeMap<String, String>,
+    /// JSON pointer to the object in the token response that holds
+    /// `access_token` (Slack: `/authed_user`); empty for the top level. A
+    /// response without `access_token` there (a refresh) is read at the top level.
+    #[serde(default)]
+    pub token_path: String,
     /// Lists the sites a token can reach (Atlassian); the first, or `--site`, is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources_url: Option<String>,
-    /// The token response's field naming the site the login reached (Notion: `workspace_name`).
+    /// The token response's field naming the site the login reached (Notion:
+    /// `workspace_name`); a JSON pointer when it starts with `/` (Slack: `/team/name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site_name_field: Option<String>,
-    /// Fixed loopback port, for providers that match the callback URL exactly.
+    /// How the authorization code comes back to sesame.
+    #[serde(default)]
+    pub redirect: Redirect,
+    /// Fixed callback port, for providers that match the callback URL exactly;
+    /// required for `https-paste`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_port: Option<u16>,
     /// How many seconds the authorization code lasts, when it is short enough
@@ -101,6 +117,27 @@ pub enum TokenBody {
     #[default]
     Form,
     Json,
+}
+
+/// How the authorization code gets back from the browser.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Redirect {
+    /// `http://localhost:<port>/callback`, which login listens on.
+    #[default]
+    Loopback,
+    /// `https://localhost:<redirect_port>/callback`, for providers that accept
+    /// only https callbacks: nothing listens, the browser fails to open it, and
+    /// the person pastes the address it ended on into the terminal.
+    HttpsPaste,
+}
+
+fn default_scope_param() -> String {
+    "scope".into()
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -158,6 +195,9 @@ pub struct FieldFlags {
     /// A scope login asks for; repeatable. With none, the authorization URL has no `scope`.
     #[arg(long = "scope")]
     scopes: Vec<String>,
+    /// The authorization URL's parameter for the scopes (default `scope`; Slack `user_scope`).
+    #[arg(long)]
+    scope_param: Option<String>,
     /// What joins the scopes in the authorization URL (default: a space).
     #[arg(long)]
     scope_separator: Option<String>,
@@ -167,6 +207,17 @@ pub struct FieldFlags {
     /// How the token endpoint takes its body: `form` or `json`.
     #[arg(long)]
     token_body: Option<String>,
+    /// Whether login sends PKCE: `true` (default) or `false`.
+    #[arg(long)]
+    pkce: Option<bool>,
+    /// JSON pointer to the object holding `access_token` in the token response
+    /// (Slack `/authed_user`); empty for the top level.
+    #[arg(long)]
+    token_path: Option<String>,
+    /// How the code comes back: `loopback` (default, sesame listens on
+    /// http://localhost) or `https-paste` (https://localhost:<redirect-port>, pasted back).
+    #[arg(long)]
+    redirect: Option<String>,
     /// How the client authenticates to the token endpoint: `body` or `basic` (HTTP Basic).
     #[arg(long)]
     client_auth: Option<String>,
@@ -177,7 +228,8 @@ pub struct FieldFlags {
     /// URL listing the sites a token reaches (Atlassian).
     #[arg(long)]
     resources_url: Option<String>,
-    /// The token response's field naming the site the login reached (Notion: `workspace_name`).
+    /// The token response's field naming the site the login reached (Notion: `workspace_name`);
+    /// a JSON pointer when it starts with `/` (Slack: `/team/name`).
     #[arg(long)]
     site_name_field: Option<String>,
     /// Fixed loopback port for the callback, for providers that match it exactly.
@@ -232,12 +284,16 @@ impl FieldFlags {
             ("api_base", opt(self.api_base)),
             ("hosts", list(self.hosts)),
             ("scopes", list(self.scopes)),
+            ("scope_param", opt(self.scope_param)),
+            ("pkce", self.pkce.map(Value::from)),
             ("scope_separator", opt(self.scope_separator)),
             ("error_fields", list(self.error_fields)),
             ("token_body", opt(self.token_body)),
+            ("token_path", opt(self.token_path)),
             ("client_auth", opt(self.client_auth)),
             ("resources_url", opt(self.resources_url)),
             ("site_name_field", opt(self.site_name_field)),
+            ("redirect", opt(self.redirect)),
             ("redirect_port", self.redirect_port.map(Value::from)),
             ("code_seconds", self.code_seconds.map(Value::from)),
             ("redirect_host", opt(self.redirect_host)),
@@ -449,11 +505,6 @@ pub fn remove(name: &str) -> Result<String, String> {
     }
 }
 
-/// The loopback redirect URL login listens on, for the port it bound.
-pub fn redirect_uri(host: RedirectHost, port: u16) -> String {
-    format!("http://{}:{port}/callback", host.as_str())
-}
-
 fn check_url(field: &str, u: &str) -> Result<(), String> {
     let parsed = url::Url::parse(u).map_err(|e| format!("{field} `{u}`: {e}"))?;
     match parsed.scheme() {
@@ -533,6 +584,24 @@ impl Provider {
         if self.redirect_port == Some(0) {
             return Err("redirect_port 0: leave it out for any free port".into());
         }
+        if self.redirect == Redirect::HttpsPaste && self.redirect_port.is_none() {
+            return Err(
+                "redirect https-paste needs a redirect_port: the callback URL registered with the provider"
+                    .into(),
+            );
+        }
+        if self.scope_param.is_empty() || self.scope_param.contains([' ', '&', '=']) {
+            return Err(format!(
+                "scope_param `{}`: a URL parameter name",
+                self.scope_param
+            ));
+        }
+        if !self.token_path.is_empty() && !self.token_path.starts_with('/') {
+            return Err(format!(
+                "token_path `{}`: a JSON pointer, e.g. `/authed_user`; empty for the top level",
+                self.token_path
+            ));
+        }
         if self.code_seconds == Some(0) {
             return Err("code_seconds 0: leave it out when the provider does not say".into());
         }
@@ -547,11 +616,20 @@ impl Provider {
         Ok(())
     }
 
+    /// The redirect URL login sends, for the port it uses.
+    pub fn redirect_uri(&self, port: u16) -> String {
+        let scheme = match self.redirect {
+            Redirect::Loopback => "http",
+            Redirect::HttpsPaste => "https",
+        };
+        format!("{scheme}://{}:{port}/callback", self.redirect_host.as_str())
+    }
+
     /// The redirect URL to register with the provider: fixed when `redirect_port` is.
     pub fn callback(&self) -> String {
         match self.redirect_port {
-            Some(port) => redirect_uri(self.redirect_host, port),
-            None => format!("http://{}:<any port>/callback", self.redirect_host.as_str()),
+            Some(port) => self.redirect_uri(port),
+            None => self.redirect_uri(0).replace(":0/", ":<any port>/"),
         }
     }
 
@@ -602,7 +680,9 @@ mod tests {
     #[test]
     fn built_ins_are_valid() {
         let all = built_in::all();
-        for name in ["figma", "github", "google", "jira", "linear", "notion"] {
+        for name in [
+            "figma", "github", "google", "jira", "linear", "notion", "slack",
+        ] {
             assert!(all.contains_key(name), "{name}");
         }
         for (name, p) in &all {
@@ -652,6 +732,11 @@ mod tests {
             ),
             ("site_name_field", json!(""), "site_name_field is empty"),
             ("redirect_port", json!(0), "redirect_port 0"),
+            ("redirect", json!("https-paste"), "needs a redirect_port"),
+            ("redirect", json!("carrier-pigeon"), "unknown variant"),
+            ("scope_param", json!(""), "scope_param"),
+            ("token_path", json!("authed_user"), "JSON pointer"),
+            ("pkce", json!("maybe"), "expected a boolean"),
             ("refresh_url", json!("nope"), "refresh_url"),
             ("code_seconds", json!(0), "code_seconds 0"),
             (
@@ -719,6 +804,9 @@ mod tests {
             api_headers: vec!["Notion-Version: 2026-03-11".into()],
             client_auth: Some("basic".into()),
             redirect_port: Some(9000),
+            redirect: Some("https-paste".into()),
+            pkce: Some(false),
+            token_path: Some("/authed_user".into()),
             refresh_url: Some("https://x.example/refresh".into()),
             code_seconds: Some(30),
             redirect_host: Some("127.0.0.1".into()),
@@ -737,6 +825,9 @@ mod tests {
                 "api_headers": {"Notion-Version": "2026-03-11"},
                 "client_auth": "basic",
                 "redirect_port": 9000,
+                "redirect": "https-paste",
+                "pkce": false,
+                "token_path": "/authed_user",
                 "refresh_url": "https://x.example/refresh",
                 "code_seconds": 30,
                 "redirect_host": "127.0.0.1",
