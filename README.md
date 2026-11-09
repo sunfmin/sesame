@@ -16,6 +16,8 @@ sesame api github /user
 sesame api github /graphql -d '{"query":"{ viewer { login } }"}'
 sesame api jira /rest/api/3/issue -d @issue.json      # -d implies POST; -X, -H, -i as in curl
 sesame api notion /search -d '{}'             # Notion-Version is sent for you; -H replaces it
+sesame api figma /me
+sesame api figma /files/<key>
 curl -H "Authorization: Bearer $(sesame token jira)" ...
 sesame providers                              # who you are signed in to
 sesame logout jira                            # forgets the local token only
@@ -23,7 +25,7 @@ sesame logout jira                            # forgets the local token only
 
 ## How it works
 
-- **Provider** = one OAuth realm: one login, one token. The built-ins (github, google,
+- **Provider** = one OAuth realm: one login, one token. The built-ins (figma, github, google,
   jira, notion) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
   Your own providers, and your changes to a built-in one, are stored in
   `sesame.db` and managed with commands; there is no config file to edit:
@@ -42,7 +44,12 @@ sesame logout jira                            # forgets the local token only
   sends the client as HTTP Basic instead of in the body; `--api-header
   'Name: value'` goes on every `sesame api` request (a `-H` of that name
   replaces it); `--site-name-field` names the token response's field that
-  `sesame providers` shows as the site (Notion's `workspace_name`).
+  `sesame providers` shows as the site (Notion's `workspace_name`);
+  `--refresh-url` sends refreshes to their own endpoint (Figma's
+  `/v1/oauth/refresh`; without it, the token endpoint); `--code-seconds`
+  says how long the authorization code lasts (Figma: 30), so login asks for
+  the pasted address within that time and a refused exchange says the code
+  most likely expired.
 
   A built-in provider's fields you did not `set` follow each new version of
   sesame. `sesame provider add --help` lists every field; `add` and `set`
@@ -62,7 +69,7 @@ sesame logout jira                            # forgets the local token only
   synced folder.
 - **`logout`** deletes the local token only; to revoke it, remove the app's
   access on the provider's side (Google account permissions, Atlassian
-  connected apps, Notion's Settings > Connections, GitHub's Settings > Applications).
+  connected apps, Notion's Settings > Connections, Figma's Settings > Security > Connected apps, GitHub's Settings > Applications).
 - **`api`** sends the token only to the provider's `hosts`; a 401 triggers one
   refresh and retry.
 
