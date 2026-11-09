@@ -9,7 +9,7 @@
 //! and pick. In `details`, `{callback}` is the redirect URL login uses and
 //! `{scopes}` the provider's `scopes`, so neither is written twice. sesame adds
 //! the closing steps itself (store the client, log in, call the API).
-use super::{Provider, SetupStep, TokenBody};
+use super::{Provider, RedirectHost, SetupStep, TokenBody};
 use std::collections::BTreeMap;
 
 fn strings(xs: &[&str]) -> Vec<String> {
@@ -31,7 +31,60 @@ fn step(title: &str, page: Option<&str>, details: &str) -> SetupStep {
 }
 
 pub fn all() -> BTreeMap<String, Provider> {
-    BTreeMap::from([("google".into(), google()), ("jira".into(), jira())])
+    BTreeMap::from([
+        ("github".into(), github()),
+        ("google".into(), google()),
+        ("jira".into(), jira()),
+    ])
+}
+
+/// A GitHub OAuth App (not a GitHub App). Login is the device flow, which
+/// needs no client secret; `--browser` uses the loopback redirect on
+/// 127.0.0.1, whose port GitHub does not match against the registered one.
+/// https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps
+fn github() -> Provider {
+    Provider {
+        about: "GitHub REST and GraphQL APIs (OAuth App)".into(),
+        auth_url: "https://github.com/login/oauth/authorize".into(),
+        token_url: "https://github.com/login/oauth/access_token".into(),
+        api_base: "https://api.github.com".into(),
+        hosts: strings(&["api.github.com", "uploads.github.com"]),
+        scopes: strings(&["repo", "read:org"]),
+        auth_params: BTreeMap::new(),
+        token_body: TokenBody::Form,
+        resources_url: None,
+        redirect_port: None,
+        redirect_host: RedirectHost::Loopback,
+        device_url: Some("https://github.com/login/device/code".into()),
+        identity_url: Some("https://api.github.com/user".into()),
+        identity_field: Some("login".into()),
+        setup: vec![
+            step(
+                "Register an OAuth App (Settings > Developer settings > OAuth Apps)",
+                Some("https://github.com/settings/developers"),
+                "\
+Click New OAuth App (Register a new application if you have none yet). To have an
+organization own it, use that organization's Settings > Developer settings > OAuth Apps instead.
+- Application name: anything, e.g. \"sesame\"; people see it when they approve access.
+- Homepage URL: any page of yours, e.g. https://github.com/<you>.
+- Authorization callback URL: http://127.0.0.1/callback
+  (GitHub takes any port at login, so sesame listens on {callback}).
+- Tick Enable Device Flow: `sesame login github` uses it, and it needs no client secret.
+- Expire user access tokens: refreshing an expiring token needs the client secret. Without a
+  secret stored in sesame, untick it, or run `sesame login github` again when the token expires (8 hours).
+Click Register application.",
+            ),
+            step(
+                "Copy the Client ID",
+                None,
+                "\
+The app's page shows the Client ID. The device flow needs nothing else.
+Only for `sesame login github --browser`, or to refresh expiring tokens: click
+Generate a new client secret and keep it for the next step.
+The scopes sesame asks for at login: {scopes}",
+            ),
+        ],
+    }
 }
 
 fn google() -> Provider {
@@ -52,6 +105,10 @@ fn google() -> Provider {
         token_body: TokenBody::Form,
         resources_url: None,
         redirect_port: None,
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: None,
+        identity_field: None,
         setup: vec![
             step(
                 "Create or pick a Google Cloud project",
@@ -129,6 +186,10 @@ fn jira() -> Provider {
         token_body: TokenBody::Json,
         resources_url: Some("https://api.atlassian.com/oauth/token/accessible-resources".into()),
         redirect_port: Some(8749),
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: None,
+        identity_field: None,
         setup: vec![
             step(
                 "Create an OAuth 2.0 integration in the Atlassian developer console",

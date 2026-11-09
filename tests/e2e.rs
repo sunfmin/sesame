@@ -261,7 +261,7 @@ fn first_use_points_to_setup() {
     let (ok, out) = sesame(&["setup", "nope"]);
     assert!(!ok);
     assert!(out.contains("unknown provider `nope`"), "{out}");
-    assert!(out.contains("acme, google, jira"), "{out}");
+    assert!(out.contains("acme, github, google, jira"), "{out}");
 
     let (_, out) = sesame(&["providers"]);
     assert!(out.contains("next: sesame setup acme"), "{out}");
