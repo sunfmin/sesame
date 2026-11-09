@@ -9,7 +9,7 @@
 //! and pick. In `details`, `{callback}` is the redirect URL login uses and
 //! `{scopes}` the provider's `scopes`, so neither is written twice. sesame adds
 //! the closing steps itself (store the client, log in, call the API).
-use super::{Provider, RedirectHost, SetupStep, TokenBody};
+use super::{ClientAuth, Provider, RedirectHost, SetupStep, TokenBody};
 use std::collections::BTreeMap;
 
 fn strings(xs: &[&str]) -> Vec<String> {
@@ -35,6 +35,7 @@ pub fn all() -> BTreeMap<String, Provider> {
         ("github".into(), github()),
         ("google".into(), google()),
         ("jira".into(), jira()),
+        ("notion".into(), notion()),
     ])
 }
 
@@ -52,7 +53,13 @@ fn github() -> Provider {
         scopes: strings(&["repo", "read:org"]),
         auth_params: BTreeMap::new(),
         token_body: TokenBody::Form,
+        client_auth: ClientAuth::Body,
+        api_headers: params(&[
+            ("Accept", "application/vnd.github+json"),
+            ("X-GitHub-Api-Version", "2026-03-10"),
+        ]),
         resources_url: None,
+        site_name_field: None,
         redirect_port: None,
         redirect_host: RedirectHost::Loopback,
         device_url: Some("https://github.com/login/device/code".into()),
@@ -103,7 +110,10 @@ fn google() -> Provider {
         ]),
         auth_params: params(&[("access_type", "offline"), ("prompt", "consent")]),
         token_body: TokenBody::Form,
+        client_auth: ClientAuth::Body,
+        api_headers: BTreeMap::new(),
         resources_url: None,
+        site_name_field: None,
         redirect_port: None,
         redirect_host: RedirectHost::Localhost,
         device_url: None,
@@ -184,7 +194,10 @@ fn jira() -> Provider {
         ]),
         auth_params: params(&[("audience", "api.atlassian.com"), ("prompt", "consent")]),
         token_body: TokenBody::Json,
+        client_auth: ClientAuth::Body,
+        api_headers: BTreeMap::new(),
         resources_url: Some("https://api.atlassian.com/oauth/token/accessible-resources".into()),
+        site_name_field: None,
         redirect_port: Some(8749),
         redirect_host: RedirectHost::Localhost,
         device_url: None,
@@ -219,6 +232,57 @@ It must match exactly, so do not change localhost or the port. Click Save change
                 "Copy the client ID and secret (left menu: Settings)",
                 None,
                 "The authentication details show the Client ID and Secret. Keep the page open for the next step.",
+            ),
+        ],
+    }
+}
+
+/// Notion's public integration: no scopes (the person picks the pages on the
+/// consent page), HTTP Basic at the token endpoint, and a `Notion-Version` on
+/// every API request. Steps from https://developers.notion.com/docs/authorization.
+fn notion() -> Provider {
+    Provider {
+        about: "Notion (public integration OAuth)".into(),
+        auth_url: "https://api.notion.com/v1/oauth/authorize".into(),
+        token_url: "https://api.notion.com/v1/oauth/token".into(),
+        api_base: "https://api.notion.com/v1".into(),
+        hosts: strings(&["api.notion.com"]),
+        scopes: Vec::new(),
+        auth_params: params(&[("owner", "user")]),
+        token_body: TokenBody::Json,
+        client_auth: ClientAuth::Basic,
+        api_headers: params(&[("Notion-Version", "2026-03-11")]),
+        resources_url: None,
+        site_name_field: Some("workspace_name".into()),
+        // Notion allows http only for localhost, and matches the port and path exactly.
+        redirect_port: Some(8750),
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: None,
+        identity_field: None,
+        setup: vec![
+            step(
+                "Create an OAuth (public) integration in Notion's developer portal",
+                Some("https://app.notion.com/developers/connections"),
+                "\
+Sign in with your Notion account and create a new OAuth integration (a public one, not internal).
+Fill in the form with a name (e.g. \"sesame\"); for the installation scope, pick Any workspace,
+or the workspaces you will use: it cannot be changed after creation.",
+            ),
+            step(
+                "Set the redirect URI (the form's OAuth configuration section)",
+                None,
+                "\
+Redirect URI: {callback}
+It must match exactly: keep http, localhost (not 127.0.0.1) and the port. Save the integration.",
+            ),
+            step(
+                "Copy the client ID and secret (the integration's Configuration tab)",
+                None,
+                "\
+The Configuration tab shows the OAuth client ID and client secret. Keep it open for the next step.
+Notion has no scopes: at login, the consent page asks which pages and databases sesame may reach.
+To change them later, log in again, or share a page with the integration from Notion.",
             ),
         ],
     }

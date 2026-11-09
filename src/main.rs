@@ -280,14 +280,20 @@ fn api(
         let mut req = http
             .request(method.clone(), url.clone())
             .bearer_auth(&token.access_token);
-        let mut has_type = false;
+        let mut given = Vec::new();
         for h in headers {
             let (k, v) = h
                 .split_once(':')
                 .ok_or_else(|| format!("header `{h}` has no `:`"))?;
-            has_type |= k.trim().eq_ignore_ascii_case("content-type");
+            given.push(k.trim().to_ascii_lowercase());
             req = req.header(k.trim(), v.trim());
         }
+        for (k, v) in &p.api_headers {
+            if !given.contains(&k.to_ascii_lowercase()) {
+                req = req.header(k, v);
+            }
+        }
+        let has_type = given.iter().any(|k| k == "content-type");
         if let Some(b) = &body {
             if !has_type {
                 req = req.header("Content-Type", "application/json");

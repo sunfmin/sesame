@@ -1,6 +1,6 @@
 //! Login: the authorization-code flow with PKCE and a loopback redirect, or
 //! the device flow (RFC 8628); plus refresh.
-use crate::providers::{self, Provider, TokenBody};
+use crate::providers::{self, ClientAuth, Provider, TokenBody};
 use crate::store::{Client, Store, Token};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -90,9 +90,11 @@ fn loopback_flow(
         let mut q = url.query_pairs_mut();
         q.append_pair("response_type", "code")
             .append_pair("client_id", &client.client_id)
-            .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("scope", &scopes.join(" "))
-            .append_pair("state", &state)
+            .append_pair("redirect_uri", &redirect_uri);
+        if !scopes.is_empty() {
+            q.append_pair("scope", &scopes.join(" "));
+        }
+        q.append_pair("state", &state)
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256");
         for (k, v) in &p.auth_params {
@@ -188,11 +190,11 @@ fn device_flow(
         expires_in: Option<u64>,
         interval: Option<u64>,
     }
-    let form = vec![
-        ("client_id", client.client_id.clone()),
-        ("scope", scopes.join(" ")),
-    ];
-    let (status, text) = post(p, device_url, &form)?;
+    let mut form = vec![("client_id", client.client_id.clone())];
+    if !scopes.is_empty() {
+        form.push(("scope", scopes.join(" ")));
+    }
+    let (status, text) = post(p, device_url, form, None)?;
     if !status.is_success() {
         return Err(format!("device endpoint answered {status}: {text}"));
     }
@@ -215,18 +217,17 @@ fn device_flow(
     let mut interval = d.interval.unwrap_or(5);
     loop {
         std::thread::sleep(Duration::from_secs(interval));
-        let mut form = vec![
+        let form = vec![
             (
                 "grant_type",
                 "urn:ietf:params:oauth:grant-type:device_code".to_string(),
             ),
             ("device_code", d.device_code.clone()),
         ];
-        authenticate(client, &mut form);
-        let (status, text) = post(p, &p.token_url, &form)?;
+        let (status, text) = post(p, &p.token_url, form, Some(client))?;
         let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
         match v.get("error").and_then(|e| e.as_str()) {
-            None if status.is_success() => return token_from(&text, None),
+            None if status.is_success() => return token_from(p, &text, None),
             None => return Err(format!("token endpoint answered {status}: {text}")),
             Some("authorization_pending") => {}
             // The provider may name the new interval (GitHub does); else 5s more.
@@ -279,23 +280,29 @@ struct TokenResponse {
     scope: Option<String>,
 }
 
-fn authenticate(client: &Client, form: &mut Vec<(&str, String)>) {
-    form.push(("client_id", client.client_id.clone()));
-    if let Some(s) = &client.client_secret {
-        form.push(("client_secret", s.clone()));
-    }
-}
-
 /// POSTs `form` to one of the provider's OAuth endpoints, in its `token_body`
-/// encoding, asking for JSON.
+/// encoding, asking for JSON; with `client`, authenticated as its `client_auth` says.
 fn post(
     p: &Provider,
     url: &str,
-    form: &[(&str, String)],
+    mut form: Vec<(&str, String)>,
+    client: Option<&Client>,
 ) -> Result<(reqwest::StatusCode, String), String> {
-    let req = http().post(url).header("Accept", "application/json");
+    let mut req = http().post(url).header("Accept", "application/json");
+    match (client, p.client_auth) {
+        (None, _) => {}
+        (Some(c), ClientAuth::Body) => {
+            form.push(("client_id", c.client_id.clone()));
+            if let Some(s) = &c.client_secret {
+                form.push(("client_secret", s.clone()));
+            }
+        }
+        (Some(c), ClientAuth::Basic) => {
+            req = req.basic_auth(&c.client_id, c.client_secret.as_ref());
+        }
+    }
     let req = match p.token_body {
-        TokenBody::Form => req.form(form),
+        TokenBody::Form => req.form(&form),
         TokenBody::Json => req.json(
             &form
                 .iter()
@@ -312,20 +319,27 @@ fn post(
 fn request_token(
     p: &Provider,
     client: &Client,
-    mut form: Vec<(&str, String)>,
+    form: Vec<(&str, String)>,
     previous: Option<&Token>,
 ) -> Result<Token, String> {
-    authenticate(client, &mut form);
-    let (status, text) = post(p, &p.token_url, &form)?;
+    let (status, text) = post(p, &p.token_url, form, Some(client))?;
     if !status.is_success() {
         return Err(format!("token endpoint answered {status}: {text}"));
     }
-    token_from(&text, previous)
+    token_from(p, &text, previous)
 }
 
-fn token_from(text: &str, previous: Option<&Token>) -> Result<Token, String> {
-    let t: TokenResponse =
+fn token_from(p: &Provider, text: &str, previous: Option<&Token>) -> Result<Token, String> {
+    let v: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("token response: {e}: {text}"))?;
+    let site_name = p
+        .site_name_field
+        .as_ref()
+        .and_then(|f| v.get(f))
+        .and_then(|n| n.as_str())
+        .map(String::from);
+    let t: TokenResponse =
+        serde_json::from_value(v).map_err(|e| format!("token response: {e}: {text}"))?;
     Ok(Token {
         access_token: t.access_token,
         // Providers that do not rotate refresh tokens omit it on refresh.
@@ -335,7 +349,7 @@ fn token_from(text: &str, previous: Option<&Token>) -> Result<Token, String> {
         expires_at: t.expires_in.map(|s| now() + s),
         scope: t.scope.or_else(|| previous.and_then(|p| p.scope.clone())),
         resource_id: previous.and_then(|p| p.resource_id.clone()),
-        resource_name: previous.and_then(|p| p.resource_name.clone()),
+        resource_name: site_name.or_else(|| previous.and_then(|p| p.resource_name.clone())),
         account: previous.and_then(|p| p.account.clone()),
     })
 }
