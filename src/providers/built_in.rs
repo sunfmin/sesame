@@ -9,7 +9,7 @@
 //! and pick. In `details`, `{callback}` is the redirect URL login uses and
 //! `{scopes}` the provider's `scopes`, so neither is written twice. sesame adds
 //! the closing steps itself (store the client, log in, call the API).
-use super::{ClientAuth, Provider, RedirectHost, SetupStep, TokenBody};
+use super::{ClientAuth, Provider, RedirectHost, Service, SetupStep, TokenBody};
 use std::collections::BTreeMap;
 
 fn strings(xs: &[&str]) -> Vec<String> {
@@ -91,24 +91,48 @@ Generate a new client secret and keep it for the next step.
 The scopes sesame asks for at login: {scopes}",
             ),
         ],
+        services: BTreeMap::new(),
     }
 }
 
+/// Google's one OAuth client and token reach many APIs, each a service: login
+/// to a service adds its scopes to those granted (`include_granted_scopes`).
+/// Scope tiers: https://developers.google.com/workspace/gmail/api/auth/scopes,
+/// https://developers.google.com/workspace/drive/api/guides/api-specific-auth,
+/// https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification
 fn google() -> Provider {
+    let scopes = |xs: &[&str]| -> Vec<String> {
+        xs.iter()
+            .map(|s| format!("https://www.googleapis.com/auth/{s}"))
+            .collect()
+    };
+    let enable = |api: &str, page: &str, about: &str| {
+        vec![step(
+            &format!("Enable the {api}"),
+            Some(&format!(
+                "https://console.cloud.google.com/apis/library/{page}"
+            )),
+            &format!("Click Enable. Its scopes: {{scopes}}\n{about}"),
+        )]
+    };
+    let service = |about: &str, api_base: &str, s: &[&str], setup: Vec<SetupStep>| Service {
+        about: about.into(),
+        api_base: api_base.into(),
+        scopes: scopes(s),
+        setup,
+    };
     Provider {
-        about: "Google APIs: Drive, Docs, Sheets, YouTube, ...".into(),
+        about: "Google APIs: one sign-in for Drive, Docs, YouTube, Calendar, Gmail".into(),
         auth_url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
         token_url: "https://oauth2.googleapis.com/token".into(),
         api_base: "https://www.googleapis.com".into(),
         hosts: strings(&["*.googleapis.com"]),
-        scopes: strings(&[
-            "openid",
-            "email",
-            "https://www.googleapis.com/auth/drive.readonly",
-            "https://www.googleapis.com/auth/documents.readonly",
-            "https://www.googleapis.com/auth/youtube.readonly",
+        scopes: strings(&["openid", "email"]),
+        auth_params: params(&[
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            ("include_granted_scopes", "true"),
         ]),
-        auth_params: params(&[("access_type", "offline"), ("prompt", "consent")]),
         token_body: TokenBody::Form,
         client_auth: ClientAuth::Body,
         api_headers: BTreeMap::new(),
@@ -129,21 +153,6 @@ For a new one: enter a Project name, click Create, and wait until the console op
 Every later step happens in this project: check the project picker shows it.",
             ),
             step(
-                "Enable the Google Drive API",
-                Some("https://console.cloud.google.com/apis/library/drive.googleapis.com"),
-                "Click Enable.",
-            ),
-            step(
-                "Enable the Google Docs API",
-                Some("https://console.cloud.google.com/apis/library/docs.googleapis.com"),
-                "Click Enable.",
-            ),
-            step(
-                "Enable the YouTube Data API v3",
-                Some("https://console.cloud.google.com/apis/library/youtube.googleapis.com"),
-                "Click Enable.",
-            ),
-            step(
                 "Configure the consent screen (Google Auth Platform > Branding)",
                 Some("https://console.cloud.google.com/auth/branding"),
                 "\
@@ -160,9 +169,14 @@ If it says \"Google Auth platform not configured yet\", click Get Started, then:
 Under Test users click Add users, enter the Google account email you will sign in with, click Save.
 While the app's Publishing status is Testing, only test users can sign in, and Google lets
 their refresh token expire 7 days after consent: then `sesame login google` must run again.
-To stay signed in longer, click Publish app on this page (status becomes In production).
-The app is unverified, so the sign-in page shows an \"unverified app\" warning, and Google
-caps an unverified app at 100 users over its lifetime; for your own use that is fine.",
+That is fine for your own use. To stay signed in longer, click Publish app on this page
+(status becomes In production); the sign-in page then shows an \"unverified app\" warning,
+and Google caps an unverified app's users.
+Each service's scopes are sensitive or restricted, as its step below says. For yourself, in
+Testing or unverified, that needs no review. To let other people's accounts in, Google must
+verify the app; restricted scopes (Gmail read, Drive) also need a security assessment when
+their data is stored on or sent through servers:
+https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification",
             ),
             step(
                 "Create the OAuth client (Google Auth Platform > Clients)",
@@ -172,10 +186,69 @@ Click Create Client.
 - Application type: Desktop app (not Web application).
 - Name: anything, e.g. \"sesame\"; only the console shows it.
 Click Create. No redirect URI is entered: a Desktop app client accepts {callback}.
-The dialog that opens shows the Client ID and Client secret; keep it open for the next step.
-The scopes sesame asks for at login: {scopes}",
+The dialog that opens shows the Client ID and Client secret; keep them for storing the client below.
+`sesame login google` asks only for: {scopes}; each service's login adds its own.",
             ),
         ],
+        services: BTreeMap::from([
+            (
+                "calendar".into(),
+                service(
+                    "Google Calendar",
+                    "https://www.googleapis.com/calendar/v3",
+                    &["calendar.readonly", "calendar.events"],
+                    enable(
+                        "Google Calendar API",
+                        "calendar-json.googleapis.com",
+                        "Calendar's scopes are sensitive.",
+                    ),
+                ),
+            ),
+            (
+                "docs".into(),
+                service(
+                    "Google Docs",
+                    "https://docs.googleapis.com/v1",
+                    &["documents.readonly"],
+                    enable("Google Docs API", "docs.googleapis.com", ""),
+                ),
+            ),
+            (
+                "drive".into(),
+                service(
+                    "Google Drive",
+                    "https://www.googleapis.com/drive/v3",
+                    &["drive.readonly"],
+                    enable(
+                        "Google Drive API",
+                        "drive.googleapis.com",
+                        "drive.readonly is a restricted scope.",
+                    ),
+                ),
+            ),
+            (
+                "gmail".into(),
+                service(
+                    "Gmail",
+                    "https://gmail.googleapis.com/gmail/v1",
+                    &["gmail.readonly", "gmail.send"],
+                    enable(
+                        "Gmail API",
+                        "gmail.googleapis.com",
+                        "gmail.readonly is a restricted scope, gmail.send a sensitive one.",
+                    ),
+                ),
+            ),
+            (
+                "youtube".into(),
+                service(
+                    "YouTube Data API",
+                    "https://www.googleapis.com/youtube/v3",
+                    &["youtube.readonly"],
+                    enable("YouTube Data API v3", "youtube.googleapis.com", ""),
+                ),
+            ),
+        ]),
     }
 }
 
@@ -234,6 +307,7 @@ It must match exactly, so do not change localhost or the port. Click Save change
                 "The authentication details show the Client ID and Secret. Keep the page open for the next step.",
             ),
         ],
+        services: BTreeMap::new(),
     }
 }
 
@@ -285,5 +359,6 @@ Notion has no scopes: at login, the consent page asks which pages and databases 
 To change them later, log in again, or share a page with the integration from Notion.",
             ),
         ],
+        services: BTreeMap::new(),
     }
 }

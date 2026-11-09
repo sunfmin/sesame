@@ -5,11 +5,11 @@ use std::fmt::Write;
 
 pub fn render(name: &str, p: &Provider) -> String {
     let callback = p.callback();
-    let scopes = p.scopes.join(", ");
-    let fill = |s: &str| {
+    let fill = |s: &str, scopes: &[String]| {
         s.replace("{callback}", &callback)
-            .replace("{scopes}", &scopes)
+            .replace("{scopes}", &scopes.join(", "))
     };
+    let scopes = p.scopes.join(", ");
     let mut out = String::new();
     let mut n = 0;
     let mut step = |out: &mut String, title: &str, page: Option<&str>, details: &str| {
@@ -50,8 +50,33 @@ pub fn render(name: &str, p: &Provider) -> String {
         );
     }
     for s in &p.setup {
-        step(&mut out, &s.title, s.page.as_deref(), &fill(&s.details));
+        step(
+            &mut out,
+            &s.title,
+            s.page.as_deref(),
+            &fill(&s.details, &p.scopes),
+        );
     }
+    for (service, svc) in &p.services {
+        for s in &svc.setup {
+            let title = format!("{} (for `{service}`)", s.title);
+            step(
+                &mut out,
+                &title,
+                s.page.as_deref(),
+                &fill(&s.details, &svc.scopes),
+            );
+        }
+    }
+    // Each service's login adds its scopes to those the token has.
+    let services: String = p
+        .services
+        .iter()
+        .map(|(s, svc)| {
+            let about = if svc.about.is_empty() { s } else { &svc.about };
+            format!("\nsesame login {s:<10} # adds {about} to the one `{name}` token")
+        })
+        .collect();
     let (client, login) = if p.device_url.is_some() {
         (
             format!(
@@ -63,7 +88,7 @@ pub fn render(name: &str, p: &Provider) -> String {
                 "sesame login {name}\n\
                  It prints a code and a page: the person opens the page (anywhere, also from a\n\
                  remote machine), enters the code and approves access.\n\
-                 sesame login {name} --browser signs in through the redirect to {callback} instead."
+                 sesame login {name} --browser signs in through the redirect to {callback} instead.{services}"
             ),
         )
     } else {
@@ -74,7 +99,7 @@ pub fn render(name: &str, p: &Provider) -> String {
                  (An app without a secret: add --no-secret.)"
             ),
             format!(
-                "sesame login {name}\n\
+                "sesame login {name}{services}\n\
                  On a remote machine (SSH): open the printed URL anywhere, then paste the address\n\
                  the browser ends on back into the terminal."
             ),
@@ -92,14 +117,20 @@ pub fn render(name: &str, p: &Provider) -> String {
         None,
         &login,
     );
+    let api = if p.services.is_empty() {
+        format!("sesame api {name} <path>")
+    } else {
+        p.services
+            .iter()
+            .map(|(s, svc)| format!("sesame api {s:<10} <path>  # under {}", svc.api_base))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     step(
         &mut out,
         "Check, then call the API",
         None,
-        &format!(
-            "sesame providers        # `{name}` shows logged in\n\
-             sesame api {name} <path>"
-        ),
+        &format!("sesame providers        # `{name}` shows logged in\n{api}"),
     );
     out.trim_end().to_string() + "\n"
 }
@@ -127,6 +158,15 @@ mod tests {
             "sesame client google --client-id <client id>",
             "sesame login google",
             "client secret in this conversation",
+            "Gmail API (for `gmail`)",
+            "https://console.cloud.google.com/apis/library/gmail.googleapis.com",
+            "Google Calendar API (for `calendar`)",
+            "https://www.googleapis.com/auth/gmail.readonly, https://www.googleapis.com/auth/gmail.send",
+            "gmail.readonly is a restricted scope",
+            "Calendar's scopes are sensitive",
+            "security assessment",
+            "sesame login gmail",
+            "sesame api calendar   <path>  # under https://www.googleapis.com/calendar/v3",
         ] {
             assert!(out.contains(want), "missing {want:?} in:\n{out}");
         }

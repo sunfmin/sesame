@@ -365,7 +365,7 @@ fn provider_set_show_rm() {
     assert_eq!(field_db_rows(), 1);
     let (_, out, _) = sesame(&["setup", "google"]);
     assert!(
-        out.contains("The scopes sesame asks for at login: email, openid"),
+        out.contains("`sesame login google` asks only for: email, openid"),
         "{out}"
     );
 

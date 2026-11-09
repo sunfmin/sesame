@@ -59,9 +59,29 @@ pub struct Provider {
     /// How to register this provider's OAuth app, for `sesame setup`.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
+    /// The APIs reached with this provider's one token, by name (Google:
+    /// `gmail`, `calendar`, ...). A service's name is used like a provider's.
+    #[serde(default)]
+    pub services: BTreeMap<String, Service>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One API of a provider: its own base and scopes, the provider's client,
+/// hosts and token. `sesame login <service>` adds its scopes to those granted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Service {
+    #[serde(default)]
+    pub about: String,
+    /// Base for relative `sesame api <service>` paths; on one of the provider's hosts.
+    pub api_base: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// What `sesame setup` adds for this service (Google: enable its API).
+    #[serde(default)]
+    pub setup: Vec<SetupStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SetupStep {
     pub title: String,
@@ -172,6 +192,59 @@ pub struct FieldFlags {
     /// repeatable, in order. `{callback}` and `{scopes}` in details are filled in.
     #[arg(long = "setup-step")]
     setup: Vec<String>,
+    /// A service: an API reached with this provider's token, named like a
+    /// provider. `name=…,api-base=…,scope=…` (`scope` repeats; `about` too), or
+    /// JSON `{"name": …, "api_base": …, "scopes": […], "about": …, "setup": […]}`.
+    /// Repeatable; on `set`, the keys given replace only those of that service.
+    #[arg(long = "service")]
+    services: Vec<String>,
+    /// Remove the named service; repeatable.
+    #[arg(long = "drop-service")]
+    drop_services: Vec<String>,
+}
+
+/// The `sesame.db` field holding one service of a provider.
+const SERVICE_FIELD: &str = "services.";
+
+/// A `--service` value as its name and the service's fields given.
+fn service_flag(spec: &str) -> Result<(String, Fields), String> {
+    let mut f = if spec.trim_start().starts_with('{') {
+        match serde_json::from_str(spec) {
+            Ok(Value::Object(m)) => m,
+            Ok(_) => return Err(format!("--service `{spec}` is not a JSON object")),
+            Err(e) => return Err(format!("--service `{spec}` is not JSON: {e}")),
+        }
+    } else {
+        let mut m = Fields::new();
+        let mut scopes = Vec::new();
+        for kv in spec.split(',') {
+            let (k, v) = kv
+                .split_once('=')
+                .ok_or_else(|| format!("--service `{spec}`: `{kv}` is not key=value"))?;
+            match k.trim() {
+                "scope" => scopes.push(Value::from(v.trim())),
+                k @ ("name" | "about") => {
+                    m.insert(k.into(), v.trim().into());
+                }
+                "api-base" => {
+                    m.insert("api_base".into(), v.trim().into());
+                }
+                k => {
+                    return Err(format!(
+                        "--service `{spec}`: unknown key `{k}`; use name, api-base, scope, about"
+                    ));
+                }
+            }
+        }
+        if !scopes.is_empty() {
+            m.insert("scopes".into(), Value::Array(scopes));
+        }
+        m
+    };
+    match f.remove("name") {
+        Some(Value::String(n)) => Ok((n, f)),
+        _ => Err(format!("--service `{spec}` has no name")),
+    }
 }
 
 impl FieldFlags {
@@ -236,6 +309,13 @@ impl FieldFlags {
                 .collect::<Result<Vec<Value>, String>>()?;
             put("setup", Value::Array(steps));
         }
+        for spec in &self.services {
+            let (name, service) = service_flag(spec)?;
+            put(&format!("{SERVICE_FIELD}{name}"), Value::Object(service));
+        }
+        for name in self.drop_services {
+            put(&format!("{SERVICE_FIELD}{name}"), Value::Null);
+        }
         Ok(f)
     }
 }
@@ -251,29 +331,55 @@ pub fn config_dir() -> PathBuf {
 }
 
 /// The definition in force: `built_in` (if the name has one) with `user`'s
-/// fields over it. The one place a definition is validated: every value
+/// fields over it; a `services.<name>` field replaces that one service, or,
+/// when null, drops it. The one place a definition is validated: every value
 /// written to `sesame.db` passes through here first.
 fn effective(name: &str, built_in: Option<&Provider>, user: &Fields) -> Result<Provider, String> {
-    let mut fields = match built_in {
-        Some(p) => as_fields(p),
-        None => Fields::new(),
+    let mut fields = built_in.map(as_fields).unwrap_or_default();
+    let mut services = match fields.remove("services") {
+        Some(Value::Object(m)) => m,
+        _ => Map::new(),
     };
-    fields.extend(user.clone());
+    for (k, v) in user {
+        match k.strip_prefix(SERVICE_FIELD) {
+            Some(s) if v.is_null() => {
+                services.remove(s);
+            }
+            Some(s) => {
+                services.insert(s.into(), v.clone());
+            }
+            None => {
+                fields.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    fields.insert("services".into(), Value::Object(services));
     let p: Provider = serde_json::from_value(Value::Object(fields))
         .map_err(|e| format!("provider `{name}`: {e}"))?;
     p.check().map_err(|e| format!("provider `{name}`: {e}"))?;
     Ok(p)
 }
 
-fn as_fields(p: &Provider) -> Fields {
+fn as_fields<T: Serialize>(p: &T) -> Fields {
     match serde_json::to_value(p) {
         Ok(Value::Object(m)) => m,
-        _ => unreachable!("a Provider serializes to an object"),
+        _ => unreachable!("a Provider or Service serializes to an object"),
     }
 }
 
-pub fn all() -> Result<BTreeMap<String, Provider>, String> {
-    let mut user = Store::open()?.provider_fields()?;
+/// `base`'s value for a stored field name, reaching into `services` for a
+/// `services.<name>` field.
+fn base_value<'a>(base: &'a Fields, field: &str) -> Option<&'a Value> {
+    match field.strip_prefix(SERVICE_FIELD) {
+        Some(s) => base.get("services").and_then(|m| m.get(s)),
+        None => base.get(field),
+    }
+}
+
+/// Every provider in force, from the person's stored fields by provider. The
+/// one place names are checked across providers: a service's name is used
+/// like a provider's, so the two share one namespace.
+fn resolve(mut user: BTreeMap<String, Fields>) -> Result<BTreeMap<String, Provider>, String> {
     let mut map = BTreeMap::new();
     for (name, p) in built_in::all() {
         let f = user.remove(&name).unwrap_or_default();
@@ -282,53 +388,129 @@ pub fn all() -> Result<BTreeMap<String, Provider>, String> {
     for (name, f) in user {
         map.insert(name.clone(), effective(&name, None, &f)?);
     }
+    let mut owner: BTreeMap<&str, &str> = BTreeMap::new();
+    for (provider, p) in &map {
+        for service in p.services.keys() {
+            if map.contains_key(service) {
+                return Err(format!(
+                    "service `{service}` of `{provider}`: `{service}` is already a provider, \
+                     and a service and a provider cannot share a name"
+                ));
+            }
+            if let Some(other) = owner.insert(service, provider) {
+                return Err(format!(
+                    "service `{service}`: both `{other}` and `{provider}` have one by that name"
+                ));
+            }
+        }
+    }
     Ok(map)
 }
 
-fn unknown(name: &str, names: impl Iterator<Item = String>) -> String {
-    let names: Vec<String> = names.collect();
+pub fn all() -> Result<BTreeMap<String, Provider>, String> {
+    resolve(Store::open()?.provider_fields()?)
+}
+
+fn unknown(name: &str, all: &BTreeMap<String, Provider>) -> String {
+    let names: Vec<&str> = all.keys().map(String::as_str).collect();
+    let mut services: Vec<&str> = all
+        .values()
+        .flat_map(|p| p.services.keys().map(String::as_str))
+        .collect();
+    services.sort();
+    let services = if services.is_empty() {
+        String::new()
+    } else {
+        format!("; or a service: {}", services.join(", "))
+    };
     format!(
-        "unknown provider `{name}`; choose one of: {}",
+        "unknown provider `{name}`; choose one of: {}{services}",
         names.join(", ")
     )
 }
 
-pub fn get(name: &str) -> Result<Provider, String> {
-    let mut all = all()?;
-    all.remove(name)
-        .ok_or_else(|| unknown(name, all.into_keys()))
+/// What a name on the command line means: a provider, or one of its services.
+/// The token, client and hosts are always the provider's.
+pub struct Target {
+    pub provider: String,
+    pub p: Provider,
+    pub service: Option<String>,
 }
 
-/// `sesame provider add`: a new provider, all of whose fields are the person's.
-pub fn add(name: &str, fields: Fields) -> Result<(), String> {
+impl Target {
+    pub fn service(&self) -> Option<&Service> {
+        self.service.as_ref().and_then(|s| self.p.services.get(s))
+    }
+
+    /// Base for relative API paths: the service's, else the provider's.
+    pub fn api_base(&self) -> &str {
+        self.service().map_or(&self.p.api_base, |s| &s.api_base)
+    }
+}
+
+pub fn find(name: &str) -> Result<Target, String> {
+    let mut all = all()?;
+    if let Some(p) = all.remove(name) {
+        return Ok(Target {
+            provider: name.into(),
+            p,
+            service: None,
+        });
+    }
+    let provider = all
+        .iter()
+        .find(|(_, p)| p.services.contains_key(name))
+        .map(|(n, _)| n.clone());
+    match provider {
+        Some(provider) => Ok(Target {
+            p: all.remove(&provider).unwrap_or_else(|| unreachable!()),
+            provider,
+            service: Some(name.into()),
+        }),
+        None => Err(unknown(name, &all)),
+    }
+}
+
+fn check_name(what: &str, name: &str) -> Result<(), String> {
     if name.is_empty()
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err(format!(
-            "provider name `{name}`: use letters, digits, `-` and `_`"
+            "{what} name `{name}`: use letters, digits, `-` and `_`"
         ));
     }
+    Ok(())
+}
+
+/// `sesame provider add`: a new provider, all of whose fields are the person's.
+pub fn add(name: &str, mut fields: Fields) -> Result<(), String> {
+    check_name("provider", name)?;
     if built_in::all().contains_key(name) {
         return Err(format!(
             "`{name}` is a built-in provider; change its fields with `sesame provider set {name}`"
         ));
     }
+    // A new provider has no service to drop.
+    fields.retain(|_, v| !v.is_null());
     let store = Store::open()?;
     store.locked(|s| {
-        if s.provider_fields()?.contains_key(name) {
+        let mut all = s.provider_fields()?;
+        if all.contains_key(name) {
             return Err(format!(
                 "provider `{name}` exists; change it with `sesame provider set {name}`"
             ));
         }
-        effective(name, None, &fields)?;
+        all.insert(name.into(), fields.clone());
+        resolve(all)?;
         s.save_provider_fields(name, &fields)
     })
 }
 
-/// `sesame provider set`: changes the given fields. For a built-in provider
-/// only the fields that differ from the built-in definition are stored.
+/// `sesame provider set`: changes the given fields; a service's given keys
+/// replace only those of that service. For a built-in provider only the
+/// fields that differ from the built-in definition are stored.
 pub fn set(name: &str, fields: Fields) -> Result<(), String> {
     let built_in = built_in::all().remove(name);
     let store = Store::open()?;
@@ -343,18 +525,38 @@ pub fn set(name: &str, fields: Fields) -> Result<(), String> {
                 ));
             }
         };
-        user.extend(fields);
-        if let Some(p) = &built_in {
-            let base = as_fields(p);
-            user.retain(|k, v| base.get(k) != Some(v));
+        let services = effective(name, built_in.as_ref(), &user)
+            .map(|p| p.services)
+            .unwrap_or_default();
+        for (k, v) in fields {
+            let v = match (k.strip_prefix(SERVICE_FIELD), v) {
+                (Some(svc), Value::Null) if !services.contains_key(svc) => {
+                    return Err(format!("provider `{name}` has no service `{svc}`"));
+                }
+                (Some(svc), Value::Object(given)) => {
+                    let mut m = services.get(svc).map(as_fields).unwrap_or_default();
+                    m.extend(given);
+                    Value::Object(m)
+                }
+                (_, v) => v,
+            };
+            user.insert(k, v);
         }
-        effective(name, built_in.as_ref(), &user)?;
+        let base = built_in.as_ref().map(as_fields).unwrap_or_default();
+        user.retain(|k, v| match base_value(&base, k) {
+            // Dropping a service only means something for one the built-in has.
+            b if v.is_null() => b.is_some(),
+            b => b != Some(v),
+        });
+        all.insert(name.into(), user.clone());
+        resolve(all)?;
         s.save_provider_fields(name, &user)
     })
 }
 
 /// `sesame provider show`: the definition in force, each field with where it
 /// comes from: `built-in`, `user`, or `default` (unset, so the default holds).
+/// Each service is its own field, `services.<name>`, as `sesame.db` keeps it.
 pub fn show(name: &str) -> Result<Value, String> {
     let built_in = built_in::all().remove(name);
     let user = Store::open()?
@@ -362,22 +564,31 @@ pub fn show(name: &str) -> Result<Value, String> {
         .remove(name)
         .unwrap_or_default();
     if built_in.is_none() && user.is_empty() {
-        return Err(unknown(name, all()?.into_keys()));
+        return Err(unknown(name, &all()?));
     }
     let p = effective(name, built_in.as_ref(), &user)?;
-    let fields = as_fields(&p)
-        .into_iter()
-        .map(|(k, value)| {
-            let from = if user.contains_key(&k) {
-                "user"
-            } else if built_in.is_some() {
-                "built-in"
-            } else {
-                "default"
-            };
-            (k, serde_json::json!({ "value": value, "from": from }))
-        })
-        .collect();
+    let from = |k: &str| {
+        if user.contains_key(k) {
+            "user"
+        } else if built_in.is_some() {
+            "built-in"
+        } else {
+            "default"
+        }
+    };
+    let mut fields = Map::new();
+    for (k, value) in as_fields(&p) {
+        if k == "services" {
+            continue;
+        }
+        let entry = serde_json::json!({ "value": value, "from": from(&k) });
+        fields.insert(k, entry);
+    }
+    for (svc, s) in &p.services {
+        let k = format!("{SERVICE_FIELD}{svc}");
+        let entry = serde_json::json!({ "value": s, "from": from(&k) });
+        fields.insert(k, entry);
+    }
     Ok(Value::Object(fields))
 }
 
@@ -396,7 +607,7 @@ pub fn remove(name: &str) -> Result<String, String> {
         (true, true) => Ok(format!("`{name}` is back to its built-in definition.")),
         (true, false) => Ok(format!("`{name}` already has its built-in definition.")),
         (false, true) => Ok(format!("Removed the provider `{name}`.")),
-        (false, false) => Err(unknown(name, all()?.into_keys())),
+        (false, false) => Err(unknown(name, &all()?)),
     }
 }
 
@@ -411,6 +622,18 @@ fn check_url(field: &str, u: &str) -> Result<(), String> {
         "https" | "http" => Ok(()),
         s => Err(format!("{field} `{u}`: scheme {s} is not http or https")),
     }
+}
+
+fn check_steps(steps: &[SetupStep]) -> Result<(), String> {
+    for s in steps {
+        if s.title.trim().is_empty() {
+            return Err("a setup step has no title".into());
+        }
+        if let Some(page) = &s.page {
+            check_url("setup page", page)?;
+        }
+    }
+    Ok(())
 }
 
 impl Provider {
@@ -472,13 +695,22 @@ impl Provider {
         if self.redirect_port == Some(0) {
             return Err("redirect_port 0: leave it out for any free port".into());
         }
-        for s in &self.setup {
-            if s.title.trim().is_empty() {
-                return Err("a setup step has no title".into());
+        check_steps(&self.setup)?;
+        for (n, s) in &self.services {
+            check_name("service", n)?;
+            let base = s.api_base.replace("{resource_id}", "x");
+            check_url(&format!("service `{n}` api_base"), &base)?;
+            let host = url::Url::parse(&base)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from))
+                .unwrap_or_default();
+            if !self.allows_host(&host) {
+                return Err(format!(
+                    "service `{n}` api_base `{}`: the token goes only to hosts, and {host} is not one",
+                    s.api_base
+                ));
             }
-            if let Some(page) = &s.page {
-                check_url("setup page", page)?;
-            }
+            check_steps(&s.setup).map_err(|e| format!("service `{n}`: {e}"))?;
         }
         Ok(())
     }

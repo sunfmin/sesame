@@ -14,9 +14,10 @@ If you are an AI using sesame for someone:
   2. For one showing `no client`, run `sesame setup <provider>` and walk the person
      through its steps. Never ask for a client secret in the chat: the person runs
      `sesame client` in their own terminal, which prompts for it.
-  3. Have the person run `sesame login <provider>` and approve access in the browser
-     themselves.
-  4. Then call the API: `sesame api <provider> <path>`.";
+  3. Have the person run `sesame login <service>` (or `<provider>`) and approve access
+     in the browser themselves. A service (gmail, calendar, ...) shares its provider's
+     client and token; logging in to it adds its scopes.
+  4. Then call the API: `sesame api <service> <path>`.";
 
 /// Sign in to SaaS APIs from the terminal and call them with the stored token.
 #[derive(Parser)]
@@ -28,7 +29,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// List the providers and whether you are signed in to each.
+    /// List the providers and their services, and whether you are signed in to each.
     Providers,
     /// Add, change, show or remove a provider definition (stored in sesame.db).
     Provider {
@@ -51,9 +52,12 @@ enum Cmd {
     },
     /// Sign in through the provider's OAuth page and store the token. A provider
     /// with a device endpoint (github) prints a code to enter on its page instead.
+    /// For a service (gmail), signs in to its provider asking for the scopes
+    /// already granted and the service's: the one token then covers both.
     Login {
+        /// A provider, or a service of one.
         provider: String,
-        /// Scope to ask for instead of the provider's defaults; repeatable.
+        /// Scope to ask for instead of the defaults; repeatable.
         #[arg(long = "scope")]
         scopes: Vec<String>,
         /// Print the URL only; do not try to open a browser.
@@ -71,10 +75,11 @@ enum Cmd {
     Logout { provider: String },
     /// Print a valid access token, refreshing it if needed (for curl and scripts).
     Token { provider: String },
-    /// Call the provider's API with the stored token.
+    /// Call the API with the provider's stored token.
     Api {
+        /// A provider, or a service of one (`gmail`), whose API base paths are under.
         provider: String,
-        /// Path under the provider's API base, or a full URL on one of its hosts.
+        /// Path under the API base, or a full URL on one of the provider's hosts.
         path: String,
         #[arg(short = 'X', long)]
         method: Option<String>,
@@ -142,6 +147,19 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     format!("next: {next}")
                 };
                 println!("{name:<12} {state:<24} {next:<28} {}", p.about);
+                for (service, svc) in &p.services {
+                    let has = token.as_ref().map(oauth::granted).unwrap_or_default();
+                    let state = if token.is_some() && svc.scopes.iter().all(|s| has.contains(s)) {
+                        "authorized"
+                    } else {
+                        "not authorized"
+                    };
+                    let next = match (&client, state) {
+                        (Some(_), "not authorized") => format!("next: sesame login {service}"),
+                        _ => String::new(),
+                    };
+                    println!("  {service:<10} {state:<24} {next:<28} {}", svc.about);
+                }
             }
         }
         Cmd::Provider { cmd } => match *cmd {
@@ -165,7 +183,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             ProviderCmd::Rm { name } => eprintln!("{}", providers::remove(&name)?),
         },
         Cmd::Setup { provider } => {
-            print!("{}", setup::render(&provider, &providers::get(&provider)?));
+            let t = providers::find(&provider)?;
+            print!("{}", setup::render(&t.provider, &t.p));
         }
         Cmd::Client {
             provider,
@@ -173,7 +192,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             secret_stdin,
             no_secret,
         } => {
-            providers::get(&provider)?;
+            let provider = providers::find(&provider)?.provider;
             let client_secret = if no_secret {
                 None
             } else if secret_stdin {
@@ -201,23 +220,32 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             browser,
             site,
         } => {
-            let p = providers::get(&provider)?;
+            let t = providers::find(&provider)?;
             let opts = oauth::LoginOptions {
                 scopes: (!scopes.is_empty()).then_some(scopes),
                 open_browser: !no_browser && std::env::var_os("SSH_CONNECTION").is_none(),
                 site,
                 loopback: browser,
             };
-            let t = oauth::login(&provider, &p, &opts)?;
-            eprintln!("Logged in to `{provider}`{}.", who(&t));
+            let token = oauth::login(&t, &opts)?;
+            let service = t
+                .service
+                .as_ref()
+                .map(|s| format!(" for `{s}`"))
+                .unwrap_or_default();
+            eprintln!("Logged in to `{}`{service}{}.", t.provider, who(&token));
         }
         Cmd::Logout { provider } => {
+            let provider = providers::find(&provider)?.provider;
             Store::open()?.delete_token(&provider)?;
-            eprintln!("Logged out of `{provider}`.");
+            eprintln!("Logged out of `{provider}` (the token of all its services).");
         }
         Cmd::Token { provider } => {
-            let p = providers::get(&provider)?;
-            println!("{}", oauth::valid_token(&provider, &p, false)?.access_token);
+            let t = providers::find(&provider)?;
+            println!(
+                "{}",
+                oauth::valid_token(&t.provider, &t.p, false)?.access_token
+            );
         }
         Cmd::Api {
             provider,
@@ -255,9 +283,10 @@ fn api(
     data: Option<String>,
     include: bool,
 ) -> Result<ExitCode, String> {
-    let p = providers::get(name)?;
-    let mut token = oauth::valid_token(name, &p, false)?;
-    let url = resolve(&p, &token, path)?;
+    let t = providers::find(name)?;
+    let (name, p) = (t.provider.as_str(), &t.p);
+    let mut token = oauth::valid_token(name, p, false)?;
+    let url = resolve(t.api_base(), p, &token, path)?;
     let body = match data.as_deref() {
         None => None,
         Some("@-") => {
@@ -304,7 +333,7 @@ fn api(
     };
     let mut resp = send(&token)?;
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED && token.refresh_token.is_some() {
-        token = oauth::valid_token(name, &p, true)?;
+        token = oauth::valid_token(name, p, true)?;
         resp = send(&token)?;
     }
     let status = resp.status();
@@ -316,7 +345,16 @@ fn api(
             }
         }
     }
+    let challenge = resp
+        .headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
     let bytes = resp.bytes().map_err(|e| e.to_string())?;
+    if status == reqwest::StatusCode::FORBIDDEN && lacks_scope(&challenge, &bytes) {
+        eprintln!("{}", scope_hint(&t, &url));
+    }
     let mut out = std::io::stdout().lock();
     let pretty = std::io::stdout()
         .is_terminal()
@@ -335,11 +373,47 @@ fn api(
     })
 }
 
-fn resolve(p: &providers::Provider, token: &Token, path: &str) -> Result<url::Url, String> {
+/// A 403 for a token that lacks a scope: RFC 6750's `insufficient_scope`
+/// challenge, or Google's `insufficientPermissions` / `ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
+fn lacks_scope(challenge: &str, body: &[u8]) -> bool {
+    let body = String::from_utf8_lossy(body);
+    challenge.contains("insufficient_scope")
+        || ["insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"]
+            .iter()
+            .any(|m| body.contains(m))
+}
+
+/// The next step for a call refused for want of a scope: log in to the service
+/// it was made through, or to the one whose API base the URL is under.
+fn scope_hint(t: &providers::Target, url: &url::Url) -> String {
+    let service = t.service.clone().or_else(|| {
+        t.p.services
+            .iter()
+            .find(|(_, s)| url.as_str().starts_with(s.api_base.trim_end_matches('/')))
+            .map(|(n, _)| n.clone())
+    });
+    match service {
+        Some(s) => format!(
+            "sesame: the `{}` token lacks a scope this call needs; run `sesame login {s}` to add the scopes of `{s}`",
+            t.provider
+        ),
+        None => format!(
+            "sesame: the `{p}` token lacks a scope this call needs; run `sesame login {p} --scope <scope>` with every scope it needs",
+            p = t.provider
+        ),
+    }
+}
+
+fn resolve(
+    api_base: &str,
+    p: &providers::Provider,
+    token: &Token,
+    path: &str,
+) -> Result<url::Url, String> {
     let url = if path.starts_with("https://") || path.starts_with("http://") {
         url::Url::parse(path).map_err(|e| e.to_string())?
     } else {
-        let mut base = p.api_base.clone();
+        let mut base = api_base.to_string();
         if base.contains("{resource_id}") {
             let id = token
                 .resource_id
