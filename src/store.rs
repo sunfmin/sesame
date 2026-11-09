@@ -23,7 +23,7 @@ pub struct Token {
     pub scope: Option<String>,
     pub resource_id: Option<String>,
     pub resource_name: Option<String>,
-    /// Who signed in, as the provider's `whoami` names them.
+    /// Who signed in, from the provider's `identity_url`.
     pub account: Option<String>,
 }
 
@@ -55,7 +55,7 @@ const MIGRATIONS: &[&str] = &[
     );
 ",
     "
-    -- Who signed in, from the provider's whoami call at login.
+    -- Who signed in, from the provider's identity_url.
     ALTER TABLE tokens ADD COLUMN account TEXT;
 ",
 ];
@@ -185,7 +185,8 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT access_token, refresh_token, expires_at, scope, resource_id, resource_name,
-                 account FROM tokens WHERE provider = ?1",
+                        account
+                 FROM tokens WHERE provider = ?1",
                 [provider],
                 |r| {
                     Ok(Token {
@@ -207,8 +208,8 @@ impl Store {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO tokens
-                 (provider, access_token, refresh_token, expires_at, scope, resource_id,
-                  resource_name, account)
+                 (provider, access_token, refresh_token, expires_at, scope, resource_id, resource_name,
+                  account)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     provider,

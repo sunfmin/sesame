@@ -33,7 +33,7 @@ enum Cmd {
     /// Add, change, show or remove a provider definition (stored in sesame.db).
     Provider {
         #[command(subcommand)]
-        cmd: ProviderCmd,
+        cmd: Box<ProviderCmd>,
     },
     /// Print the steps to register a provider's OAuth app and get to a working login.
     Setup { provider: String },
@@ -49,7 +49,8 @@ enum Cmd {
         #[arg(long, conflicts_with = "secret_stdin")]
         no_secret: bool,
     },
-    /// Sign in through the provider's OAuth page and store the token.
+    /// Sign in through the provider's OAuth page and store the token. A provider
+    /// with a device endpoint (github) prints a code to enter on its page instead.
     Login {
         provider: String,
         /// Scope to ask for instead of the provider's defaults; repeatable.
@@ -58,6 +59,10 @@ enum Cmd {
         /// Print the URL only; do not try to open a browser.
         #[arg(long)]
         no_browser: bool,
+        /// Sign in through the loopback redirect even when the provider offers
+        /// the device flow (needs the client secret where the provider does).
+        #[arg(long)]
+        browser: bool,
         /// Which site to use when the login reaches several (Jira).
         #[arg(long)]
         site: Option<String>,
@@ -91,7 +96,7 @@ enum ProviderCmd {
     Add {
         name: String,
         #[command(flatten)]
-        fields: Box<providers::FieldFlags>,
+        fields: providers::FieldFlags,
     },
     /// Change a provider's fields; a repeatable flag replaces its whole list.
     /// For a built-in provider only the changed fields are stored: the rest
@@ -99,7 +104,7 @@ enum ProviderCmd {
     Set {
         name: String,
         #[command(flatten)]
-        fields: Box<providers::FieldFlags>,
+        fields: providers::FieldFlags,
     },
     /// Print the definition in force as JSON, each field marked `built-in`, `user` or `default`.
     Show { name: String },
@@ -139,13 +144,13 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 println!("{name:<12} {state:<24} {next:<28} {}", p.about);
             }
         }
-        Cmd::Provider { cmd } => match cmd {
+        Cmd::Provider { cmd } => match *cmd {
             ProviderCmd::Add { name, fields } => {
-                providers::add(&name, (*fields).fields()?)?;
+                providers::add(&name, fields.fields()?)?;
                 eprintln!("Added the provider `{name}`; next: sesame setup {name}");
             }
             ProviderCmd::Set { name, fields } => {
-                providers::set(&name, (*fields).fields()?)?;
+                providers::set(&name, fields.fields()?)?;
                 eprintln!(
                     "Changed the provider `{name}`; see it with `sesame provider show {name}`."
                 );
@@ -193,6 +198,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             provider,
             scopes,
             no_browser,
+            browser,
             site,
         } => {
             let p = providers::get(&provider)?;
@@ -200,6 +206,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 scopes: (!scopes.is_empty()).then_some(scopes),
                 open_browser: !no_browser && std::env::var_os("SSH_CONNECTION").is_none(),
                 site,
+                loopback: browser,
             };
             let t = oauth::login(&provider, &p, &opts)?;
             eprintln!("Logged in to `{provider}`{}.", who(&t));
@@ -226,6 +233,20 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// ` (site, account)` for a token, from what login learned; empty if nothing.
+fn who(t: &Token) -> String {
+    let parts: Vec<&str> = [&t.resource_name, &t.account]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
+}
+
 fn api(
     name: &str,
     path: &str,
@@ -236,7 +257,7 @@ fn api(
 ) -> Result<ExitCode, String> {
     let p = providers::get(name)?;
     let mut token = oauth::valid_token(name, &p, false)?;
-    let url = p.resolve(token.resource_id.as_deref(), path)?;
+    let url = resolve(&p, &token, path)?;
     let body = match data.as_deref() {
         None => None,
         Some("@-") => {
@@ -254,19 +275,25 @@ fn api(
     let method = method.unwrap_or_else(|| if body.is_some() { "POST" } else { "GET" }.into());
     let method =
         reqwest::Method::from_bytes(method.to_uppercase().as_bytes()).map_err(|e| e.to_string())?;
-    let http = reqwest::blocking::Client::new();
+    let http = oauth::http();
     let send = |token: &Token| {
         let mut req = http
             .request(method.clone(), url.clone())
             .bearer_auth(&token.access_token);
-        let mut has_type = false;
+        let mut given = Vec::new();
         for h in headers {
             let (k, v) = h
                 .split_once(':')
                 .ok_or_else(|| format!("header `{h}` has no `:`"))?;
-            has_type |= k.trim().eq_ignore_ascii_case("content-type");
+            given.push(k.trim().to_ascii_lowercase());
             req = req.header(k.trim(), v.trim());
         }
+        for (k, v) in &p.api_headers {
+            if !given.contains(&k.to_ascii_lowercase()) {
+                req = req.header(k, v);
+            }
+        }
+        let has_type = given.iter().any(|k| k == "content-type");
         if let Some(b) = &body {
             if !has_type {
                 req = req.header("Content-Type", "application/json");
@@ -311,14 +338,28 @@ fn api(
     Ok(ExitCode::SUCCESS)
 }
 
-/// ` as <account> (<site>)`, each part when known: who from `whoami`, the site (Jira).
-fn who(t: &Token) -> String {
-    let mut s = String::new();
-    if let Some(a) = &t.account {
-        s += &format!(" as {a}");
+fn resolve(p: &providers::Provider, token: &Token, path: &str) -> Result<url::Url, String> {
+    let url = if path.starts_with("https://") || path.starts_with("http://") {
+        url::Url::parse(path).map_err(|e| e.to_string())?
+    } else {
+        let mut base = p.api_base.clone();
+        if base.contains("{resource_id}") {
+            let id = token
+                .resource_id
+                .as_deref()
+                .ok_or("no site stored; log in again")?;
+            base = base.replace("{resource_id}", id);
+        }
+        let sep = if path.starts_with('/') { "" } else { "/" };
+        url::Url::parse(&format!("{}{sep}{path}", base.trim_end_matches('/')))
+            .map_err(|e| e.to_string())?
+    };
+    let host = url.host_str().unwrap_or("");
+    if !p.allows_host(host) {
+        return Err(format!(
+            "refusing to send the token to {host}: not one of {:?}",
+            p.hosts
+        ));
     }
-    if let Some(site) = &t.resource_name {
-        s += &format!(" ({site})");
-    }
-    s
+    Ok(url)
 }

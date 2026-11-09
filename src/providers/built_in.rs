@@ -9,7 +9,7 @@
 //! and pick. In `details`, `{callback}` is the redirect URL login uses and
 //! `{scopes}` the provider's `scopes`, so neither is written twice. sesame adds
 //! the closing steps itself (store the client, log in, call the API).
-use super::{Provider, SetupStep, TokenBody, Whoami};
+use super::{ClientAuth, Provider, RedirectHost, SetupStep, TokenBody};
 use std::collections::BTreeMap;
 
 fn strings(xs: &[&str]) -> Vec<String> {
@@ -32,10 +32,70 @@ fn step(title: &str, page: Option<&str>, details: &str) -> SetupStep {
 
 pub fn all() -> BTreeMap<String, Provider> {
     BTreeMap::from([
+        ("github".into(), github()),
         ("google".into(), google()),
         ("jira".into(), jira()),
         ("linear".into(), linear()),
+        ("notion".into(), notion()),
     ])
+}
+
+/// A GitHub OAuth App (not a GitHub App). Login is the device flow, which
+/// needs no client secret; `--browser` uses the loopback redirect on
+/// 127.0.0.1, whose port GitHub does not match against the registered one.
+/// https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps
+fn github() -> Provider {
+    Provider {
+        about: "GitHub REST and GraphQL APIs (OAuth App)".into(),
+        auth_url: "https://github.com/login/oauth/authorize".into(),
+        token_url: "https://github.com/login/oauth/access_token".into(),
+        api_base: "https://api.github.com".into(),
+        hosts: strings(&["api.github.com", "uploads.github.com"]),
+        scope_separator: " ".into(),
+        scopes: strings(&["repo", "read:org"]),
+        auth_params: BTreeMap::new(),
+        token_body: TokenBody::Form,
+        client_auth: ClientAuth::Body,
+        api_headers: params(&[
+            ("Accept", "application/vnd.github+json"),
+            ("X-GitHub-Api-Version", "2026-03-10"),
+        ]),
+        resources_url: None,
+        site_name_field: None,
+        redirect_port: None,
+        redirect_host: RedirectHost::Loopback,
+        device_url: Some("https://github.com/login/device/code".into()),
+        identity_url: Some("https://api.github.com/user".into()),
+        identity_field: Some("login".into()),
+        identity_body: None,
+        error_fields: vec![],
+        setup: vec![
+            step(
+                "Register an OAuth App (Settings > Developer settings > OAuth Apps)",
+                Some("https://github.com/settings/developers"),
+                "\
+Click New OAuth App (Register a new application if you have none yet). To have an
+organization own it, use that organization's Settings > Developer settings > OAuth Apps instead.
+- Application name: anything, e.g. \"sesame\"; people see it when they approve access.
+- Homepage URL: any page of yours, e.g. https://github.com/<you>.
+- Authorization callback URL: http://127.0.0.1/callback
+  (GitHub takes any port at login, so sesame listens on {callback}).
+- Tick Enable Device Flow: `sesame login github` uses it, and it needs no client secret.
+- Expire user access tokens: refreshing an expiring token needs the client secret. Without a
+  secret stored in sesame, untick it, or run `sesame login github` again when the token expires (8 hours).
+Click Register application.",
+            ),
+            step(
+                "Copy the Client ID",
+                None,
+                "\
+The app's page shows the Client ID. The device flow needs nothing else.
+Only for `sesame login github --browser`, or to refresh expiring tokens: click
+Generate a new client secret and keep it for the next step.
+The scopes sesame asks for at login: {scopes}",
+            ),
+        ],
+    }
 }
 
 fn google() -> Provider {
@@ -45,6 +105,7 @@ fn google() -> Provider {
         token_url: "https://oauth2.googleapis.com/token".into(),
         api_base: "https://www.googleapis.com".into(),
         hosts: strings(&["*.googleapis.com"]),
+        scope_separator: " ".into(),
         scopes: strings(&[
             "openid",
             "email",
@@ -53,12 +114,18 @@ fn google() -> Provider {
             "https://www.googleapis.com/auth/youtube.readonly",
         ]),
         auth_params: params(&[("access_type", "offline"), ("prompt", "consent")]),
-        scope_separator: " ".into(),
         token_body: TokenBody::Form,
+        client_auth: ClientAuth::Body,
+        api_headers: BTreeMap::new(),
         resources_url: None,
+        site_name_field: None,
         redirect_port: None,
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: None,
+        identity_field: None,
+        identity_body: None,
         error_fields: vec![],
-        whoami: None,
         setup: vec![
             step(
                 "Create or pick a Google Cloud project",
@@ -126,6 +193,7 @@ fn jira() -> Provider {
         token_url: "https://auth.atlassian.com/oauth/token".into(),
         api_base: "https://api.atlassian.com/ex/jira/{resource_id}".into(),
         hosts: strings(&["api.atlassian.com"]),
+        scope_separator: " ".into(),
         scopes: strings(&[
             "read:jira-work",
             "write:jira-work",
@@ -133,12 +201,18 @@ fn jira() -> Provider {
             "offline_access",
         ]),
         auth_params: params(&[("audience", "api.atlassian.com"), ("prompt", "consent")]),
-        scope_separator: " ".into(),
         token_body: TokenBody::Json,
+        client_auth: ClientAuth::Body,
+        api_headers: BTreeMap::new(),
         resources_url: Some("https://api.atlassian.com/oauth/token/accessible-resources".into()),
+        site_name_field: None,
         redirect_port: Some(8749),
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: None,
+        identity_field: None,
+        identity_body: None,
         error_fields: vec![],
-        whoami: None,
         setup: vec![
             step(
                 "Create an OAuth 2.0 integration in the Atlassian developer console",
@@ -173,6 +247,60 @@ It must match exactly, so do not change localhost or the port. Click Save change
     }
 }
 
+/// Notion's public integration: no scopes (the person picks the pages on the
+/// consent page), HTTP Basic at the token endpoint, and a `Notion-Version` on
+/// every API request. Steps from https://developers.notion.com/docs/authorization.
+fn notion() -> Provider {
+    Provider {
+        about: "Notion (public integration OAuth)".into(),
+        auth_url: "https://api.notion.com/v1/oauth/authorize".into(),
+        token_url: "https://api.notion.com/v1/oauth/token".into(),
+        api_base: "https://api.notion.com/v1".into(),
+        hosts: strings(&["api.notion.com"]),
+        scopes: Vec::new(),
+        scope_separator: " ".into(),
+        auth_params: params(&[("owner", "user")]),
+        token_body: TokenBody::Json,
+        client_auth: ClientAuth::Basic,
+        api_headers: params(&[("Notion-Version", "2026-03-11")]),
+        resources_url: None,
+        site_name_field: Some("workspace_name".into()),
+        // Notion allows http only for localhost, and matches the port and path exactly.
+        redirect_port: Some(8750),
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: None,
+        identity_field: None,
+        identity_body: None,
+        error_fields: vec![],
+        setup: vec![
+            step(
+                "Create an OAuth (public) integration in Notion's developer portal",
+                Some("https://app.notion.com/developers/connections"),
+                "\
+Sign in with your Notion account and create a new OAuth integration (a public one, not internal).
+Fill in the form with a name (e.g. \"sesame\"); for the installation scope, pick Any workspace,
+or the workspaces you will use: it cannot be changed after creation.",
+            ),
+            step(
+                "Set the redirect URI (the form's OAuth configuration section)",
+                None,
+                "\
+Redirect URI: {callback}
+It must match exactly: keep http, localhost (not 127.0.0.1) and the port. Save the integration.",
+            ),
+            step(
+                "Copy the client ID and secret (the integration's Configuration tab)",
+                None,
+                "\
+The Configuration tab shows the OAuth client ID and client secret. Keep it open for the next step.
+Notion has no scopes: at login, the consent page asks which pages and databases sesame may reach.
+To change them later, log in again, or share a page with the integration from Notion.",
+            ),
+        ],
+    }
+}
+
 /// Linear: GraphQL only, at `/graphql`. Scopes are comma-separated; the access
 /// token lasts 24 hours and each refresh hands out a new refresh token.
 /// https://linear.app/developers/oauth-2-0-authentication
@@ -187,35 +315,36 @@ fn linear() -> Provider {
         scope_separator: ",".into(),
         auth_params: BTreeMap::new(),
         token_body: TokenBody::Form,
+        client_auth: ClientAuth::Body,
+        api_headers: BTreeMap::new(),
         resources_url: None,
+        site_name_field: None,
         // Linear documents no rule for the callback, so it is matched as registered.
         redirect_port: Some(8752),
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: Some("https://api.linear.app/graphql".into()),
+        identity_field: Some("/data/viewer/name".into()),
+        identity_body: Some(serde_json::json!({"query": "{ viewer { name } }"})),
         // A GraphQL error comes back as 200 with `errors`.
         error_fields: strings(&["errors"]),
-        whoami: Some(Whoami {
-            path: "/graphql".into(),
-            body: Some(serde_json::json!({
-                "query": "{ viewer { name } organization { name } }"
-            })),
-            name: "{/data/viewer/name} ({/data/organization/name})".into(),
-        }),
         setup: vec![
             step(
                 "Create an OAuth application in Linear (Settings > API > OAuth applications)",
                 Some("https://linear.app/settings/api/applications/new"),
                 "\
 Sign in to the Linear workspace sesame should reach; every admin of that workspace can see the app.
-- Application name: anything, e.g. \"sesame\"; Developer name and URL as you like.
+- Application name: anything, e.g. \"sesame\"; people see it when they approve access.
 - Callback URLs: {callback}
   It must match exactly, so do not change localhost or the port.
-Leave the webhooks off and click Create.",
+Click Create.",
             ),
             step(
                 "Copy the client ID and secret",
                 None,
                 "\
 The application's page shows the Client ID and the Client secret. Keep it open for the next step.
-The scopes sesame asks for at login: {scopes} (Linear asks for no scopes on this page).",
+The scopes sesame asks for at login: {scopes} (they are asked for at login, not set on this page).",
             ),
         ],
     }
