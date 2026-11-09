@@ -96,7 +96,7 @@ fn fake_provider() -> (u16, Arc<Mutex<Vec<String>>>) {
 #[test]
 fn login_call_refresh_logout() {
     let (port, log) = fake_provider();
-    let tmp = std::env::temp_dir().join(format!("saas-e2e-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("sesame-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let (config, store) = (tmp.join("config"), tmp.join("store"));
     std::fs::create_dir_all(&config).unwrap();
@@ -114,20 +114,20 @@ resources_url = "http://127.0.0.1:{port}/sites"
         ),
     )
     .unwrap();
-    let saas = |args: &[&str]| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_saas"));
+    let sesame = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
         c.args(args)
-            .env("SAAS_CONFIG_DIR", &config)
-            .env("SAAS_STORE_DIR", &store);
+            .env("SESAME_CONFIG_DIR", &config)
+            .env("SESAME_STORE_DIR", &store);
         c
     };
 
-    let st = saas(&["client", "fake", "--client-id", "cid", "--no-secret"])
+    let st = sesame(&["client", "fake", "--client-id", "cid", "--no-secret"])
         .status()
         .unwrap();
     assert!(st.success());
 
-    let mut login = saas(&["login", "fake", "--no-browser"])
+    let mut login = sesame(&["login", "fake", "--no-browser"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -151,7 +151,7 @@ resources_url = "http://127.0.0.1:{port}/sites"
     err.read_to_string(&mut rest).unwrap();
     assert!(status.success(), "login failed: {rest}");
 
-    let out = saas(&["api", "fake", "/me"]).output().unwrap();
+    let out = sesame(&["api", "fake", "/me"]).output().unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -159,17 +159,17 @@ resources_url = "http://127.0.0.1:{port}/sites"
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), r#"{"me":"felix"}"#);
 
-    let out = saas(&["token", "fake"]).output().unwrap();
+    let out = sesame(&["token", "fake"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "access-2");
 
-    let out = saas(&["api", "fake", "https://evil.example/steal"])
+    let out = sesame(&["api", "fake", "https://evil.example/steal"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to send the token"));
 
-    assert!(saas(&["logout", "fake"]).status().unwrap().success());
-    assert!(!saas(&["token", "fake"]).status().unwrap().success());
+    assert!(sesame(&["logout", "fake"]).status().unwrap().success());
+    assert!(!sesame(&["token", "fake"]).status().unwrap().success());
 
     let log = log.lock().unwrap();
     assert!(

@@ -9,7 +9,7 @@ use store::{Client, Kind, Token};
 
 /// Sign in to SaaS APIs from the terminal and call them with the stored token.
 #[derive(Parser)]
-#[command(name = "saas", version)]
+#[command(name = "sesame", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -71,7 +71,7 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("saas: {e}");
+            eprintln!("sesame: {e}");
             ExitCode::FAILURE
         }
     }

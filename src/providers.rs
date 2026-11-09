@@ -38,13 +38,13 @@ pub enum TokenBody {
 }
 
 pub fn config_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("SAAS_CONFIG_DIR") {
+    if let Some(d) = std::env::var_os("SESAME_CONFIG_DIR") {
         return PathBuf::from(d);
     }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    home.join(".config").join("saas")
+    home.join(".config").join("sesame")
 }
 
 pub fn all() -> Result<BTreeMap<String, Provider>, String> {
@@ -62,7 +62,7 @@ pub fn all() -> Result<BTreeMap<String, Provider>, String> {
 pub fn get(name: &str) -> Result<Provider, String> {
     all()?
         .remove(name)
-        .ok_or_else(|| format!("unknown provider `{name}`; see `saas providers`"))
+        .ok_or_else(|| format!("unknown provider `{name}`; see `sesame providers`"))
 }
 
 impl Provider {

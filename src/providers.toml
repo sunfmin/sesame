@@ -1,5 +1,5 @@
 # Built-in providers. A provider is one OAuth realm: one login, one token.
-# ~/.config/saas/providers.toml may add providers or replace one by name.
+# ~/.config/sesame/providers.toml may add providers or replace one by name.
 
 [google]
 about = "Google APIs: Drive, Docs, Sheets, YouTube, ..."

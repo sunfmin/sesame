@@ -1,4 +1,4 @@
-//! Secrets live in the OS keychain (service `saas`), or, when SAAS_STORE_DIR is
+//! Secrets live in the OS keychain (service `sesame`), or, when SESAME_STORE_DIR is
 //! set, in 0600 files there (headless hosts and tests).
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
@@ -33,7 +33,7 @@ fn key(provider: &str, kind: Kind) -> String {
 }
 
 fn dir() -> Option<PathBuf> {
-    std::env::var_os("SAAS_STORE_DIR").map(PathBuf::from)
+    std::env::var_os("SESAME_STORE_DIR").map(PathBuf::from)
 }
 
 pub fn load<T: DeserializeOwned>(provider: &str, kind: Kind) -> Result<Option<T>, String> {
@@ -44,7 +44,7 @@ pub fn load<T: DeserializeOwned>(provider: &str, kind: Kind) -> Result<Option<T>
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.to_string()),
         },
-        None => match keyring::Entry::new("saas", &key).and_then(|e| e.get_password()) {
+        None => match keyring::Entry::new("sesame", &key).and_then(|e| e.get_password()) {
             Ok(t) => t,
             Err(keyring::Error::NoEntry) => return Ok(None),
             Err(e) => return Err(format!("keychain: {e}")),
@@ -72,11 +72,11 @@ pub fn save<T: Serialize>(provider: &str, kind: Kind, value: &T) -> Result<(), S
                 .map_err(|e| e.to_string())?;
             f.write_all(text.as_bytes()).map_err(|e| e.to_string())
         }
-        None => keyring::Entry::new("saas", &key)
+        None => keyring::Entry::new("sesame", &key)
             .and_then(|e| e.set_password(&text))
             .map_err(|e| {
                 format!(
-                    "keychain: {e}. Over SSH the login keychain is locked: run `security unlock-keychain`, or set SAAS_STORE_DIR to keep secrets in 0600 files instead"
+                    "keychain: {e}. Over SSH the login keychain is locked: run `security unlock-keychain`, or set SESAME_STORE_DIR to keep secrets in 0600 files instead"
                 )
             }),
     }
@@ -89,7 +89,7 @@ pub fn delete(provider: &str, kind: Kind) -> Result<(), String> {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
             _ => Ok(()),
         },
-        None => match keyring::Entry::new("saas", &key).and_then(|e| e.delete_credential()) {
+        None => match keyring::Entry::new("sesame", &key).and_then(|e| e.delete_credential()) {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(format!("keychain: {e}")),
         },

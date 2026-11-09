@@ -29,7 +29,7 @@ pub struct LoginOptions {
 pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, String> {
     let client: Client = store::load(name, Kind::Client)?.ok_or_else(|| {
         format!(
-            "no OAuth client for `{name}`. Register one ({}), then run `saas client {name} --client-id <id>`",
+            "no OAuth client for `{name}`. Register one ({}), then run `sesame client {name} --client-id <id>`",
             p.register
         )
     })?;
@@ -225,13 +225,13 @@ fn pick_resource(token: &mut Token, url: &str, site: Option<&str>) -> Result<(),
 /// The stored token, refreshed first when it expires within a minute (or when forced).
 pub fn valid_token(name: &str, p: &Provider, force_refresh: bool) -> Result<Token, String> {
     let token: Token = store::load(name, Kind::Token)?
-        .ok_or_else(|| format!("not logged in to `{name}`; run `saas login {name}`"))?;
+        .ok_or_else(|| format!("not logged in to `{name}`; run `sesame login {name}`"))?;
     let fresh = token.expires_at.is_none_or(|t| t > now() + 60);
     if fresh && !force_refresh {
         return Ok(token);
     }
     let refresh = token.refresh_token.clone().ok_or_else(|| {
-        format!("`{name}` token expired and has no refresh token; run `saas login {name}`")
+        format!("`{name}` token expired and has no refresh token; run `sesame login {name}`")
     })?;
     let client: Client =
         store::load(name, Kind::Client)?.ok_or_else(|| format!("no OAuth client for `{name}`"))?;
