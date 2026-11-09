@@ -33,7 +33,7 @@ enum Cmd {
     /// Add, change, show or remove a provider definition (stored in sesame.db).
     Provider {
         #[command(subcommand)]
-        cmd: ProviderCmd,
+        cmd: Box<ProviderCmd>,
     },
     /// Print the steps to register a provider's OAuth app and get to a working login.
     Setup { provider: String },
@@ -142,7 +142,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 println!("{name:<12} {state:<24} {next:<28} {}", p.about);
             }
         }
-        Cmd::Provider { cmd } => match cmd {
+        Cmd::Provider { cmd } => match *cmd {
             ProviderCmd::Add { name, fields } => {
                 providers::add(&name, fields.fields()?)?;
                 eprintln!("Added the provider `{name}`; next: sesame setup {name}");
@@ -266,14 +266,20 @@ fn api(
         let mut req = http
             .request(method.clone(), url.clone())
             .bearer_auth(&token.access_token);
-        let mut has_type = false;
+        let mut given = Vec::new();
         for h in headers {
             let (k, v) = h
                 .split_once(':')
                 .ok_or_else(|| format!("header `{h}` has no `:`"))?;
-            has_type |= k.trim().eq_ignore_ascii_case("content-type");
+            given.push(k.trim().to_ascii_lowercase());
             req = req.header(k.trim(), v.trim());
         }
+        for (k, v) in &p.api_headers {
+            if !given.contains(&k.to_ascii_lowercase()) {
+                req = req.header(k, v);
+            }
+        }
+        let has_type = given.iter().any(|k| k == "content-type");
         if let Some(b) = &body {
             if !has_type {
                 req = req.header("Content-Type", "application/json");

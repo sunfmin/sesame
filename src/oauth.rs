@@ -1,5 +1,5 @@
 //! Authorization-code flow with PKCE and a loopback redirect, plus refresh.
-use crate::providers::{self, Provider, TokenBody};
+use crate::providers::{self, ClientAuth, Provider, TokenBody};
 use crate::store::{Client, Store, Token};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -50,9 +50,11 @@ pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, Str
         let mut q = url.query_pairs_mut();
         q.append_pair("response_type", "code")
             .append_pair("client_id", &client.client_id)
-            .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("scope", &scopes.join(" "))
-            .append_pair("state", &state)
+            .append_pair("redirect_uri", &redirect_uri);
+        if !scopes.is_empty() {
+            q.append_pair("scope", &scopes.join(" "));
+        }
+        q.append_pair("state", &state)
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256");
         for (k, v) in &p.auth_params {
@@ -148,12 +150,19 @@ fn request_token(
     form: &mut Vec<(&str, String)>,
     previous: Option<&Token>,
 ) -> Result<Token, String> {
-    form.push(("client_id", client.client_id.clone()));
-    if let Some(s) = &client.client_secret {
-        form.push(("client_secret", s.clone()));
-    }
     let http = reqwest::blocking::Client::new();
-    let req = http.post(&p.token_url).header("Accept", "application/json");
+    let mut req = http.post(&p.token_url).header("Accept", "application/json");
+    match p.client_auth {
+        ClientAuth::Body => {
+            form.push(("client_id", client.client_id.clone()));
+            if let Some(s) = &client.client_secret {
+                form.push(("client_secret", s.clone()));
+            }
+        }
+        ClientAuth::Basic => {
+            req = req.basic_auth(&client.client_id, client.client_secret.as_ref());
+        }
+    }
     let req = match p.token_body {
         TokenBody::Form => req.form(form),
         TokenBody::Json => req.json(
@@ -169,8 +178,16 @@ fn request_token(
     if !status.is_success() {
         return Err(format!("token endpoint answered {status}: {text}"));
     }
-    let t: TokenResponse =
+    let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("token response: {e}: {text}"))?;
+    let site_name = p
+        .site_name_field
+        .as_ref()
+        .and_then(|f| v.get(f))
+        .and_then(|n| n.as_str())
+        .map(String::from);
+    let t: TokenResponse =
+        serde_json::from_value(v).map_err(|e| format!("token response: {e}: {text}"))?;
     Ok(Token {
         access_token: t.access_token,
         // Providers that do not rotate refresh tokens omit it on refresh.
@@ -180,7 +197,7 @@ fn request_token(
         expires_at: t.expires_in.map(|s| now() + s),
         scope: t.scope.or_else(|| previous.and_then(|p| p.scope.clone())),
         resource_id: previous.and_then(|p| p.resource_id.clone()),
-        resource_name: previous.and_then(|p| p.resource_name.clone()),
+        resource_name: site_name.or_else(|| previous.and_then(|p| p.resource_name.clone())),
     })
 }
 
