@@ -30,6 +30,11 @@ struct Cli {
 enum Cmd {
     /// List the providers and whether you are signed in to each.
     Providers,
+    /// Add, change, show or remove a provider definition (stored in sesame.db).
+    Provider {
+        #[command(subcommand)]
+        cmd: ProviderCmd,
+    },
     /// Print the steps to register a provider's OAuth app and get to a working login.
     Setup { provider: String },
     /// Store the OAuth client (app) used to sign in to a provider.
@@ -80,6 +85,28 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ProviderCmd {
+    /// Add a provider; --auth-url, --token-url, --api-base and --host are required.
+    Add {
+        name: String,
+        #[command(flatten)]
+        fields: providers::FieldFlags,
+    },
+    /// Change a provider's fields; a repeatable flag replaces its whole list.
+    /// For a built-in provider only the changed fields are stored: the rest
+    /// follows each new sesame version.
+    Set {
+        name: String,
+        #[command(flatten)]
+        fields: providers::FieldFlags,
+    },
+    /// Print the definition in force as JSON, each field marked `built-in`, `user` or `default`.
+    Show { name: String },
+    /// Remove a provider you added, or your changes to a built-in one.
+    Rm { name: String },
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
@@ -115,6 +142,26 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 println!("{name:<12} {state:<24} {next:<28} {}", p.about);
             }
         }
+        Cmd::Provider { cmd } => match cmd {
+            ProviderCmd::Add { name, fields } => {
+                providers::add(&name, fields.fields()?)?;
+                eprintln!("Added the provider `{name}`; next: sesame setup {name}");
+            }
+            ProviderCmd::Set { name, fields } => {
+                providers::set(&name, fields.fields()?)?;
+                eprintln!(
+                    "Changed the provider `{name}`; see it with `sesame provider show {name}`."
+                );
+            }
+            ProviderCmd::Show { name } => {
+                let v = providers::show(&name)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
+                );
+            }
+            ProviderCmd::Rm { name } => eprintln!("{}", providers::remove(&name)?),
+        },
         Cmd::Setup { provider } => {
             print!("{}", setup::render(&provider, &providers::get(&provider)?));
         }
