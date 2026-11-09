@@ -1,3 +1,4 @@
+mod guide;
 mod oauth;
 mod providers;
 mod setup;
@@ -16,7 +17,9 @@ If you are an AI using sesame for someone:
      `sesame client` in their own terminal, which prompts for it.
   3. Have the person run `sesame login <provider>` and approve access in the browser
      themselves.
-  4. Then call the API: `sesame api <provider> <path>`.";
+  4. Then call the API: `sesame api <provider> <path>`.
+  5. When the person wants a platform sesame does not know, run `sesame provider guide`
+     and follow it.";
 
 /// Sign in to SaaS APIs from the terminal and call them with the stored token.
 #[derive(Parser)]
@@ -92,7 +95,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum ProviderCmd {
-    /// Add a provider; --auth-url, --token-url, --api-base and --host are required.
+    /// Add a provider; the flags marked (required) must be given.
     Add {
         name: String,
         #[command(flatten)]
@@ -110,6 +113,14 @@ enum ProviderCmd {
     Show { name: String },
     /// Remove a provider you added, or your changes to a built-in one.
     Rm { name: String },
+    /// How to connect a platform sesame does not know: the steps and the questions
+    /// to answer from its docs, one per field. Written for an AI.
+    Guide,
+    /// Read a platform's OAuth metadata (RFC 8414, OpenID Connect) and print a draft
+    /// `sesame provider add`. Takes a domain, an issuer or a metadata URL; writes nothing.
+    Discover { url: String },
+    /// Print the `sesame provider add` command that makes this definition again.
+    Export { name: String },
 }
 
 fn main() -> ExitCode {
@@ -146,11 +157,11 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Provider { cmd } => match *cmd {
             ProviderCmd::Add { name, fields } => {
-                providers::add(&name, fields.fields()?)?;
+                providers::add(&name, fields.0)?;
                 eprintln!("Added the provider `{name}`; next: sesame setup {name}");
             }
             ProviderCmd::Set { name, fields } => {
-                providers::set(&name, fields.fields()?)?;
+                providers::set(&name, fields.0)?;
                 eprintln!(
                     "Changed the provider `{name}`; see it with `sesame provider show {name}`."
                 );
@@ -163,6 +174,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 );
             }
             ProviderCmd::Rm { name } => eprintln!("{}", providers::remove(&name)?),
+            ProviderCmd::Guide => print!("{}", guide::render()),
+            ProviderCmd::Discover { url } => print!("{}", guide::discover(&url)?),
+            ProviderCmd::Export { name } => print!("{}", providers::export(&name)?),
         },
         Cmd::Setup { provider } => {
             print!("{}", setup::render(&provider, &providers::get(&provider)?));

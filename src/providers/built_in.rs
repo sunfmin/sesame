@@ -95,6 +95,7 @@ Generate a new client secret and keep it for the next step.
 The scopes sesame asks for at login: {scopes}",
             ),
         ],
+        sources: strings(&["https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps"]),
     }
 }
 
@@ -183,6 +184,7 @@ The dialog that opens shows the Client ID and Client secret; keep it open for th
 The scopes sesame asks for at login: {scopes}",
             ),
         ],
+        sources: strings(&["https://developers.google.com/identity/protocols/oauth2/native-app"]),
     }
 }
 
@@ -244,6 +246,7 @@ It must match exactly, so do not change localhost or the port. Click Save change
                 "The authentication details show the Client ID and Secret. Keep the page open for the next step.",
             ),
         ],
+        sources: strings(&["https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/"]),
     }
 }
 
@@ -298,6 +301,7 @@ Notion has no scopes: at login, the consent page asks which pages and databases 
 To change them later, log in again, or share a page with the integration from Notion.",
             ),
         ],
+        sources: strings(&["https://developers.notion.com/docs/authorization"]),
     }
 }
 
@@ -347,5 +351,6 @@ The application's page shows the Client ID and the Client secret. Keep it open f
 The scopes sesame asks for at login: {scopes} (they are asked for at login, not set on this page).",
             ),
         ],
+        sources: strings(&["https://linear.app/developers/oauth-2-0-authentication"]),
     }
 }

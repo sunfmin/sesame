@@ -3,12 +3,16 @@
 //! the built-in one with the stored fields over it (`effective`), so a field
 //! nobody changed follows each new version.
 mod built_in;
+pub mod fields;
 
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+use fields::FIELDS;
+pub use fields::FieldFlags;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +74,9 @@ pub struct Provider {
     /// How to register this provider's OAuth app, for `sesame setup`.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
+    /// The documentation pages the definition was read from.
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
 fn space() -> String {
@@ -127,152 +134,6 @@ pub enum ClientAuth {
 /// Fields of a provider definition, by name, as `sesame.db` stores them.
 pub type Fields = Map<String, Value>;
 
-/// The definition's fields as flags, shared by `sesame provider add` and `set`.
-#[derive(clap::Args, Debug, Default)]
-pub struct FieldFlags {
-    /// One line on what the provider is, for `sesame providers`.
-    #[arg(long)]
-    about: Option<String>,
-    /// The OAuth authorization endpoint.
-    #[arg(long)]
-    auth_url: Option<String>,
-    /// The OAuth token endpoint.
-    #[arg(long)]
-    token_url: Option<String>,
-    /// Base for relative `sesame api` paths; `{resource_id}` is the site picked at login.
-    #[arg(long)]
-    api_base: Option<String>,
-    /// A host the token may be sent to (`*.example.com` matches subdomains); repeatable.
-    #[arg(long = "host")]
-    hosts: Vec<String>,
-    /// A scope login asks for; repeatable. With none, the authorization URL has no `scope`.
-    #[arg(long = "scope")]
-    scopes: Vec<String>,
-    /// What joins the scopes in the authorization URL (default: a space).
-    #[arg(long)]
-    scope_separator: Option<String>,
-    /// `key=value` added to the authorization URL; repeatable.
-    #[arg(long = "auth-param")]
-    auth_params: Vec<String>,
-    /// How the token endpoint takes its body: `form` or `json`.
-    #[arg(long)]
-    token_body: Option<String>,
-    /// How the client authenticates to the token endpoint: `body` or `basic` (HTTP Basic).
-    #[arg(long)]
-    client_auth: Option<String>,
-    /// Header `Name: value` every `sesame api` request carries; repeatable.
-    /// A `-H` of the same name replaces it.
-    #[arg(long = "api-header")]
-    api_headers: Vec<String>,
-    /// URL listing the sites a token reaches (Atlassian).
-    #[arg(long)]
-    resources_url: Option<String>,
-    /// The token response's field naming the site the login reached (Notion: `workspace_name`).
-    #[arg(long)]
-    site_name_field: Option<String>,
-    /// Fixed loopback port for the callback, for providers that match it exactly.
-    #[arg(long)]
-    redirect_port: Option<u16>,
-    /// The loopback redirect's host: `localhost` (the default) or `127.0.0.1`.
-    #[arg(long)]
-    redirect_host: Option<String>,
-    /// Device authorization endpoint (RFC 8628); login then uses the device
-    /// flow by default, and `--browser` the loopback redirect.
-    #[arg(long)]
-    device_url: Option<String>,
-    /// JSON endpoint naming who signed in, read after login (on one of the hosts).
-    #[arg(long)]
-    identity_url: Option<String>,
-    /// The field of the identity answer naming the account, e.g. `login`, or a
-    /// JSON pointer into it, e.g. `/data/viewer/name`.
-    #[arg(long)]
-    identity_field: Option<String>,
-    /// JSON body for the identity call, which makes it a POST (GraphQL).
-    #[arg(long)]
-    identity_body: Option<String>,
-    /// A top-level field of the API's JSON answer that, not empty, fails the
-    /// call despite a 2xx status (GraphQL: `errors`); repeatable.
-    #[arg(long = "error-field")]
-    error_fields: Vec<String>,
-    /// A step for `sesame setup`, as JSON: `{"title": …, "page": …, "details": …}`;
-    /// repeatable, in order. `{callback}` and `{scopes}` in details are filled in.
-    #[arg(long = "setup-step")]
-    setup: Vec<String>,
-}
-
-impl FieldFlags {
-    /// The fields given; a repeatable flag replaces its whole list. Only the
-    /// shape of each flag is read here: `effective` validates the values.
-    pub fn fields(self) -> Result<Fields, String> {
-        let mut f = Fields::new();
-        let mut put = |k: &str, v: Value| {
-            f.insert(k.into(), v);
-        };
-        let opt = |v: Option<String>| v.map(Value::String);
-        let list = |v: Vec<String>| (!v.is_empty()).then(|| Value::from(v));
-        for (k, v) in [
-            ("about", opt(self.about)),
-            ("auth_url", opt(self.auth_url)),
-            ("token_url", opt(self.token_url)),
-            ("api_base", opt(self.api_base)),
-            ("hosts", list(self.hosts)),
-            ("scopes", list(self.scopes)),
-            ("scope_separator", opt(self.scope_separator)),
-            ("error_fields", list(self.error_fields)),
-            ("token_body", opt(self.token_body)),
-            ("client_auth", opt(self.client_auth)),
-            ("resources_url", opt(self.resources_url)),
-            ("site_name_field", opt(self.site_name_field)),
-            ("redirect_port", self.redirect_port.map(Value::from)),
-            ("redirect_host", opt(self.redirect_host)),
-            ("device_url", opt(self.device_url)),
-            ("identity_url", opt(self.identity_url)),
-            ("identity_field", opt(self.identity_field)),
-        ] {
-            if let Some(v) = v {
-                put(k, v);
-            }
-        }
-        if !self.auth_params.is_empty() {
-            let mut m = Map::new();
-            for kv in self.auth_params {
-                let (k, v) = kv
-                    .split_once('=')
-                    .ok_or_else(|| format!("--auth-param `{kv}` is not key=value"))?;
-                m.insert(k.into(), v.into());
-            }
-            put("auth_params", Value::Object(m));
-        }
-        if !self.api_headers.is_empty() {
-            let mut m = Map::new();
-            for h in self.api_headers {
-                let (k, v) = h
-                    .split_once(':')
-                    .ok_or_else(|| format!("--api-header `{h}` is not `Name: value`"))?;
-                m.insert(k.trim().into(), v.trim().into());
-            }
-            put("api_headers", Value::Object(m));
-        }
-        if let Some(b) = self.identity_body {
-            let v = serde_json::from_str(&b)
-                .map_err(|e| format!("--identity-body `{b}` is not JSON: {e}"))?;
-            put("identity_body", v);
-        }
-        if !self.setup.is_empty() {
-            let steps = self
-                .setup
-                .iter()
-                .map(|s| {
-                    serde_json::from_str(s)
-                        .map_err(|e| format!("--setup-step `{s}` is not JSON: {e}"))
-                })
-                .collect::<Result<Vec<Value>, String>>()?;
-            put("setup", Value::Array(steps));
-        }
-        Ok(f)
-    }
-}
-
 pub fn config_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("SESAME_CONFIG_DIR") {
         return PathBuf::from(d);
@@ -285,16 +146,19 @@ pub fn config_dir() -> PathBuf {
 
 /// The definition in force: `built_in` (if the name has one) with `user`'s
 /// fields over it. The one place a definition is validated: every value
-/// written to `sesame.db` passes through here first.
+/// written to `sesame.db` passes through here first, each field by its kind
+/// in the field table, then the fields that go together.
 fn effective(name: &str, built_in: Option<&Provider>, user: &Fields) -> Result<Provider, String> {
     let mut fields = match built_in {
         Some(p) => as_fields(p),
         None => Fields::new(),
     };
     fields.extend(user.clone());
-    let p: Provider = serde_json::from_value(Value::Object(fields))
-        .map_err(|e| format!("provider `{name}`: {e}"))?;
-    p.check().map_err(|e| format!("provider `{name}`: {e}"))?;
+    let err = |e: String| format!("provider `{name}`: {e}");
+    fields::check(&fields).map_err(err)?;
+    let p: Provider =
+        serde_json::from_value(Value::Object(fields)).map_err(|e| err(e.to_string()))?;
+    p.check().map_err(err)?;
     Ok(p)
 }
 
@@ -305,8 +169,26 @@ fn as_fields(p: &Provider) -> Fields {
     }
 }
 
-pub fn all() -> Result<BTreeMap<String, Provider>, String> {
-    let mut user = Store::open()?.provider_fields()?;
+/// The value each field has when nobody gives it, from the serde defaults;
+/// a field with none (an `Option` left out) is absent.
+fn defaults() -> Fields {
+    let mut required = Fields::new();
+    for f in FIELDS.iter().filter(|f| f.required) {
+        let v = match f.kind {
+            fields::Kind::Hosts => serde_json::json!(["example.com"]),
+            _ => Value::from("https://example.com"),
+        };
+        required.insert(f.name.into(), v);
+    }
+    let p: Provider = serde_json::from_value(Value::Object(required))
+        .expect("the required fields alone make a definition");
+    let mut d = as_fields(&p);
+    d.retain(|k, _| !fields::field(k).is_some_and(|f| f.required));
+    d
+}
+
+/// Every provider in force, given the stored fields of all of them.
+fn all_from(mut user: BTreeMap<String, Fields>) -> Result<BTreeMap<String, Provider>, String> {
     let mut map = BTreeMap::new();
     for (name, p) in built_in::all() {
         let f = user.remove(&name).unwrap_or_default();
@@ -316,6 +198,10 @@ pub fn all() -> Result<BTreeMap<String, Provider>, String> {
         map.insert(name.clone(), effective(&name, None, &f)?);
     }
     Ok(map)
+}
+
+pub fn all() -> Result<BTreeMap<String, Provider>, String> {
+    all_from(Store::open()?.provider_fields()?)
 }
 
 fn unknown(name: &str, names: impl Iterator<Item = String>) -> String {
@@ -330,6 +216,28 @@ pub fn get(name: &str) -> Result<Provider, String> {
     let mut all = all()?;
     all.remove(name)
         .ok_or_else(|| unknown(name, all.into_keys()))
+}
+
+/// Validates `name`'s new stored fields against everything else stored, and
+/// writes them: a fixed callback port is one provider's only, since two
+/// logins cannot listen on it, and each registers it as its own.
+fn save(s: &Store, name: &str, built_in: Option<&Provider>, user: Fields) -> Result<(), String> {
+    let p = effective(name, built_in, &user)?;
+    if let Some(port) = p.redirect_port {
+        let mut stored = s.provider_fields()?;
+        stored.remove(name);
+        let others = all_from(stored)?;
+        if let Some((other, _)) = others
+            .iter()
+            .find(|(o, q)| o.as_str() != name && q.redirect_port == Some(port))
+        {
+            return Err(format!(
+                "provider `{name}`: redirect_port {port} is taken by `{other}`; \
+                 pick another port"
+            ));
+        }
+    }
+    s.save_provider_fields(name, &user)
 }
 
 /// `sesame provider add`: a new provider, all of whose fields are the person's.
@@ -355,8 +263,7 @@ pub fn add(name: &str, fields: Fields) -> Result<(), String> {
                 "provider `{name}` exists; change it with `sesame provider set {name}`"
             ));
         }
-        effective(name, None, &fields)?;
-        s.save_provider_fields(name, &fields)
+        save(s, name, None, fields)
     })
 }
 
@@ -381,14 +288,13 @@ pub fn set(name: &str, fields: Fields) -> Result<(), String> {
             let base = as_fields(p);
             user.retain(|k, v| base.get(k) != Some(v));
         }
-        effective(name, built_in.as_ref(), &user)?;
-        s.save_provider_fields(name, &user)
+        save(s, name, built_in.as_ref(), user)
     })
 }
 
-/// `sesame provider show`: the definition in force, each field with where it
-/// comes from: `built-in`, `user`, or `default` (unset, so the default holds).
-pub fn show(name: &str) -> Result<Value, String> {
+/// The built-in definition of `name`, if any, its stored fields, and the
+/// definition in force; an error for a name that is neither.
+fn layers(name: &str) -> Result<(Option<Provider>, Fields, Provider), String> {
     let built_in = built_in::all().remove(name);
     let user = Store::open()?
         .provider_fields()?
@@ -398,20 +304,61 @@ pub fn show(name: &str) -> Result<Value, String> {
         return Err(unknown(name, all()?.into_keys()));
     }
     let p = effective(name, built_in.as_ref(), &user)?;
-    let fields = as_fields(&p)
-        .into_iter()
-        .map(|(k, value)| {
-            let from = if user.contains_key(&k) {
-                "user"
-            } else if built_in.is_some() {
-                "built-in"
-            } else {
-                "default"
-            };
-            (k, serde_json::json!({ "value": value, "from": from }))
-        })
-        .collect();
-    Ok(Value::Object(fields))
+    Ok((built_in, user, p))
+}
+
+/// `sesame provider show`: the definition in force, field by field of the
+/// table, each with where it comes from: `built-in`, `user`, or `default`
+/// (unset, so the default holds). A field without a value is left out.
+pub fn show(name: &str) -> Result<Value, String> {
+    let (built_in, user, p) = layers(name)?;
+    let mut values = as_fields(&p);
+    let mut shown = Fields::new();
+    for f in FIELDS {
+        let Some(value) = values.remove(f.name) else {
+            continue;
+        };
+        let from = if user.contains_key(f.name) {
+            "user"
+        } else if built_in.is_some() {
+            "built-in"
+        } else {
+            "default"
+        };
+        shown.insert(
+            f.name.into(),
+            serde_json::json!({ "value": value, "from": from }),
+        );
+    }
+    Ok(Value::Object(shown))
+}
+
+/// `sesame provider export`: the `sesame provider add` command that makes
+/// this definition again in another `sesame.db`: every field of the table
+/// that is not its default, and every field the person gave.
+pub fn export(name: &str) -> Result<String, String> {
+    let (_, user, p) = layers(name)?;
+    let values = as_fields(&p);
+    let defaults = defaults();
+    let mut out = format!("sesame provider add {}", fields::quote(name));
+    for f in FIELDS {
+        let Some(v) = values.get(f.name) else {
+            continue;
+        };
+        if defaults.get(f.name) == Some(v) && !user.contains_key(f.name) {
+            continue;
+        }
+        let given = f.kind.flag_values(v);
+        if given.is_empty() {
+            // An empty list the person gave is the default: no flag says it.
+            continue;
+        }
+        for g in given {
+            out.push_str(&format!(" \\\n  --{} {}", f.flag, fields::quote(&g)));
+        }
+    }
+    out.push('\n');
+    Ok(out)
 }
 
 /// `sesame provider rm`: forgets the person's fields. A provider they added is
@@ -438,39 +385,12 @@ pub fn redirect_uri(host: RedirectHost, port: u16) -> String {
     format!("http://{}:{port}/callback", host.as_str())
 }
 
-fn check_url(field: &str, u: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(u).map_err(|e| format!("{field} `{u}`: {e}"))?;
-    match parsed.scheme() {
-        "https" | "http" => Ok(()),
-        s => Err(format!("{field} `{u}`: scheme {s} is not http or https")),
-    }
-}
-
 impl Provider {
-    /// What the types do not say: URLs that parse, at least one host, a usable port.
+    /// What one field's kind does not say: the fields that go together.
     fn check(&self) -> Result<(), String> {
-        check_url("auth_url", &self.auth_url)?;
-        check_url("token_url", &self.token_url)?;
-        check_url("api_base", &self.api_base.replace("{resource_id}", "x"))?;
-        if let Some(u) = &self.resources_url {
-            check_url("resources_url", u)?;
-        }
-        if self.hosts.is_empty() {
-            return Err("hosts is empty: give at least one --host the token may go to".into());
-        }
-        if let Some(h) = self.hosts.iter().find(|h| {
-            let bare = h.strip_prefix("*.").unwrap_or(h);
-            bare.is_empty() || bare.contains(['/', ':', '*', ' '])
-        }) {
-            return Err(format!("host `{h}`: a host name, or `*.` and a domain"));
-        }
-        if let Some(u) = &self.device_url {
-            check_url("device_url", u)?;
-        }
         match (&self.identity_url, &self.identity_field) {
             (None, None) => {}
-            (Some(u), Some(f)) => {
-                check_url("identity_url", u)?;
+            (Some(u), Some(_)) => {
                 let host = url::Url::parse(u)
                     .ok()
                     .and_then(|u| u.host_str().map(String::from))
@@ -480,47 +400,11 @@ impl Provider {
                         "identity_url `{u}`: the token goes only to hosts, and {host} is not one"
                     ));
                 }
-                if f.trim().is_empty() {
-                    return Err("identity_field is empty".into());
-                }
             }
             _ => return Err("identity_url and identity_field go together: give both".into()),
         }
         if self.identity_body.is_some() && self.identity_url.is_none() {
             return Err("identity_body without identity_url: give the URL it goes to".into());
-        }
-        if self.scope_separator.is_empty() {
-            return Err("scope_separator is empty: give a space or a character such as `,`".into());
-        }
-        if self.error_fields.iter().any(|f| f.trim().is_empty()) {
-            return Err("an error_fields entry is empty".into());
-        }
-        for (k, v) in &self.api_headers {
-            reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                .map_err(|_| format!("api header `{k}`: not a header name"))?;
-            reqwest::header::HeaderValue::from_str(v)
-                .map_err(|_| format!("api header `{k}`: value `{v}` is not a header value"))?;
-            if k.eq_ignore_ascii_case("authorization") {
-                return Err("api header `Authorization`: sesame sets it from the token".into());
-            }
-        }
-        if self
-            .site_name_field
-            .as_deref()
-            .is_some_and(|f| f.trim().is_empty())
-        {
-            return Err("site_name_field is empty: leave it out, or name a field".into());
-        }
-        if self.redirect_port == Some(0) {
-            return Err("redirect_port 0: leave it out for any free port".into());
-        }
-        for s in &self.setup {
-            if s.title.trim().is_empty() {
-                return Err("a setup step has no title".into());
-            }
-            if let Some(page) = &s.page {
-                check_url("setup page", page)?;
-            }
         }
         Ok(())
     }
@@ -614,8 +498,12 @@ mod tests {
             ("token_url", json!("ftp://a.example"), "scheme ftp"),
             ("hosts", json!([]), "hosts is empty"),
             ("hosts", json!(["https://x"]), "host `https://x`"),
-            ("token_body", json!("xml"), "unknown variant `xml`"),
-            ("client_auth", json!("digest"), "unknown variant `digest`"),
+            (
+                "token_body",
+                json!("xml"),
+                "token_body `xml`: not one of form, json",
+            ),
+            ("client_auth", json!("digest"), "not one of body, basic"),
             ("api_headers", json!({"bad name": "x"}), "not a header name"),
             ("api_headers", json!({"X-A": "a\nb"}), "not a header value"),
             (
@@ -628,7 +516,7 @@ mod tests {
             (
                 "redirect_host",
                 json!("example.com"),
-                "unknown variant `example.com`",
+                "not one of localhost, 127.0.0.1",
             ),
             ("device_url", json!("nope"), "device_url"),
             (
@@ -680,49 +568,5 @@ mod tests {
             assert_eq!(p.error_in(ok), None, "{}", String::from_utf8_lossy(ok));
         }
         assert_eq!(built_in("google").error_in(br#"{"errors":[1]}"#), None);
-    }
-
-    #[test]
-    fn flags_become_fields() {
-        let flags = FieldFlags {
-            scopes: vec!["a".into(), "b".into()],
-            auth_params: vec!["prompt=consent".into()],
-            api_headers: vec!["Notion-Version: 2026-03-11".into()],
-            client_auth: Some("basic".into()),
-            redirect_port: Some(9000),
-            redirect_host: Some("127.0.0.1".into()),
-            device_url: Some("https://x.example/device".into()),
-            scope_separator: Some(",".into()),
-            error_fields: vec!["errors".into()],
-            identity_body: Some(r#"{"query":"{ viewer { name } }"}"#.into()),
-            setup: vec![r#"{"title":"T","page":"https://x.example"}"#.into()],
-            ..Default::default()
-        };
-        assert_eq!(
-            Value::Object(flags.fields().unwrap()),
-            json!({
-                "scopes": ["a", "b"],
-                "auth_params": {"prompt": "consent"},
-                "api_headers": {"Notion-Version": "2026-03-11"},
-                "client_auth": "basic",
-                "redirect_port": 9000,
-                "redirect_host": "127.0.0.1",
-                "device_url": "https://x.example/device",
-                "scope_separator": ",",
-                "error_fields": ["errors"],
-                "identity_body": {"query": "{ viewer { name } }"},
-                "setup": [{"title": "T", "page": "https://x.example"}],
-            })
-        );
-        let bad = FieldFlags {
-            auth_params: vec!["novalue".into()],
-            ..Default::default()
-        };
-        assert!(bad.fields().unwrap_err().contains("key=value"));
-        let bad = FieldFlags {
-            api_headers: vec!["novalue".into()],
-            ..Default::default()
-        };
-        assert!(bad.fields().unwrap_err().contains("Name: value"));
     }
 }
