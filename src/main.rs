@@ -5,7 +5,7 @@ mod store;
 use clap::{Parser, Subcommand};
 use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
-use store::{Client, Kind, Token};
+use store::{Client, Store, Token};
 
 /// Sign in to SaaS APIs from the terminal and call them with the stored token.
 #[derive(Parser)]
@@ -80,9 +80,10 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.cmd {
         Cmd::Providers => {
+            let store = Store::open()?;
             for (name, p) in providers::all()? {
-                let token: Option<Token> = store::load(&name, Kind::Token)?;
-                let client: Option<Client> = store::load(&name, Kind::Client)?;
+                let token = store.token(&name)?;
+                let client = store.client(&name)?;
                 let state = match (&client, &token) {
                     (None, _) => "no client".to_string(),
                     (Some(_), None) => "not logged in".to_string(),
@@ -112,9 +113,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             } else {
                 Some(rpassword::prompt_password("Client secret: ").map_err(|e| e.to_string())?)
             };
-            store::save(
+            Store::open()?.save_client(
                 &provider,
-                Kind::Client,
                 &Client {
                     client_id,
                     client_secret,
@@ -142,7 +142,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             eprintln!("Logged in to `{provider}`{site}.");
         }
         Cmd::Logout { provider } => {
-            store::delete(&provider, Kind::Token)?;
+            Store::open()?.delete_token(&provider)?;
             eprintln!("Logged out of `{provider}`.");
         }
         Cmd::Token { provider } => {
