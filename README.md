@@ -18,6 +18,7 @@ sesame api jira /rest/api/3/issue -d @issue.json      # -d implies POST; -X, -H,
 sesame api notion /search -d '{}'             # Notion-Version is sent for you; -H replaces it
 sesame api figma /me
 sesame api figma /files/<key>
+sesame api linear /graphql -d '{"query":"{ viewer { id name } }"}'   # GraphQL `errors` exit non-zero
 curl -H "Authorization: Bearer $(sesame token jira)" ...
 sesame providers                              # who you are signed in to
 sesame logout jira                            # forgets the local token only
@@ -26,7 +27,7 @@ sesame logout jira                            # forgets the local token only
 ## How it works
 
 - **Provider** = one OAuth realm: one login, one token. The built-ins (figma, github, google,
-  jira, notion) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
+  jira, linear, notion) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
   Your own providers, and your changes to a built-in one, are stored in
   `sesame.db` and managed with commands; there is no config file to edit:
 
@@ -52,7 +53,10 @@ sesame logout jira                            # forgets the local token only
   most likely expired.
 
   A built-in provider's fields you did not `set` follow each new version of
-  sesame. `sesame provider add --help` lists every field; `add` and `set`
+  sesame. Among the fields: how the scopes are joined in the authorization
+  URL (`--scope-separator ,` for Linear), and which fields of a 2xx JSON answer
+  still mean failure (`--error-field errors` for GraphQL).
+  `sesame provider add --help` lists every field; `add` and `set`
   refuse an invalid value before writing anything.
 - **Login** is the authorization-code flow with PKCE and a loopback redirect
   (`http://localhost:<port>/callback`, or `127.0.0.1` for a provider whose
@@ -71,7 +75,8 @@ sesame logout jira                            # forgets the local token only
   access on the provider's side (Google account permissions, Atlassian
   connected apps, Notion's Settings > Connections, GitHub's Settings > Applications).
 - **`api`** sends the token only to the provider's `hosts`; a 401 triggers one
-  refresh and retry.
+  refresh and retry. It exits non-zero on a non-2xx status, and on a 2xx whose
+  JSON carries one of the provider's `error_fields` not empty.
 
 ## Registering the OAuth apps
 

@@ -36,6 +36,7 @@ pub fn all() -> BTreeMap<String, Provider> {
         ("github".into(), github()),
         ("google".into(), google()),
         ("jira".into(), jira()),
+        ("linear".into(), linear()),
         ("notion".into(), notion()),
     ])
 }
@@ -52,6 +53,7 @@ fn github() -> Provider {
         refresh_url: None,
         api_base: "https://api.github.com".into(),
         hosts: strings(&["api.github.com", "uploads.github.com"]),
+        scope_separator: " ".into(),
         scopes: strings(&["repo", "read:org"]),
         auth_params: BTreeMap::new(),
         token_body: TokenBody::Form,
@@ -68,6 +70,8 @@ fn github() -> Provider {
         device_url: Some("https://github.com/login/device/code".into()),
         identity_url: Some("https://api.github.com/user".into()),
         identity_field: Some("login".into()),
+        identity_body: None,
+        error_fields: vec![],
         setup: vec![
             step(
                 "Register an OAuth App (Settings > Developer settings > OAuth Apps)",
@@ -105,6 +109,7 @@ fn google() -> Provider {
         refresh_url: None,
         api_base: "https://www.googleapis.com".into(),
         hosts: strings(&["*.googleapis.com"]),
+        scope_separator: " ".into(),
         scopes: strings(&[
             "openid",
             "email",
@@ -124,6 +129,8 @@ fn google() -> Provider {
         device_url: None,
         identity_url: None,
         identity_field: None,
+        identity_body: None,
+        error_fields: vec![],
         setup: vec![
             step(
                 "Create or pick a Google Cloud project",
@@ -192,6 +199,7 @@ fn jira() -> Provider {
         refresh_url: None,
         api_base: "https://api.atlassian.com/ex/jira/{resource_id}".into(),
         hosts: strings(&["api.atlassian.com"]),
+        scope_separator: " ".into(),
         scopes: strings(&[
             "read:jira-work",
             "write:jira-work",
@@ -210,6 +218,8 @@ fn jira() -> Provider {
         device_url: None,
         identity_url: None,
         identity_field: None,
+        identity_body: None,
+        error_fields: vec![],
         setup: vec![
             step(
                 "Create an OAuth 2.0 integration in the Atlassian developer console",
@@ -256,6 +266,7 @@ fn notion() -> Provider {
         api_base: "https://api.notion.com/v1".into(),
         hosts: strings(&["api.notion.com"]),
         scopes: Vec::new(),
+        scope_separator: " ".into(),
         auth_params: params(&[("owner", "user")]),
         token_body: TokenBody::Json,
         client_auth: ClientAuth::Basic,
@@ -269,6 +280,8 @@ fn notion() -> Provider {
         device_url: None,
         identity_url: None,
         identity_field: None,
+        identity_body: None,
+        error_fields: vec![],
         setup: vec![
             step(
                 "Create an OAuth (public) integration in Notion's developer portal",
@@ -315,6 +328,7 @@ fn figma() -> Provider {
             "file_content:read",
             "file_comments:read",
         ]),
+        scope_separator: " ".into(),
         auth_params: BTreeMap::new(),
         token_body: TokenBody::Form,
         client_auth: ClientAuth::Basic,
@@ -328,6 +342,8 @@ fn figma() -> Provider {
         device_url: None,
         identity_url: Some("https://api.figma.com/v1/me".into()),
         identity_field: Some("email".into()),
+        identity_body: None,
+        error_fields: vec![],
         setup: vec![
             step(
                 "Create an OAuth app (My Apps on Figma's developer site)",
@@ -357,6 +373,57 @@ Select the scopes sesame asks for at login: {scopes}
 The OAuth credentials page shows the Client ID and Client secret; keep it open for the next step.
 A new app is a Draft: only you and the plan's admins can authorize it. For your team or
 organization to use it, publish it as Private (no review by Figma); Public needs Figma's review.",
+            ),
+        ],
+    }
+}
+
+/// Linear: GraphQL only, at `/graphql`. Scopes are comma-separated; the access
+/// token lasts 24 hours and each refresh hands out a new refresh token.
+/// https://linear.app/developers/oauth-2-0-authentication
+fn linear() -> Provider {
+    Provider {
+        about: "Linear (GraphQL API)".into(),
+        auth_url: "https://linear.app/oauth/authorize".into(),
+        token_url: "https://api.linear.app/oauth/token".into(),
+        refresh_url: None,
+        api_base: "https://api.linear.app".into(),
+        hosts: strings(&["api.linear.app"]),
+        scopes: strings(&["read", "write"]),
+        scope_separator: ",".into(),
+        auth_params: BTreeMap::new(),
+        token_body: TokenBody::Form,
+        client_auth: ClientAuth::Body,
+        api_headers: BTreeMap::new(),
+        resources_url: None,
+        site_name_field: None,
+        // Linear documents no rule for the callback, so it is matched as registered.
+        redirect_port: Some(8752),
+        code_seconds: None,
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: Some("https://api.linear.app/graphql".into()),
+        identity_field: Some("/data/viewer/name".into()),
+        identity_body: Some(serde_json::json!({"query": "{ viewer { name } }"})),
+        // A GraphQL error comes back as 200 with `errors`.
+        error_fields: strings(&["errors"]),
+        setup: vec![
+            step(
+                "Create an OAuth application in Linear (Settings > API > OAuth applications)",
+                Some("https://linear.app/settings/api/applications/new"),
+                "\
+Sign in to the Linear workspace sesame should reach; every admin of that workspace can see the app.
+- Application name: anything, e.g. \"sesame\"; people see it when they approve access.
+- Callback URLs: {callback}
+  It must match exactly, so do not change localhost or the port.
+Click Create.",
+            ),
+            step(
+                "Copy the client ID and secret",
+                None,
+                "\
+The application's page shows the Client ID and the Client secret. Keep it open for the next step.
+The scopes sesame asks for at login: {scopes} (they are asked for at login, not set on this page).",
             ),
         ],
     }

@@ -62,7 +62,7 @@ pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, Str
         pick_resource(&mut token, resources_url, opts.site.as_deref())?;
     }
     if let (Some(url), Some(field)) = (&p.identity_url, &p.identity_field) {
-        match identify(&token, url, field) {
+        match identify(p, &token, url, field) {
             Ok(account) => token.account = Some(account),
             Err(e) => eprintln!("Signed in, but could not read who you are: {e}"),
         }
@@ -93,7 +93,7 @@ fn loopback_flow(
             .append_pair("client_id", &client.client_id)
             .append_pair("redirect_uri", &redirect_uri);
         if !scopes.is_empty() {
-            q.append_pair("scope", &scopes.join(" "));
+            q.append_pair("scope", &scopes.join(&p.scope_separator));
         }
         q.append_pair("state", &state)
             .append_pair("code_challenge", &challenge)
@@ -217,7 +217,7 @@ fn device_flow(
     }
     let mut form = vec![("client_id", client.client_id.clone())];
     if !scopes.is_empty() {
-        form.push(("scope", scopes.join(" ")));
+        form.push(("scope", scopes.join(&p.scope_separator)));
     }
     let (status, text) = post(p, device_url, form, None)?;
     if !status.is_success() {
@@ -281,19 +281,33 @@ fn device_flow(
 }
 
 /// Reads `field` of the provider's `identity_url` answer: the account signed in.
-fn identify(token: &Token, url: &str, field: &str) -> Result<String, String> {
-    let v: serde_json::Value = http()
-        .get(url)
+/// A `field` starting with `/` is a JSON pointer; `identity_body` makes the call a POST.
+fn identify(p: &Provider, token: &Token, url: &str, field: &str) -> Result<String, String> {
+    let req = match &p.identity_body {
+        Some(b) => http().post(url).json(b),
+        None => http().get(url),
+    };
+    let bytes = req
         .bearer_auth(&token.access_token)
         .header("Accept", "application/json")
         .send()
         .and_then(|r| r.error_for_status())
-        .and_then(|r| r.json())
+        .and_then(|r| r.bytes())
         .map_err(|e| format!("{url}: {e}"))?;
-    match &v[field] {
-        serde_json::Value::String(s) => Ok(s.clone()),
-        serde_json::Value::Null => Err(format!("{url} has no `{field}`")),
-        other => Ok(other.to_string()),
+    if let Some(f) = p.error_in(&bytes) {
+        let text = String::from_utf8_lossy(&bytes);
+        return Err(format!("{url} answered with `{f}`: {text}"));
+    }
+    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("{url}: {e}"))?;
+    let found = if field.starts_with('/') {
+        v.pointer(field)
+    } else {
+        v.get(field)
+    };
+    match found {
+        Some(serde_json::Value::String(s)) => Ok(s.clone()),
+        None | Some(serde_json::Value::Null) => Err(format!("{url} has no `{field}`")),
+        Some(other) => Ok(other.to_string()),
     }
 }
 
