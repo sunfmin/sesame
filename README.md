@@ -12,6 +12,9 @@ sesame api google https://docs.googleapis.com/v1/documents/<id>
 sesame api google '/youtube/v3/channels?part=snippet&mine=true'
 sesame api jira /rest/api/3/myself
 sesame api jira /rest/api/3/issue -d @issue.json      # -d implies POST; -X, -H, -i as in curl
+sesame api slack /conversations.list                  # as yourself, with a Slack user token
+sesame api slack /chat.postMessage -d '{"channel":"C…","text":"hi"}'
+sesame login slack --token                            # or store a token you copied (hidden input)
 curl -H "Authorization: Bearer $(sesame token jira)" ...
 sesame providers                              # who you are signed in to
 sesame logout jira                            # forgets the local token only
@@ -20,7 +23,7 @@ sesame logout jira                            # forgets the local token only
 ## How it works
 
 - **Provider** = one OAuth realm: one login, one token. The built-ins (google,
-  jira) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
+  jira, slack) are defined in the code, [`src/providers/built_in.rs`](src/providers/built_in.rs).
   Your own providers, and your changes to a built-in one, are stored in
   `sesame.db` and managed with commands; there is no config file to edit:
 
@@ -39,7 +42,14 @@ sesame logout jira                            # forgets the local token only
 - **Login** is the authorization-code flow with PKCE and a loopback redirect
   (`http://localhost:<port>/callback`). On a remote machine (SSH), open the
   printed URL anywhere and paste the address the browser ends on back into the
-  terminal.
+  terminal. A provider that takes only https callbacks (`--redirect https-paste`,
+  as slack) uses `https://localhost:<redirect-port>/callback`: nothing listens
+  there, the browser says it cannot open the page, and you paste its address.
+  The fields `scope_param`, `pkce`, `token_path`, `account_path` and `ok_field`
+  describe the rest of a provider's OAuth dialect (`sesame provider add --help`).
+- **`login --token`** (or `--token-stdin`) stores a token you got another way,
+  such as a Slack app's User OAuth Token; it has no refresh, and `sesame
+  providers` marks it `pasted token`.
 - **Secrets** (clients and tokens) and provider definitions are stored **in plaintext** in one SQLite
   database, `~/.config/sesame/sesame.db` (`$SESAME_CONFIG_DIR/sesame.db` when
   set), protected only by file permissions, as gcloud does: the file is 0600,
@@ -47,9 +57,10 @@ sesame logout jira                            # forgets the local token only
   synced folder.
 - **`logout`** deletes the local token only; to revoke it, remove the app's
   access on the provider's side (Google account permissions, Atlassian
-  connected apps).
+  connected apps, the Slack app's page).
 - **`api`** sends the token only to the provider's `hosts`; a 401 triggers one
-  refresh and retry.
+  refresh and retry. With an `ok_field` (slack: `ok`), a JSON answer whose field
+  is `false` exits non-zero even on HTTP 200.
 
 ## Registering the OAuth apps
 

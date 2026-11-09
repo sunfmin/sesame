@@ -34,7 +34,7 @@ enum Cmd {
     /// Add, change, show or remove a provider definition (stored in sesame.db).
     Provider {
         #[command(subcommand)]
-        cmd: ProviderCmd,
+        cmd: Box<ProviderCmd>,
     },
     /// Print the steps to register a provider's OAuth app and get to a working login.
     Setup { provider: String },
@@ -161,7 +161,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 println!("{name:<12} {state:<24} {next:<28} {}", p.about);
             }
         }
-        Cmd::Provider { cmd } => match cmd {
+        Cmd::Provider { cmd } => match *cmd {
             ProviderCmd::Add { name, fields } => {
                 providers::add(&name, fields.fields()?)?;
                 eprintln!("Added the provider `{name}`; next: sesame setup {name}");

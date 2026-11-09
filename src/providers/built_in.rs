@@ -237,7 +237,7 @@ Add an OAuth Scope for each one sesame asks for: {scopes}",
 Under Redirect URLs click Add New Redirect URL, enter {callback}, click Add, then Save URLs.
 Slack takes only https redirect URLs, so nothing listens there: at login the browser ends on a
 page it cannot open, and you paste that page's address into the terminal.
-If the console refuses this URL, sign in with a pasted token instead and skip the steps below:
+If the console refuses this URL, sign in with a pasted token instead, then go to the last step:
 on the same page click Install to Workspace and Allow, copy the User OAuth Token (it starts
 with xoxp-), and run `sesame login slack --token` in your own terminal; it asks for the token
 with hidden input.",
