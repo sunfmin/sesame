@@ -222,7 +222,10 @@ fn draft(url: &url::Url, m: &serde_json::Map<String, Value>) -> String {
     for f in FIELDS.iter().filter(|f| !answered.contains(&f.name)) {
         let _ = writeln!(out, "--{}: {}", f.flag, f.question);
     }
-    for (q, _) in FIXED.iter().skip(usize::from(pkce_answered)) {
+    for (q, _) in FIXED
+        .iter()
+        .filter(|(q, _)| !(pkce_answered && q.contains("PKCE")))
+    {
         let _ = writeln!(out, "- {q}");
     }
     out
@@ -282,11 +285,5 @@ mod tests {
             s("https://acme.example/.well-known/openid-configuration"),
             ["https://acme.example/.well-known/openid-configuration"]
         );
-    }
-
-    #[test]
-    fn the_first_fixed_question_is_pkce() {
-        // `draft` skips it when the metadata answers PKCE.
-        assert!(FIXED[0].0.contains("PKCE"));
     }
 }
