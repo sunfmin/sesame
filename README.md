@@ -4,6 +4,7 @@ Sign in to SaaS APIs that have no CLI of their own, from the terminal, and call
 their REST APIs with the stored token.
 
 ```sh
+sesame setup google                          # first time: how to register the OAuth app
 sesame client google --client-id <id>        # once: the OAuth app to sign in with (secret is prompted)
 sesame login google                          # opens the provider's OAuth page; token goes to ~/.config/sesame/sesame.db
 sesame api google /drive/v3/files            # GET, token attached, refreshed when it expires
@@ -38,12 +39,11 @@ sesame logout jira                            # forgets the local token only
 
 ## Registering the OAuth apps
 
-Each user (or you, once, for everyone) needs an OAuth client per provider:
-
-- **Google**: Cloud Console → Credentials → OAuth client ID → *Desktop app*.
-  Enable the Drive / Docs / YouTube Data APIs on the project.
-- **Jira**: developer.atlassian.com → OAuth 2.0 integration, callback
-  `http://localhost:8749/callback`, add the Jira API scopes.
+Each user (or you, once, for everyone) needs an OAuth client per provider.
+`sesame setup <provider>` prints the steps, from creating the app on the
+provider's console to the first `sesame api` call; `sesame providers` says
+which providers still need one. The steps live with each provider in
+`providers.toml` (`[[<provider>.setup]]`), so a provider you add can carry its own.
 
 ## Development
 

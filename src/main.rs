@@ -1,5 +1,6 @@
 mod oauth;
 mod providers;
+mod setup;
 mod store;
 
 use clap::{Parser, Subcommand};
@@ -7,9 +8,19 @@ use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 use store::{Client, Store, Token};
 
+const FOR_AI: &str = "\
+If you are an AI using sesame for someone:
+  1. Run `sesame providers` to see where each provider stands.
+  2. For one showing `no client`, run `sesame setup <provider>` and walk the person
+     through its steps. Never ask for a client secret in the chat: the person runs
+     `sesame client` in their own terminal, which prompts for it.
+  3. Have the person run `sesame login <provider>` and approve access in the browser
+     themselves.
+  4. Then call the API: `sesame api <provider> <path>`.";
+
 /// Sign in to SaaS APIs from the terminal and call them with the stored token.
 #[derive(Parser)]
-#[command(name = "sesame", version)]
+#[command(name = "sesame", version, before_help = FOR_AI)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -19,6 +30,8 @@ struct Cli {
 enum Cmd {
     /// List the providers and whether you are signed in to each.
     Providers,
+    /// Print the steps to register a provider's OAuth app and get to a working login.
+    Setup { provider: String },
     /// Store the OAuth client (app) used to sign in to a provider.
     Client {
         provider: String,
@@ -84,16 +97,26 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             for (name, p) in providers::all()? {
                 let token = store.token(&name)?;
                 let client = store.client(&name)?;
-                let state = match (&client, &token) {
-                    (None, _) => "no client".to_string(),
-                    (Some(_), None) => "not logged in".to_string(),
+                let (state, next) = match (&client, &token) {
+                    (None, _) => ("no client".to_string(), format!("sesame setup {name}")),
+                    (Some(_), None) => {
+                        ("not logged in".to_string(), format!("sesame login {name}"))
+                    }
                     (Some(_), Some(t)) => match &t.resource_name {
-                        Some(site) => format!("logged in ({site})"),
-                        None => "logged in".to_string(),
+                        Some(site) => (format!("logged in ({site})"), String::new()),
+                        None => ("logged in".to_string(), String::new()),
                     },
                 };
-                println!("{name:<12} {state:<24} {}", p.about);
+                let next = if next.is_empty() {
+                    next
+                } else {
+                    format!("next: {next}")
+                };
+                println!("{name:<12} {state:<24} {next:<28} {}", p.about);
             }
+        }
+        Cmd::Setup { provider } => {
+            print!("{}", setup::render(&provider, &providers::get(&provider)?));
         }
         Cmd::Client {
             provider,
