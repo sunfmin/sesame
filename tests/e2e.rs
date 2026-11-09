@@ -98,7 +98,7 @@ fn login_call_refresh_logout() {
     let (port, log) = fake_provider();
     let tmp = std::env::temp_dir().join(format!("sesame-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    let (config, store) = (tmp.join("config"), tmp.join("store"));
+    let config = tmp.join("config");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("providers.toml"),
@@ -116,9 +116,7 @@ resources_url = "http://127.0.0.1:{port}/sites"
     .unwrap();
     let sesame = |args: &[&str]| {
         let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        c.args(args)
-            .env("SESAME_CONFIG_DIR", &config)
-            .env("SESAME_STORE_DIR", &store);
+        c.args(args).env("SESAME_CONFIG_DIR", &config);
         c
     };
 
@@ -167,6 +165,13 @@ resources_url = "http://127.0.0.1:{port}/sites"
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to send the token"));
+
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(config.join("sesame.db"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
 
     assert!(sesame(&["logout", "fake"]).status().unwrap().success());
     assert!(!sesame(&["token", "fake"]).status().unwrap().success());
