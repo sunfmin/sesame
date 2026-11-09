@@ -25,8 +25,20 @@ pub struct Provider {
     pub resources_url: Option<String>,
     /// Fixed loopback port, for providers that match the callback URL exactly.
     pub redirect_port: Option<u16>,
+    /// How to register this provider's OAuth app, for `sesame setup`.
     #[serde(default)]
-    pub register: String,
+    pub setup: Vec<SetupStep>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupStep {
+    pub title: String,
+    /// The page to open for this step.
+    pub page: Option<String>,
+    /// What to click, fill in and pick; `{callback}` and `{scopes}` are filled in.
+    #[serde(default)]
+    pub details: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
@@ -60,12 +72,30 @@ pub fn all() -> Result<BTreeMap<String, Provider>, String> {
 }
 
 pub fn get(name: &str) -> Result<Provider, String> {
-    all()?
-        .remove(name)
-        .ok_or_else(|| format!("unknown provider `{name}`; see `sesame providers`"))
+    let mut all = all()?;
+    all.remove(name).ok_or_else(|| {
+        let names: Vec<&str> = all.keys().map(String::as_str).collect();
+        format!(
+            "unknown provider `{name}`; choose one of: {}",
+            names.join(", ")
+        )
+    })
+}
+
+/// The loopback redirect URL login listens on, for the port it bound.
+pub fn redirect_uri(port: u16) -> String {
+    format!("http://localhost:{port}/callback")
 }
 
 impl Provider {
+    /// The redirect URL to register with the provider: fixed when `redirect_port` is.
+    pub fn callback(&self) -> String {
+        match self.redirect_port {
+            Some(port) => redirect_uri(port),
+            None => "http://localhost:<any port>/callback".into(),
+        }
+    }
+
     pub fn allows_host(&self, host: &str) -> bool {
         self.hosts.iter().any(|h| match h.strip_prefix("*.") {
             Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),

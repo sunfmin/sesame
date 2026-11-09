@@ -178,3 +178,89 @@ resources_url = "http://127.0.0.1:{port}/sites"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// First use: no client yet. Every command names the next one to run, and a
+/// provider from the user's providers.toml prints its own setup steps.
+#[test]
+fn first_use_points_to_setup() {
+    let tmp = std::env::temp_dir().join(format!("sesame-setup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let (config, store) = (tmp.join("config"), tmp.join("store"));
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("providers.toml"),
+        r#"[acme]
+auth_url = "https://acme.example/authorize"
+token_url = "https://acme.example/token"
+api_base = "https://api.acme.example"
+hosts = ["api.acme.example"]
+scopes = ["read", "write"]
+redirect_port = 9321
+
+[[acme.setup]]
+title = "Register the app"
+page = "https://acme.example/apps"
+details = "Callback: {callback}; scopes: {scopes}"
+"#,
+    )
+    .unwrap();
+    let sesame = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sesame"))
+            .args(args)
+            .env("SESAME_CONFIG_DIR", &config)
+            .env("SESAME_STORE_DIR", &store)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+
+    let (ok, out) = sesame(&["setup", "acme"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("1. Register the app"), "{out}");
+    assert!(out.contains("Open: https://acme.example/apps"), "{out}");
+    assert!(
+        out.contains("Callback: http://localhost:9321/callback; scopes: read, write"),
+        "{out}"
+    );
+    assert!(
+        out.contains("sesame client acme --client-id <client id>"),
+        "{out}"
+    );
+
+    let (ok, out) = sesame(&["setup", "jira"]);
+    assert!(
+        ok && out.contains("http://localhost:8749/callback"),
+        "{out}"
+    );
+
+    let (ok, out) = sesame(&["setup", "nope"]);
+    assert!(!ok);
+    assert!(out.contains("unknown provider `nope`"), "{out}");
+    assert!(out.contains("acme, google, jira"), "{out}");
+
+    let (_, out) = sesame(&["providers"]);
+    assert!(out.contains("next: sesame setup acme"), "{out}");
+
+    for cmd in [
+        &["login", "acme", "--no-browser"][..],
+        &["api", "acme", "/x"],
+    ] {
+        let (ok, out) = sesame(cmd);
+        assert!(!ok);
+        assert!(out.contains("run `sesame setup acme`"), "{cmd:?}: {out}");
+    }
+
+    let (ok, _) = sesame(&["client", "acme", "--client-id", "cid", "--no-secret"]);
+    assert!(ok);
+    let (_, out) = sesame(&["providers"]);
+    assert!(out.contains("next: sesame login acme"), "{out}");
+    let (ok, out) = sesame(&["api", "acme", "/x"]);
+    assert!(!ok && out.contains("run `sesame login acme`"), "{out}");
+
+    let (_, out) = sesame(&["--help"]);
+    assert!(out.starts_with("If you are an AI"), "{out}");
+    assert!(out.contains("sesame setup <provider>"), "{out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
