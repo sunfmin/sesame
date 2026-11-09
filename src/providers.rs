@@ -33,18 +33,25 @@ pub struct Provider {
     pub pkce: bool,
     #[serde(default)]
     pub token_body: TokenBody,
+    /// How the client authenticates to the token endpoint.
+    #[serde(default)]
+    pub client_auth: ClientAuth,
+    /// Headers every `sesame api` request carries (Notion: `Notion-Version`);
+    /// a `-H` of the same name replaces one.
+    #[serde(default)]
+    pub api_headers: BTreeMap<String, String>,
     /// JSON pointer to the object in the token response that holds
     /// `access_token` (Slack: `/authed_user`); empty for the top level. A
     /// response without `access_token` there (a refresh) is read at the top level.
     #[serde(default)]
     pub token_path: String,
-    /// JSON pointer to a name in the token response that `sesame providers`
-    /// shows after login (Slack: `/team/name`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account_path: Option<String>,
     /// Lists the sites a token can reach (Atlassian); the first, or `--site`, is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources_url: Option<String>,
+    /// The token response's field naming the site the login reached (Notion:
+    /// `workspace_name`); a JSON pointer when it starts with `/` (Slack: `/team/name`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_name_field: Option<String>,
     /// How the authorization code comes back to sesame.
     #[serde(default)]
     pub redirect: Redirect,
@@ -102,6 +109,16 @@ fn yes() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientAuth {
+    /// `client_id` and `client_secret` in the body.
+    #[default]
+    Body,
+    /// HTTP Basic `client_id:client_secret`, nothing in the body.
+    Basic,
+}
+
 /// Fields of a provider definition, by name, as `sesame.db` stores them.
 pub type Fields = Map<String, Value>;
 
@@ -123,7 +140,7 @@ pub struct FieldFlags {
     /// A host the token may be sent to (`*.example.com` matches subdomains); repeatable.
     #[arg(long = "host")]
     hosts: Vec<String>,
-    /// A scope login asks for; repeatable.
+    /// A scope login asks for; repeatable. With none, the authorization URL has no `scope`.
     #[arg(long = "scope")]
     scopes: Vec<String>,
     /// The authorization URL's parameter for the scopes (default `scope`; Slack `user_scope`).
@@ -142,9 +159,6 @@ pub struct FieldFlags {
     /// (Slack `/authed_user`); empty for the top level.
     #[arg(long)]
     token_path: Option<String>,
-    /// JSON pointer to a name in the token response shown by `sesame providers` (Slack `/team/name`).
-    #[arg(long)]
-    account_path: Option<String>,
     /// How the code comes back: `loopback` (default, sesame listens on
     /// http://localhost) or `https-paste` (https://localhost:<redirect-port>, pasted back).
     #[arg(long)]
@@ -152,9 +166,20 @@ pub struct FieldFlags {
     /// A top-level JSON response field that is `false` on failure even with HTTP 200 (Slack `ok`).
     #[arg(long)]
     ok_field: Option<String>,
+    /// How the client authenticates to the token endpoint: `body` or `basic` (HTTP Basic).
+    #[arg(long)]
+    client_auth: Option<String>,
+    /// Header `Name: value` every `sesame api` request carries; repeatable.
+    /// A `-H` of the same name replaces it.
+    #[arg(long = "api-header")]
+    api_headers: Vec<String>,
     /// URL listing the sites a token reaches (Atlassian).
     #[arg(long)]
     resources_url: Option<String>,
+    /// The token response's field naming the site the login reached (Notion: `workspace_name`);
+    /// a JSON pointer when it starts with `/` (Slack: `/team/name`).
+    #[arg(long)]
+    site_name_field: Option<String>,
     /// Fixed loopback port for the callback, for providers that match it exactly.
     #[arg(long)]
     redirect_port: Option<u16>,
@@ -185,8 +210,9 @@ impl FieldFlags {
             ("pkce", self.pkce.map(Value::from)),
             ("token_body", opt(self.token_body)),
             ("token_path", opt(self.token_path)),
-            ("account_path", opt(self.account_path)),
+            ("client_auth", opt(self.client_auth)),
             ("resources_url", opt(self.resources_url)),
+            ("site_name_field", opt(self.site_name_field)),
             ("redirect", opt(self.redirect)),
             ("redirect_port", self.redirect_port.map(Value::from)),
             ("ok_field", opt(self.ok_field)),
@@ -204,6 +230,16 @@ impl FieldFlags {
                 m.insert(k.into(), v.into());
             }
             put("auth_params", Value::Object(m));
+        }
+        if !self.api_headers.is_empty() {
+            let mut m = Map::new();
+            for h in self.api_headers {
+                let (k, v) = h
+                    .split_once(':')
+                    .ok_or_else(|| format!("--api-header `{h}` is not `Name: value`"))?;
+                m.insert(k.trim().into(), v.trim().into());
+            }
+            put("api_headers", Value::Object(m));
         }
         if !self.setup.is_empty() {
             let steps = self
@@ -406,6 +442,22 @@ impl Provider {
         }) {
             return Err(format!("host `{h}`: a host name, or `*.` and a domain"));
         }
+        for (k, v) in &self.api_headers {
+            reqwest::header::HeaderName::from_bytes(k.as_bytes())
+                .map_err(|_| format!("api header `{k}`: not a header name"))?;
+            reqwest::header::HeaderValue::from_str(v)
+                .map_err(|_| format!("api header `{k}`: value `{v}` is not a header value"))?;
+            if k.eq_ignore_ascii_case("authorization") {
+                return Err("api header `Authorization`: sesame sets it from the token".into());
+            }
+        }
+        if self
+            .site_name_field
+            .as_deref()
+            .is_some_and(|f| f.trim().is_empty())
+        {
+            return Err("site_name_field is empty: leave it out, or name a field".into());
+        }
         if self.redirect_port == Some(0) {
             return Err("redirect_port 0: leave it out for any free port".into());
         }
@@ -421,18 +473,11 @@ impl Provider {
                 self.scope_param
             ));
         }
-        for (field, ptr) in [
-            ("token_path", Some(&self.token_path)),
-            ("account_path", self.account_path.as_ref()),
-        ] {
-            if let Some(ptr) = ptr
-                && !ptr.is_empty()
-                && !ptr.starts_with('/')
-            {
-                return Err(format!(
-                    "{field} `{ptr}`: a JSON pointer, e.g. `/authed_user`; empty for the top level"
-                ));
-            }
+        if !self.token_path.is_empty() && !self.token_path.starts_with('/') {
+            return Err(format!(
+                "token_path `{}`: a JSON pointer, e.g. `/authed_user`; empty for the top level",
+                self.token_path
+            ));
         }
         if self.ok_field.as_deref() == Some("") {
             return Err("ok_field is empty: leave it out, or name a field".into());
@@ -490,11 +535,9 @@ mod tests {
     #[test]
     fn built_ins_are_valid() {
         let all = built_in::all();
-        assert!(
-            ["google", "jira", "slack"]
-                .iter()
-                .all(|n| all.contains_key(*n))
-        );
+        for name in ["google", "jira", "notion", "slack"] {
+            assert!(all.contains_key(name), "{name}");
+        }
         for (name, p) in &all {
             effective(name, Some(p), &Fields::new()).unwrap();
         }
@@ -532,12 +575,20 @@ mod tests {
             ("hosts", json!([]), "hosts is empty"),
             ("hosts", json!(["https://x"]), "host `https://x`"),
             ("token_body", json!("xml"), "unknown variant `xml`"),
+            ("client_auth", json!("digest"), "unknown variant `digest`"),
+            ("api_headers", json!({"bad name": "x"}), "not a header name"),
+            ("api_headers", json!({"X-A": "a\nb"}), "not a header value"),
+            (
+                "api_headers",
+                json!({"authorization": "x"}),
+                "sets it from the token",
+            ),
+            ("site_name_field", json!(""), "site_name_field is empty"),
             ("redirect_port", json!(0), "redirect_port 0"),
             ("redirect", json!("https-paste"), "needs a redirect_port"),
             ("redirect", json!("carrier-pigeon"), "unknown variant"),
             ("scope_param", json!(""), "scope_param"),
             ("token_path", json!("authed_user"), "JSON pointer"),
-            ("account_path", json!("team.name"), "JSON pointer"),
             ("ok_field", json!(""), "ok_field is empty"),
             ("pkce", json!("maybe"), "expected a boolean"),
             ("setup", json!([{"title": ""}]), "no title"),
@@ -559,6 +610,8 @@ mod tests {
         let flags = FieldFlags {
             scopes: vec!["a".into(), "b".into()],
             auth_params: vec!["prompt=consent".into()],
+            api_headers: vec!["Notion-Version: 2026-03-11".into()],
+            client_auth: Some("basic".into()),
             redirect_port: Some(9000),
             redirect: Some("https-paste".into()),
             pkce: Some(false),
@@ -571,6 +624,8 @@ mod tests {
             json!({
                 "scopes": ["a", "b"],
                 "auth_params": {"prompt": "consent"},
+                "api_headers": {"Notion-Version": "2026-03-11"},
+                "client_auth": "basic",
                 "redirect_port": 9000,
                 "redirect": "https-paste",
                 "pkce": false,
@@ -583,5 +638,10 @@ mod tests {
             ..Default::default()
         };
         assert!(bad.fields().unwrap_err().contains("key=value"));
+        let bad = FieldFlags {
+            api_headers: vec!["novalue".into()],
+            ..Default::default()
+        };
+        assert!(bad.fields().unwrap_err().contains("Name: value"));
     }
 }

@@ -169,6 +169,22 @@ mod tests {
     }
 
     #[test]
+    fn notion() {
+        let out = render("notion", &built_in("notion"));
+        for want in [
+            "https://app.notion.com/developers/connections",
+            "OAuth integration",
+            "Redirect URI: http://localhost:8750/callback",
+            "not 127.0.0.1",
+            "Configuration tab",
+            "sesame client notion --client-id <client id>",
+            "sesame login notion",
+        ] {
+            assert!(out.contains(want), "missing {want:?} in:\n{out}");
+        }
+    }
+
+    #[test]
     fn steps_are_numbered_in_order() {
         let out = render("jira", &built_in("jira"));
         let firsts: Vec<&str> = out

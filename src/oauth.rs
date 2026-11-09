@@ -1,7 +1,7 @@
 //! Authorization-code flow (with PKCE unless the provider turns it off), the
 //! code coming back on a loopback redirect or pasted from an https one; refresh;
 //! and storing a token the person pasted.
-use crate::providers::{Provider, Redirect, TokenBody};
+use crate::providers::{ClientAuth, Provider, Redirect, TokenBody};
 use crate::store::{Client, Store, Token};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -58,9 +58,11 @@ pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, Str
         let mut q = url.query_pairs_mut();
         q.append_pair("response_type", "code")
             .append_pair("client_id", &client.client_id)
-            .append_pair("redirect_uri", &redirect_uri)
-            .append_pair(&p.scope_param, &scopes.join(" "))
-            .append_pair("state", &state);
+            .append_pair("redirect_uri", &redirect_uri);
+        if !scopes.is_empty() {
+            q.append_pair(&p.scope_param, &scopes.join(" "));
+        }
+        q.append_pair("state", &state);
         if p.pkce {
             let challenge = B64.encode(Sha256::digest(verifier.as_bytes()));
             q.append_pair("code_challenge", &challenge)
@@ -204,12 +206,19 @@ fn request_token(
     form: &mut Vec<(&str, String)>,
     previous: Option<&Token>,
 ) -> Result<Token, String> {
-    form.push(("client_id", client.client_id.clone()));
-    if let Some(s) = &client.client_secret {
-        form.push(("client_secret", s.clone()));
-    }
     let http = reqwest::blocking::Client::new();
-    let req = http.post(&p.token_url).header("Accept", "application/json");
+    let mut req = http.post(&p.token_url).header("Accept", "application/json");
+    match p.client_auth {
+        ClientAuth::Body => {
+            form.push(("client_id", client.client_id.clone()));
+            if let Some(s) = &client.client_secret {
+                form.push(("client_secret", s.clone()));
+            }
+        }
+        ClientAuth::Basic => {
+            req = req.basic_auth(&client.client_id, client.client_secret.as_ref());
+        }
+    }
     let req = match p.token_body {
         TokenBody::Form => req.form(form),
         TokenBody::Json => req.json(
@@ -232,11 +241,14 @@ fn request_token(
         .filter(|v| v.get("access_token").is_some())
         .unwrap_or(&body);
     let t = TokenResponse::deserialize(at).map_err(|e| format!("token response: {e}: {text}"))?;
-    let account = p
-        .account_path
+    let site_name = p
+        .site_name_field
         .as_deref()
-        .and_then(|ptr| body.pointer(ptr))
-        .and_then(|v| v.as_str())
+        .and_then(|f| match f.starts_with('/') {
+            true => body.pointer(f),
+            false => body.get(f),
+        })
+        .and_then(|n| n.as_str())
         .map(String::from);
     Ok(Token {
         access_token: t.access_token,
@@ -247,7 +259,7 @@ fn request_token(
         expires_at: t.expires_in.map(|s| now() + s),
         scope: t.scope.or_else(|| previous.and_then(|p| p.scope.clone())),
         resource_id: previous.and_then(|p| p.resource_id.clone()),
-        resource_name: account.or_else(|| previous.and_then(|p| p.resource_name.clone())),
+        resource_name: site_name.or_else(|| previous.and_then(|p| p.resource_name.clone())),
         pasted: false,
     })
 }
