@@ -337,10 +337,16 @@ pub fn show(name: &str) -> Result<Value, String> {
 /// this definition again in another `sesame.db`: every field of the table
 /// that is not its default, and every field the person gave.
 pub fn export(name: &str) -> Result<String, String> {
-    let (_, user, p) = layers(name)?;
+    let (built_in, user, p) = layers(name)?;
     let values = as_fields(&p);
     let defaults = defaults();
-    let mut out = format!("sesame provider add {}", fields::quote(name));
+    let mut out = String::new();
+    if built_in.is_some() {
+        out.push_str(&format!(
+            "# `{name}` is built in, so `add` takes it only under another name.\n"
+        ));
+    }
+    out.push_str(&format!("sesame provider add {}", fields::quote(name)));
     for f in FIELDS {
         let Some(v) = values.get(f.name) else {
             continue;
@@ -454,6 +460,99 @@ mod tests {
 
     fn fields(v: Value) -> Fields {
         v.as_object().unwrap().clone()
+    }
+
+    /// Every field of `Provider` has a row in the field table, and every row
+    /// is a field: the struct literal stops compiling when a field is added,
+    /// and this test then fails until the table has its row, question included.
+    #[test]
+    fn the_table_is_every_field() {
+        let every = Provider {
+            about: "a".into(),
+            auth_url: "https://a.example/auth".into(),
+            token_url: "https://a.example/token".into(),
+            api_base: "https://a.example".into(),
+            hosts: vec!["a.example".into()],
+            scopes: vec!["s".into()],
+            scope_separator: ",".into(),
+            auth_params: BTreeMap::from([("k".into(), "v".into())]),
+            token_body: TokenBody::Json,
+            client_auth: ClientAuth::Basic,
+            api_headers: BTreeMap::from([("X-A".into(), "1".into())]),
+            resources_url: Some("https://a.example/sites".into()),
+            site_name_field: Some("site".into()),
+            redirect_port: Some(9),
+            redirect_host: RedirectHost::Loopback,
+            device_url: Some("https://a.example/device".into()),
+            identity_url: Some("https://a.example/me".into()),
+            identity_field: Some("login".into()),
+            identity_body: Some(json!({"query": "q"})),
+            error_fields: vec!["errors".into()],
+            setup: vec![SetupStep {
+                title: "T".into(),
+                page: None,
+                details: String::new(),
+            }],
+            sources: vec!["https://a.example/docs".into()],
+        };
+        let mut have: Vec<String> = as_fields(&every).keys().cloned().collect();
+        let mut table: Vec<String> = FIELDS.iter().map(|f| f.name.to_string()).collect();
+        have.sort();
+        table.sort();
+        assert_eq!(have, table);
+        effective("a", None, &as_fields(&every)).unwrap();
+    }
+
+    #[test]
+    fn required_is_what_serde_requires() {
+        let d = defaults();
+        for f in FIELDS.iter().filter(|f| f.required) {
+            assert!(!d.contains_key(f.name), "{}", f.name);
+        }
+        let mut required = Fields::new();
+        for f in FIELDS.iter().filter(|f| f.required) {
+            let v = match f.kind {
+                fields::Kind::Hosts => json!(["a.example"]),
+                _ => json!("https://a.example"),
+            };
+            required.insert(f.name.into(), v);
+        }
+        effective("a", None, &required).unwrap();
+        for f in FIELDS.iter().filter(|f| f.required) {
+            let mut missing = required.clone();
+            missing.remove(f.name);
+            let e = effective("a", None, &missing).unwrap_err();
+            assert!(e.contains(&format!("missing field `{}`", f.name)), "{e}");
+        }
+    }
+
+    #[test]
+    fn choices_are_the_enum_variants() {
+        for f in FIELDS {
+            if let fields::Kind::Choice(words) = f.kind {
+                for w in words {
+                    let mut ok = fields(json!({
+                        "auth_url": "https://a.example", "token_url": "https://a.example",
+                        "api_base": "https://a.example", "hosts": ["a.example"],
+                    }));
+                    ok.insert(f.name.into(), json!(w));
+                    let p = effective("a", None, &ok).unwrap();
+                    assert_eq!(as_fields(&p)[f.name], json!(w), "{}", f.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn built_in_ports_are_distinct() {
+        let mut ports: Vec<u16> = built_in::all()
+            .values()
+            .filter_map(|p| p.redirect_port)
+            .collect();
+        let n = ports.len();
+        ports.sort();
+        ports.dedup();
+        assert_eq!(ports.len(), n);
     }
 
     #[test]

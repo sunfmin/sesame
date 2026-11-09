@@ -98,7 +98,7 @@ pub const FIELDS: &[Field] = &[
         flag: "host",
         kind: Kind::Hosts,
         required: true,
-        help: "A host the token may be sent to (`*.example.com` matches subdomains); repeatable.",
+        help: "A host the token may be sent to (`*.example.com` matches subdomains).",
         question: "Which hosts serve the API, so the token may be sent to them and to no other?",
         look: "the API reference's endpoint URLs (uploads and GraphQL can be on other hosts)",
     },
@@ -107,7 +107,7 @@ pub const FIELDS: &[Field] = &[
         flag: "scope",
         kind: Kind::Names,
         required: false,
-        help: "A scope login asks for; repeatable. With none, the authorization URL has no `scope`.",
+        help: "A scope login asks for. With none, the authorization URL has no `scope`.",
         question: "Which scopes exist, and which does the person's use of the API need? Is a scope \
                    needed to get a refresh token (e.g. `offline_access`)? No scopes at all?",
         look: "the OAuth guide's scopes table, or the metadata's scopes_supported",
@@ -126,7 +126,7 @@ pub const FIELDS: &[Field] = &[
         flag: "auth-param",
         kind: Kind::Params,
         required: false,
-        help: "`key=value` added to the authorization URL; repeatable.",
+        help: "`key=value` added to the authorization URL.",
         question: "Does the authorization URL need parameters beyond the standard ones \
                    (e.g. `access_type=offline`, `prompt=consent`, `audience=…`, `owner=user`)?",
         look: "the authorize step's parameter table",
@@ -155,7 +155,7 @@ pub const FIELDS: &[Field] = &[
         flag: "api-header",
         kind: Kind::Headers,
         required: false,
-        help: "Header `Name: value` every `sesame api` request carries; repeatable. \
+        help: "Header `Name: value` every `sesame api` request carries. \
                A `-H` of the same name replaces it.",
         question: "Must every API request carry a header, e.g. a version (`Notion-Version`) or an Accept type?",
         look: "the API reference's introduction, versioning or \"making requests\" page",
@@ -243,9 +243,10 @@ pub const FIELDS: &[Field] = &[
         kind: Kind::Names,
         required: false,
         help: "A top-level field of the API's JSON answer that, not empty, fails the \
-               call despite a 2xx status (GraphQL: `errors`); repeatable.",
-        question: "Can an API answer be HTTP 200 and still a failure (GraphQL `errors`, Slack `\"ok\": false`)? \
-                   Which top-level field says so?",
+               call despite a 2xx status (GraphQL: `errors`).",
+        question: "Can an API answer be HTTP 200 and still a failure (GraphQL `errors`)? \
+                   Which top-level field, present and not empty, says so? (A flag that says \
+                   success, like Slack's `\"ok\": false`, cannot be expressed yet.)",
         look: "the API reference's errors page",
     },
     Field {
@@ -254,7 +255,7 @@ pub const FIELDS: &[Field] = &[
         kind: Kind::Steps,
         required: false,
         help: "A step for `sesame setup`, as JSON: `{\"title\": …, \"page\": …, \"details\": …}`; \
-               repeatable, in order. `{callback}` and `{scopes}` in details are filled in.",
+               in order. `{callback}` and `{scopes}` in details are filled in.",
         question: "How does the person register an OAuth app: which page, what to click and fill in, \
                    which app type, where to enter the callback, where the client id and secret show? \
                    Anything that expires they must know about (a refresh token that dies after 7 days)?",
@@ -265,7 +266,7 @@ pub const FIELDS: &[Field] = &[
         flag: "source",
         kind: Kind::Urls,
         required: false,
-        help: "A documentation page this definition was read from; repeatable. \
+        help: "A documentation page this definition was read from. \
                `provider show` and `export` keep them.",
         question: "Which official pages did each answer above come from?",
         look: "the links you followed for the other fields",
