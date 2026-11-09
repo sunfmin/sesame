@@ -6,10 +6,15 @@ their REST APIs with the stored token.
 ```sh
 sesame setup google                          # first time: how to register the OAuth app
 sesame client google --client-id <id>        # once: the OAuth app to sign in with (secret is prompted)
-sesame login google                          # opens the provider's OAuth page; token goes to ~/.config/sesame/sesame.db
-sesame api google /drive/v3/files            # GET, token attached, refreshed when it expires
-sesame api google https://docs.googleapis.com/v1/documents/<id>
-sesame api google '/youtube/v3/channels?part=snippet&mine=true'
+sesame login drive                           # opens Google's OAuth page; token goes to ~/.config/sesame/sesame.db
+sesame api drive /files                      # GET https://www.googleapis.com/drive/v3/files, refreshed when it expires
+sesame login gmail                           # adds Gmail's scopes to the same Google token
+sesame api gmail /users/me/messages          # https://gmail.googleapis.com/gmail/v1/users/me/messages
+sesame login calendar
+sesame api calendar /calendars/primary/events
+sesame api docs /documents/<id>
+sesame api youtube '/channels?part=snippet&mine=true'
+sesame api google https://www.googleapis.com/drive/v3/about?fields=user   # a full URL on the provider's hosts
 sesame api jira /rest/api/3/myself
 sesame login github                          # device flow: prints a code to enter on github.com/login/device
 sesame api github /user
@@ -23,7 +28,7 @@ sesame api figma /me
 sesame api figma /files/<key>
 sesame api linear /graphql -d '{"query":"{ viewer { id name } }"}'   # GraphQL `errors` exit non-zero
 curl -H "Authorization: Bearer $(sesame token jira)" ...
-sesame providers                              # who you are signed in to
+sesame providers                              # who you are signed in to, and each service's access
 sesame logout jira                            # forgets the local token only
 ```
 
@@ -61,6 +66,24 @@ sesame logout jira                            # forgets the local token only
   still mean failure (`--error-field errors` for GraphQL).
   `sesame provider add --help` lists every field; `add` and `set`
   refuse an invalid value before writing anything.
+- **Service** = one API of a provider, reached with the provider's client and
+  token: Google's are `drive`, `docs`, `youtube`, `calendar` and `gmail`. A
+  service has its own `api_base` and scopes, and its name is used like a
+  provider's (the two share one namespace). `sesame login <service>` signs in
+  to the provider asking for the scopes already granted plus the service's
+  (Google adds `include_granted_scopes=true`), and the new token replaces the
+  old one; `sesame login google` alone asks only for `openid email`. A call
+  refused with a 403 for a missing scope says which `sesame login <service>`
+  adds it. Add or change one with `--service`:
+
+  ```sh
+  sesame provider set acme --service 'name=billing,api-base=https://api.acme.example/billing,scope=billing.read'
+  sesame provider set google --service 'name=gmail,scope=https://www.googleapis.com/auth/gmail.readonly'  # only the keys given change
+  sesame provider set acme --drop-service billing
+  ```
+
+  `sesame provider show` lists each as `services.<name>`. A service with steps
+  of its own (enabling its API in Google Cloud) adds them to `sesame setup`.
 - **Login** is the authorization-code flow with PKCE and a loopback redirect
   (`http://localhost:<port>/callback`, or `127.0.0.1` for a provider whose
   `redirect_host` says so). On a remote machine (SSH), open the printed URL

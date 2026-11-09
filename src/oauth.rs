@@ -2,7 +2,7 @@
 //! off), the code coming back on a loopback redirect or pasted from an https
 //! one; or the device flow (RFC 8628). Plus refresh, and storing a token the
 //! person pasted.
-use crate::providers::{ClientAuth, Provider, Redirect, TokenBody};
+use crate::providers::{ClientAuth, Provider, Redirect, Target, TokenBody};
 use crate::store::{Client, Store, Token};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -48,19 +48,52 @@ pub fn http() -> reqwest::blocking::Client {
         .unwrap_or_default()
 }
 
-/// Signs in: the device flow when the provider has a `device_url` (unless
-/// `opts.loopback`), otherwise the authorization-code flow with a loopback
-/// redirect. Then picks the site and reads who signed in, and stores the token.
-pub fn login(name: &str, p: &Provider, opts: &LoginOptions) -> Result<Token, String> {
+/// The scopes a token was granted: its response's `scope`, or, where the
+/// provider left that out, the scopes login asked for (RFC 6749 §5.1).
+/// Split on spaces or commas: providers join them either way (`scope_separator`).
+pub fn granted(t: &Token) -> Vec<String> {
+    t.scope
+        .as_deref()
+        .unwrap_or_default()
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// What login asks for by default: the provider's scopes, those the stored
+/// token already has, and the service's, each once. Asking again for what was
+/// granted keeps it in the new token, which replaces the old one.
+fn wanted(t: &Target, granted: &[String]) -> Vec<String> {
+    let service = t.service().map(|s| s.scopes.as_slice()).unwrap_or_default();
+    let mut all: Vec<String> = Vec::new();
+    for s in t.p.scopes.iter().chain(granted).chain(service) {
+        if !all.contains(s) {
+            all.push(s.clone());
+        }
+    }
+    all
+}
+
+/// Signs in to the target's provider: the device flow when the provider has a
+/// `device_url` (unless `opts.loopback`), otherwise the authorization-code flow
+/// with a loopback redirect. Then picks the site and reads who signed in, and
+/// stores the token, the provider's one, in place of the one before.
+pub fn login(t: &Target, opts: &LoginOptions) -> Result<Token, String> {
+    let (name, p) = (t.provider.as_str(), &t.p);
     let store = Store::open()?;
     let client = store.client(name)?.ok_or_else(|| no_client(name))?;
-    let scopes = opts.scopes.clone().unwrap_or_else(|| p.scopes.clone());
+    let before = store.token(name)?.map(|t| granted(&t)).unwrap_or_default();
+    let scopes = opts.scopes.clone().unwrap_or_else(|| wanted(t, &before));
     let mut token = match &p.device_url {
         Some(device_url) if !opts.loopback => {
             device_flow(p, &client, device_url, &scopes, opts.open_browser)?
         }
         _ => loopback_flow(name, p, &client, &scopes, opts.open_browser)?,
     };
+    if token.scope.is_none() && !scopes.is_empty() {
+        token.scope = Some(scopes.join(" "));
+    }
     if let Some(resources_url) = &p.resources_url {
         pick_resource(&mut token, resources_url, opts.site.as_deref())?;
     }

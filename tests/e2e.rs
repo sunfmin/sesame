@@ -368,7 +368,7 @@ fn provider_set_show_rm() {
     assert_eq!(field_db_rows(), 1);
     let (_, out, _) = sesame(&["setup", "google"]);
     assert!(
-        out.contains("The scopes sesame asks for at login: email, openid"),
+        out.contains("`sesame login google` asks only for: email, openid"),
         "{out}"
     );
 
@@ -1504,5 +1504,251 @@ fn https_paste_user_token_error_field_pasted_token() {
     assert!(ok_ && out.contains("felix"), "{out}{err}");
     let (_, out, _) = run(&["providers"]);
     assert!(out.contains("logged in (pasted token)"), "{out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Signs in with `args` while playing the browser; returns the authorization URL.
+fn browser_login(sesame: &dyn Fn(&[&str]) -> Command, args: &[&str]) -> (url::Url, String) {
+    let mut login = sesame(args)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(login.stderr.take().unwrap());
+    let auth_url = loop {
+        let mut l = String::new();
+        assert!(
+            err.read_line(&mut l).unwrap() > 0,
+            "login ended before printing a URL"
+        );
+        if let Some(u) = l.trim().strip_prefix("http") {
+            break format!("http{u}");
+        }
+    };
+    let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
+    assert!(page.contains("Signed in"));
+    let status = login.wait().unwrap();
+    let mut rest = String::new();
+    err.read_to_string(&mut rest).unwrap();
+    assert!(status.success(), "login failed: {rest}");
+    (url::Url::parse(&auth_url).unwrap(), rest)
+}
+
+/// Two services of one provider: each login adds the service's scopes to those
+/// granted, on one shared token; `api <service>` uses the service's base; a 403
+/// for a missing scope names the login that adds it; names are one namespace.
+#[test]
+fn services_share_one_token() {
+    let mut logins = 0;
+    let (port, log) = serve(move |target, body| {
+        match target {
+        "/token" if body.contains("grant_type=authorization_code") => {
+            logins += 1;
+            let b = format!(r#"{{"access_token":"tok-{logins}","expires_in":3600}}"#);
+            ("200 OK", b)
+        }
+        "/alpha/v1/things" => ("200 OK", r#"{"alpha":true}"#.into()),
+        "/beta/v2/mail" => (
+            "403 Forbidden",
+            r#"{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}"#.into(),
+        ),
+        "/beta/v2/ok" => ("200 OK", r#"{"beta":true}"#.into()),
+        _ => ("404 Not Found", "{}".into()),
+    }
+    });
+    let tmp = std::env::temp_dir().join(format!("sesame-services-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let sesame = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        c.args(args).env("SESAME_CONFIG_DIR", &config);
+        c
+    };
+    let run = |args: &[&str]| {
+        let out = sesame(args).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok, out) = run(&[
+        "provider",
+        "add",
+        "fake",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/token"),
+        "--api-base",
+        &base,
+        "--host",
+        "127.0.0.1",
+        "--scope",
+        "openid",
+        "--auth-param",
+        "include_granted_scopes=true",
+        "--service",
+        &format!("name=alpha,api-base={base}/alpha/v1,scope=a.read,about=Alpha"),
+        "--service",
+        &format!(r#"{{"name": "beta", "api_base": "{base}/beta/v2", "scopes": ["b.read"]}}"#),
+    ]);
+    assert!(ok, "{out}");
+    // `set` changes only the keys given of a service.
+    let (ok, out) = run(&[
+        "provider",
+        "set",
+        "fake",
+        "--service",
+        "name=beta,scope=b.read,scope=b.send",
+    ]);
+    assert!(ok, "{out}");
+    let (ok, out) = run(&["provider", "show", "fake"]);
+    assert!(ok, "{out}");
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        shown["services.beta"]["value"]["api_base"],
+        format!("{base}/beta/v2")
+    );
+    assert_eq!(
+        shown["services.beta"]["value"]["scopes"],
+        serde_json::json!(["b.read", "b.send"])
+    );
+    assert_eq!(shown["services.alpha"]["from"], "user");
+
+    // A service's name is used like a provider's: no two may share one.
+    for (args, want) in [
+        (
+            vec![
+                "provider",
+                "set",
+                "fake",
+                "--service",
+                "name=github,api-base=http://127.0.0.1/x",
+            ],
+            "`github` is already a provider",
+        ),
+        (
+            vec![
+                "provider",
+                "set",
+                "fake",
+                "--service",
+                "name=gmail,api-base=http://127.0.0.1/x",
+            ],
+            "both `fake` and `google`",
+        ),
+        (
+            vec![
+                "provider",
+                "add",
+                "alpha",
+                "--auth-url",
+                "https://x.example/a",
+                "--token-url",
+                "https://x.example/t",
+                "--api-base",
+                "https://x.example",
+                "--host",
+                "x.example",
+            ],
+            "`alpha` is already a provider",
+        ),
+        (
+            vec![
+                "provider",
+                "set",
+                "fake",
+                "--service",
+                "name=fake,api-base=http://127.0.0.1/x",
+            ],
+            "`fake` is already a provider",
+        ),
+        (
+            vec![
+                "provider",
+                "set",
+                "fake",
+                "--service",
+                "name=evil,api-base=https://evil.example",
+            ],
+            "evil.example is not one",
+        ),
+    ] {
+        let (ok, out) = run(&args);
+        assert!(!ok && out.contains(want), "{args:?}: {out}");
+    }
+
+    let (ok, out) = run(&["client", "alpha", "--client-id", "cid", "--no-secret"]);
+    assert!(ok, "{out}");
+    let (_, out) = run(&["providers"]);
+    assert!(out.contains("next: sesame login alpha"), "{out}");
+
+    let scope_of = |u: &url::Url| {
+        let q = |k: &str| {
+            u.query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.into_owned())
+        };
+        assert_eq!(q("include_granted_scopes").as_deref(), Some("true"), "{u}");
+        q("scope").unwrap()
+    };
+    let (u, rest) = browser_login(&sesame, &["login", "alpha", "--no-browser"]);
+    assert_eq!(scope_of(&u), "openid a.read");
+    assert!(rest.contains("Logged in to `fake` for `alpha`"), "{rest}");
+    let (_, out) = run(&["providers"]);
+    let line = |name: &str| {
+        out.lines()
+            .find(|l| l.trim_start().starts_with(&format!("{name} ")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(line("alpha").contains(" authorized"), "{out}");
+    assert!(line("beta").contains("not authorized"), "{out}");
+    assert!(line("beta").contains("next: sesame login beta"), "{out}");
+
+    // `api <service>` uses the service's base; beta's scope is not granted yet.
+    let (ok, out) = run(&["api", "alpha", "/things"]);
+    assert!(ok && out.contains(r#"{"alpha":true}"#), "{out}");
+    let (ok, out) = run(&["api", "beta", "/mail"]);
+    assert!(!ok && out.contains("run `sesame login beta`"), "{out}");
+    // Through the provider with a full URL, the hint finds the service by its base.
+    let (ok, out) = run(&["api", "fake", &format!("{base}/beta/v2/mail")]);
+    assert!(!ok && out.contains("run `sesame login beta`"), "{out}");
+
+    let (u, _) = browser_login(&sesame, &["login", "beta", "--no-browser"]);
+    assert_eq!(scope_of(&u), "openid a.read b.read b.send");
+    let (_, out) = run(&["providers"]);
+    assert!(
+        out.lines()
+            .filter(|l| l.contains(" authorized") && !l.contains("not authorized"))
+            .count()
+            == 2,
+        "{out}"
+    );
+    // One token, the newest, for the provider and both its services.
+    for name in ["fake", "alpha", "beta"] {
+        let (ok, out) = run(&["token", name]);
+        assert!(ok && out.trim() == "tok-2", "{name}: {out}");
+    }
+    let (ok, out) = run(&["api", "beta", "ok"]);
+    assert!(ok && out.contains(r#"{"beta":true}"#), "{out}");
+    let db = rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+    let rows: i64 = db
+        .query_row("SELECT count(*) FROM tokens", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    let (ok, out) = run(&["provider", "set", "fake", "--drop-service", "beta"]);
+    assert!(ok, "{out}");
+    let (ok, out) = run(&["api", "beta", "ok"]);
+    assert!(!ok && out.contains("unknown provider `beta`"), "{out}");
+    assert!(out.contains("or a service: alpha, calendar"), "{out}");
+
+    let log = log.lock().unwrap();
+    assert!(
+        log.iter().any(|l| l.starts_with("/beta/v2/mail ")),
+        "{log:?}"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
