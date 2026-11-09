@@ -17,14 +17,26 @@ pub struct Provider {
     pub about: String,
     pub auth_url: String,
     pub token_url: String,
+    /// The endpoint a refresh goes to, when not `token_url` (Figma: `/v1/oauth/refresh`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_url: Option<String>,
     /// Base for relative API paths; `{resource_id}` is the site picked at login.
     pub api_base: String,
     /// Hosts the token may be sent to; `*.example.com` matches subdomains.
     pub hosts: Vec<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// The authorization URL's parameter that carries the scopes (Slack: `user_scope`).
+    #[serde(default = "default_scope_param")]
+    pub scope_param: String,
+    /// What joins the scopes in the authorization URL: a space (OAuth's own), `,` for some.
+    #[serde(default = "space")]
+    pub scope_separator: String,
     #[serde(default)]
     pub auth_params: BTreeMap<String, String>,
+    /// Send PKCE (`code_challenge`, `code_verifier`) with the authorization code.
+    #[serde(default = "yes")]
+    pub pkce: bool,
     #[serde(default)]
     pub token_body: TokenBody,
     /// How the client authenticates to the token endpoint.
@@ -34,15 +46,29 @@ pub struct Provider {
     /// a `-H` of the same name replaces one.
     #[serde(default)]
     pub api_headers: BTreeMap<String, String>,
+    /// JSON pointer to the object in the token response that holds
+    /// `access_token` (Slack: `/authed_user`); empty for the top level. A
+    /// response without `access_token` there (a refresh) is read at the top level.
+    #[serde(default)]
+    pub token_path: String,
     /// Lists the sites a token can reach (Atlassian); the first, or `--site`, is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources_url: Option<String>,
-    /// The token response's field naming the site the login reached (Notion: `workspace_name`).
+    /// The token response's field naming the site the login reached (Notion:
+    /// `workspace_name`); a JSON pointer when it starts with `/` (Slack: `/team/name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site_name_field: Option<String>,
-    /// Fixed loopback port, for providers that match the callback URL exactly.
+    /// How the authorization code comes back to sesame.
+    #[serde(default)]
+    pub redirect: Redirect,
+    /// Fixed callback port, for providers that match the callback URL exactly;
+    /// required for `https-paste`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_port: Option<u16>,
+    /// How many seconds the authorization code lasts, when it is short enough
+    /// to tell the person (Figma: 30); login says so where it asks for a paste.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_seconds: Option<u64>,
     /// The loopback redirect's host: `localhost` or `127.0.0.1`.
     #[serde(default)]
     pub redirect_host: RedirectHost,
@@ -53,9 +79,17 @@ pub struct Provider {
     /// A JSON endpoint on one of `hosts` naming who signed in, read after login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_url: Option<String>,
-    /// The field of `identity_url`'s answer that names the account (e.g. `login`).
+    /// The field of `identity_url`'s answer that names the account (e.g. `login`),
+    /// or a JSON pointer into it (`/data/viewer/name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_field: Option<String>,
+    /// JSON body for `identity_url`: with one it is a POST (GraphQL), without it a GET.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_body: Option<Value>,
+    /// Top-level fields of an API's JSON answer that, present and not empty,
+    /// mean the call failed although the status is 2xx (GraphQL's `errors`).
+    #[serde(default)]
+    pub error_fields: Vec<String>,
     /// How to register this provider's OAuth app, for `sesame setup`.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
@@ -81,6 +115,10 @@ pub struct Service {
     pub setup: Vec<SetupStep>,
 }
 
+fn space() -> String {
+    " ".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SetupStep {
@@ -99,6 +137,27 @@ pub enum TokenBody {
     #[default]
     Form,
     Json,
+}
+
+/// How the authorization code gets back from the browser.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Redirect {
+    /// `http://localhost:<port>/callback`, which login listens on.
+    #[default]
+    Loopback,
+    /// `https://localhost:<redirect_port>/callback`, for providers that accept
+    /// only https callbacks: nothing listens, the browser fails to open it, and
+    /// the person pastes the address it ended on into the terminal.
+    HttpsPaste,
+}
+
+fn default_scope_param() -> String {
+    "scope".into()
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -144,6 +203,9 @@ pub struct FieldFlags {
     /// The OAuth token endpoint.
     #[arg(long)]
     token_url: Option<String>,
+    /// The endpoint a refresh goes to; without it, the token endpoint.
+    #[arg(long)]
+    refresh_url: Option<String>,
     /// Base for relative `sesame api` paths; `{resource_id}` is the site picked at login.
     #[arg(long)]
     api_base: Option<String>,
@@ -153,12 +215,29 @@ pub struct FieldFlags {
     /// A scope login asks for; repeatable. With none, the authorization URL has no `scope`.
     #[arg(long = "scope")]
     scopes: Vec<String>,
+    /// The authorization URL's parameter for the scopes (default `scope`; Slack `user_scope`).
+    #[arg(long)]
+    scope_param: Option<String>,
+    /// What joins the scopes in the authorization URL (default: a space).
+    #[arg(long)]
+    scope_separator: Option<String>,
     /// `key=value` added to the authorization URL; repeatable.
     #[arg(long = "auth-param")]
     auth_params: Vec<String>,
     /// How the token endpoint takes its body: `form` or `json`.
     #[arg(long)]
     token_body: Option<String>,
+    /// Whether login sends PKCE: `true` (default) or `false`.
+    #[arg(long)]
+    pkce: Option<bool>,
+    /// JSON pointer to the object holding `access_token` in the token response
+    /// (Slack `/authed_user`); empty for the top level.
+    #[arg(long)]
+    token_path: Option<String>,
+    /// How the code comes back: `loopback` (default, sesame listens on
+    /// http://localhost) or `https-paste` (https://localhost:<redirect-port>, pasted back).
+    #[arg(long)]
+    redirect: Option<String>,
     /// How the client authenticates to the token endpoint: `body` or `basic` (HTTP Basic).
     #[arg(long)]
     client_auth: Option<String>,
@@ -169,12 +248,17 @@ pub struct FieldFlags {
     /// URL listing the sites a token reaches (Atlassian).
     #[arg(long)]
     resources_url: Option<String>,
-    /// The token response's field naming the site the login reached (Notion: `workspace_name`).
+    /// The token response's field naming the site the login reached (Notion: `workspace_name`);
+    /// a JSON pointer when it starts with `/` (Slack: `/team/name`).
     #[arg(long)]
     site_name_field: Option<String>,
     /// Fixed loopback port for the callback, for providers that match it exactly.
     #[arg(long)]
     redirect_port: Option<u16>,
+    /// How many seconds the authorization code lasts; login tells the person
+    /// to paste the address back within them.
+    #[arg(long)]
+    code_seconds: Option<u64>,
     /// The loopback redirect's host: `localhost` (the default) or `127.0.0.1`.
     #[arg(long)]
     redirect_host: Option<String>,
@@ -185,9 +269,17 @@ pub struct FieldFlags {
     /// JSON endpoint naming who signed in, read after login (on one of the hosts).
     #[arg(long)]
     identity_url: Option<String>,
-    /// The field of the identity answer naming the account, e.g. `login`.
+    /// The field of the identity answer naming the account, e.g. `login`, or a
+    /// JSON pointer into it, e.g. `/data/viewer/name`.
     #[arg(long)]
     identity_field: Option<String>,
+    /// JSON body for the identity call, which makes it a POST (GraphQL).
+    #[arg(long)]
+    identity_body: Option<String>,
+    /// A top-level field of the API's JSON answer that, not empty, fails the
+    /// call despite a 2xx status (GraphQL: `errors`); repeatable.
+    #[arg(long = "error-field")]
+    error_fields: Vec<String>,
     /// A step for `sesame setup`, as JSON: `{"title": …, "page": …, "details": …}`;
     /// repeatable, in order. `{callback}` and `{scopes}` in details are filled in.
     #[arg(long = "setup-step")]
@@ -261,14 +353,22 @@ impl FieldFlags {
             ("about", opt(self.about)),
             ("auth_url", opt(self.auth_url)),
             ("token_url", opt(self.token_url)),
+            ("refresh_url", opt(self.refresh_url)),
             ("api_base", opt(self.api_base)),
             ("hosts", list(self.hosts)),
             ("scopes", list(self.scopes)),
+            ("scope_param", opt(self.scope_param)),
+            ("pkce", self.pkce.map(Value::from)),
+            ("scope_separator", opt(self.scope_separator)),
+            ("error_fields", list(self.error_fields)),
             ("token_body", opt(self.token_body)),
+            ("token_path", opt(self.token_path)),
             ("client_auth", opt(self.client_auth)),
             ("resources_url", opt(self.resources_url)),
             ("site_name_field", opt(self.site_name_field)),
+            ("redirect", opt(self.redirect)),
             ("redirect_port", self.redirect_port.map(Value::from)),
+            ("code_seconds", self.code_seconds.map(Value::from)),
             ("redirect_host", opt(self.redirect_host)),
             ("device_url", opt(self.device_url)),
             ("identity_url", opt(self.identity_url)),
@@ -297,6 +397,11 @@ impl FieldFlags {
                 m.insert(k.trim().into(), v.trim().into());
             }
             put("api_headers", Value::Object(m));
+        }
+        if let Some(b) = self.identity_body {
+            let v = serde_json::from_str(&b)
+                .map_err(|e| format!("--identity-body `{b}` is not JSON: {e}"))?;
+            put("identity_body", v);
         }
         if !self.setup.is_empty() {
             let steps = self
@@ -611,11 +716,6 @@ pub fn remove(name: &str) -> Result<String, String> {
     }
 }
 
-/// The loopback redirect URL login listens on, for the port it bound.
-pub fn redirect_uri(host: RedirectHost, port: u16) -> String {
-    format!("http://{}:{port}/callback", host.as_str())
-}
-
 fn check_url(field: &str, u: &str) -> Result<(), String> {
     let parsed = url::Url::parse(u).map_err(|e| format!("{field} `{u}`: {e}"))?;
     match parsed.scheme() {
@@ -641,6 +741,9 @@ impl Provider {
     fn check(&self) -> Result<(), String> {
         check_url("auth_url", &self.auth_url)?;
         check_url("token_url", &self.token_url)?;
+        if let Some(u) = &self.refresh_url {
+            check_url("refresh_url", u)?;
+        }
         check_url("api_base", &self.api_base.replace("{resource_id}", "x"))?;
         if let Some(u) = &self.resources_url {
             check_url("resources_url", u)?;
@@ -676,6 +779,15 @@ impl Provider {
             }
             _ => return Err("identity_url and identity_field go together: give both".into()),
         }
+        if self.identity_body.is_some() && self.identity_url.is_none() {
+            return Err("identity_body without identity_url: give the URL it goes to".into());
+        }
+        if self.scope_separator.is_empty() {
+            return Err("scope_separator is empty: give a space or a character such as `,`".into());
+        }
+        if self.error_fields.iter().any(|f| f.trim().is_empty()) {
+            return Err("an error_fields entry is empty".into());
+        }
         for (k, v) in &self.api_headers {
             reqwest::header::HeaderName::from_bytes(k.as_bytes())
                 .map_err(|_| format!("api header `{k}`: not a header name"))?;
@@ -694,6 +806,27 @@ impl Provider {
         }
         if self.redirect_port == Some(0) {
             return Err("redirect_port 0: leave it out for any free port".into());
+        }
+        if self.redirect == Redirect::HttpsPaste && self.redirect_port.is_none() {
+            return Err(
+                "redirect https-paste needs a redirect_port: the callback URL registered with the provider"
+                    .into(),
+            );
+        }
+        if self.scope_param.is_empty() || self.scope_param.contains([' ', '&', '=']) {
+            return Err(format!(
+                "scope_param `{}`: a URL parameter name",
+                self.scope_param
+            ));
+        }
+        if !self.token_path.is_empty() && !self.token_path.starts_with('/') {
+            return Err(format!(
+                "token_path `{}`: a JSON pointer, e.g. `/authed_user`; empty for the top level",
+                self.token_path
+            ));
+        }
+        if self.code_seconds == Some(0) {
+            return Err("code_seconds 0: leave it out when the provider does not say".into());
         }
         check_steps(&self.setup)?;
         for (n, s) in &self.services {
@@ -715,12 +848,42 @@ impl Provider {
         Ok(())
     }
 
+    /// The redirect URL login sends, for the port it uses.
+    pub fn redirect_uri(&self, port: u16) -> String {
+        let scheme = match self.redirect {
+            Redirect::Loopback => "http",
+            Redirect::HttpsPaste => "https",
+        };
+        format!("{scheme}://{}:{port}/callback", self.redirect_host.as_str())
+    }
+
     /// The redirect URL to register with the provider: fixed when `redirect_port` is.
     pub fn callback(&self) -> String {
         match self.redirect_port {
-            Some(port) => redirect_uri(self.redirect_host, port),
-            None => format!("http://{}:<any port>/callback", self.redirect_host.as_str()),
+            Some(port) => self.redirect_uri(port),
+            None => self.redirect_uri(0).replace(":0/", ":<any port>/"),
         }
+    }
+
+    /// Where a refresh goes: `refresh_url`, or else the token endpoint.
+    pub fn refresh_endpoint(&self) -> &str {
+        self.refresh_url.as_deref().unwrap_or(&self.token_url)
+    }
+
+    /// The first of `error_fields` a 2xx JSON answer carries with a value that
+    /// is not empty (`null`, `false`, `""`, `[]` and `{}` are empty).
+    pub fn error_in<'a>(&'a self, body: &[u8]) -> Option<&'a str> {
+        let v: Value = serde_json::from_slice(body).ok()?;
+        self.error_fields
+            .iter()
+            .find(|f| match v.get(f.as_str()) {
+                None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+                Some(Value::String(s)) => !s.is_empty(),
+                Some(Value::Array(a)) => !a.is_empty(),
+                Some(Value::Object(o)) => !o.is_empty(),
+                Some(_) => true,
+            })
+            .map(String::as_str)
     }
 
     pub fn allows_host(&self, host: &str) -> bool {
@@ -749,7 +912,9 @@ mod tests {
     #[test]
     fn built_ins_are_valid() {
         let all = built_in::all();
-        for name in ["github", "google", "jira", "notion"] {
+        for name in [
+            "figma", "github", "google", "jira", "linear", "notion", "slack",
+        ] {
             assert!(all.contains_key(name), "{name}");
         }
         for (name, p) in &all {
@@ -917,6 +1082,13 @@ mod tests {
             ),
             ("site_name_field", json!(""), "site_name_field is empty"),
             ("redirect_port", json!(0), "redirect_port 0"),
+            ("redirect", json!("https-paste"), "needs a redirect_port"),
+            ("redirect", json!("carrier-pigeon"), "unknown variant"),
+            ("scope_param", json!(""), "scope_param"),
+            ("token_path", json!("authed_user"), "JSON pointer"),
+            ("pkce", json!("maybe"), "expected a boolean"),
+            ("refresh_url", json!("nope"), "refresh_url"),
+            ("code_seconds", json!(0), "code_seconds 0"),
             (
                 "redirect_host",
                 json!("example.com"),
@@ -929,6 +1101,13 @@ mod tests {
                 "go together",
             ),
             ("identity_field", json!("login"), "go together"),
+            (
+                "identity_body",
+                json!({"query": "{ viewer { name } }"}),
+                "without identity_url",
+            ),
+            ("scope_separator", json!(""), "scope_separator is empty"),
+            ("error_fields", json!([""]), "error_fields entry is empty"),
             ("setup", json!([{"title": ""}]), "no title"),
             ("nope", json!(1), "unknown field `nope`"),
         ] {
@@ -949,6 +1128,25 @@ mod tests {
     }
 
     #[test]
+    fn error_fields_fail_only_when_not_empty() {
+        let p = built_in("linear");
+        assert_eq!(
+            p.error_in(br#"{"errors":[{"message":"x"}]}"#),
+            Some("errors")
+        );
+        for ok in [
+            &br#"{"data":{}}"#[..],
+            br#"{"data":{},"errors":[]}"#,
+            br#"{"errors":null}"#,
+            br#"[1]"#,
+            b"not json",
+        ] {
+            assert_eq!(p.error_in(ok), None, "{}", String::from_utf8_lossy(ok));
+        }
+        assert_eq!(built_in("google").error_in(br#"{"errors":[1]}"#), None);
+    }
+
+    #[test]
     fn flags_become_fields() {
         let flags = FieldFlags {
             scopes: vec!["a".into(), "b".into()],
@@ -956,8 +1154,16 @@ mod tests {
             api_headers: vec!["Notion-Version: 2026-03-11".into()],
             client_auth: Some("basic".into()),
             redirect_port: Some(9000),
+            redirect: Some("https-paste".into()),
+            pkce: Some(false),
+            token_path: Some("/authed_user".into()),
+            refresh_url: Some("https://x.example/refresh".into()),
+            code_seconds: Some(30),
             redirect_host: Some("127.0.0.1".into()),
             device_url: Some("https://x.example/device".into()),
+            scope_separator: Some(",".into()),
+            error_fields: vec!["errors".into()],
+            identity_body: Some(r#"{"query":"{ viewer { name } }"}"#.into()),
             setup: vec![r#"{"title":"T","page":"https://x.example"}"#.into()],
             ..Default::default()
         };
@@ -969,8 +1175,16 @@ mod tests {
                 "api_headers": {"Notion-Version": "2026-03-11"},
                 "client_auth": "basic",
                 "redirect_port": 9000,
+                "redirect": "https-paste",
+                "pkce": false,
+                "token_path": "/authed_user",
+                "refresh_url": "https://x.example/refresh",
+                "code_seconds": 30,
                 "redirect_host": "127.0.0.1",
                 "device_url": "https://x.example/device",
+                "scope_separator": ",",
+                "error_fields": ["errors"],
+                "identity_body": {"query": "{ viewer { name } }"},
                 "setup": [{"title": "T", "page": "https://x.example"}],
             })
         );

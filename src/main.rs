@@ -12,8 +12,9 @@ const FOR_AI: &str = "\
 If you are an AI using sesame for someone:
   1. Run `sesame providers` to see where each provider stands.
   2. For one showing `no client`, run `sesame setup <provider>` and walk the person
-     through its steps. Never ask for a client secret in the chat: the person runs
-     `sesame client` in their own terminal, which prompts for it.
+     through its steps. Never ask for a client secret or a token in the chat: the
+     person runs `sesame client` (or `sesame login --token`) in their own terminal,
+     which prompts for it.
   3. Have the person run `sesame login <service>` (or `<provider>`) and approve access
      in the browser themselves. A service (gmail, calendar, ...) shares its provider's
      client and token; logging in to it adds its scopes.
@@ -54,9 +55,18 @@ enum Cmd {
     /// with a device endpoint (github) prints a code to enter on its page instead.
     /// For a service (gmail), signs in to its provider asking for the scopes
     /// already granted and the service's: the one token then covers both.
+    /// `--token` stores a token you paste instead.
     Login {
         /// A provider, or a service of one.
         provider: String,
+        /// Store a token you got another way (e.g. from the provider's app page)
+        /// instead of the OAuth login; asks for it with hidden input. It has no
+        /// refresh: when it stops working, paste a new one.
+        #[arg(long, conflicts_with_all = ["scopes", "no_browser", "browser", "site"])]
+        token: bool,
+        /// Like --token, reading the token from stdin.
+        #[arg(long, conflicts_with_all = ["token", "scopes", "no_browser", "browser", "site"])]
+        token_stdin: bool,
         /// Scope to ask for instead of the defaults; repeatable.
         #[arg(long = "scope")]
         scopes: Vec<String>,
@@ -135,11 +145,11 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 let token = store.token(&name)?;
                 let client = store.client(&name)?;
                 let (state, next) = match (&client, &token) {
-                    (None, _) => ("no client".to_string(), format!("sesame setup {name}")),
+                    (_, Some(t)) => (format!("logged in{}", who(t)), String::new()),
+                    (None, None) => ("no client".to_string(), format!("sesame setup {name}")),
                     (Some(_), None) => {
                         ("not logged in".to_string(), format!("sesame login {name}"))
                     }
-                    (Some(_), Some(t)) => (format!("logged in{}", who(t)), String::new()),
                 };
                 let next = if next.is_empty() {
                     next
@@ -215,10 +225,31 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Login {
             provider,
+            token,
+            token_stdin,
+            ..
+        } if token || token_stdin => {
+            let t = providers::find(&provider)?;
+            let (provider, p) = (t.provider, t.p);
+            let pasted = if token_stdin {
+                let mut s = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut s)
+                    .map_err(|e| e.to_string())?;
+                s
+            } else {
+                rpassword::prompt_password("Token: ").map_err(|e| e.to_string())?
+            };
+            let t = oauth::save_pasted(&provider, &p, &pasted)?;
+            eprintln!("Stored the pasted `{provider}` token{}.", who(&t));
+        }
+        Cmd::Login {
+            provider,
             scopes,
             no_browser,
             browser,
             site,
+            ..
         } => {
             let t = providers::find(&provider)?;
             let opts = oauth::LoginOptions {
@@ -261,12 +292,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// ` (site, account)` for a token, from what login learned; empty if nothing.
+/// ` (site, account)` for a token, from what login learned, and whether it
+/// was pasted; empty if nothing.
 fn who(t: &Token) -> String {
     let parts: Vec<&str> = [&t.resource_name, &t.account]
         .into_iter()
         .flatten()
         .map(String::as_str)
+        .chain(t.pasted.then_some("pasted token"))
         .collect();
     if parts.is_empty() {
         String::new()
@@ -366,11 +399,14 @@ fn api(
         None => out.write_all(&bytes),
     }
     .map_err(|e| e.to_string())?;
-    Ok(if status.is_success() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    if !status.is_success() {
+        return Ok(ExitCode::FAILURE);
+    }
+    if let Some(f) = p.error_in(&bytes) {
+        eprintln!("sesame: the answer carries `{f}`: the call failed despite {status}");
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// A 403 for a token that lacks a scope: RFC 6750's `insufficient_scope`

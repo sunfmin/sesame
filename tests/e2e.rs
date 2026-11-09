@@ -277,7 +277,10 @@ fn first_use_points_to_setup() {
     let (ok, out) = sesame(&["setup", "nope"]);
     assert!(!ok);
     assert!(out.contains("unknown provider `nope`"), "{out}");
-    assert!(out.contains("acme, github, google, jira, notion"), "{out}");
+    assert!(
+        out.contains("acme, figma, github, google, jira, linear, notion"),
+        "{out}"
+    );
 
     let (_, out) = sesame(&["providers"]);
     assert!(out.contains("next: sesame setup acme"), "{out}");
@@ -828,6 +831,679 @@ fn device_flow_and_browser_fallback() {
         .filter(|l| l.contains("device_code=dev-ok"))
         .count();
     assert_eq!(polls, 3, "{log:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A Linear-shaped fake: comma-separated scopes, 24-hour tokens whose every
+/// refresh hands out a new refresh token, and GraphQL errors under a 200.
+fn fake_linear() -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        let mut n = 1;
+        for stream in listener.incoming().flatten() {
+            let (target, headers, body) = read_request(&stream);
+            log2.lock().unwrap().push(format!("{target} {body}"));
+            let auth = header(&headers, "authorization").unwrap_or_default();
+            let mut s = stream;
+            let token = |n: i32| {
+                format!(
+                    r#"{{"access_token":"access-{n}","refresh_token":"refresh-{n}","expires_in":86399,"scope":"read,write"}}"#
+                )
+            };
+            if target.starts_with("/authorize") {
+                let u = url::Url::parse(&format!("http://x{target}")).unwrap();
+                let q = |k: &str| {
+                    u.query_pairs()
+                        .find(|(m, _)| m == k)
+                        .unwrap()
+                        .1
+                        .into_owned()
+                };
+                let loc = format!("{}?code=the-code&state={}", q("redirect_uri"), q("state"));
+                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
+            } else if target == "/oauth/token" {
+                if body.contains("grant_type=authorization_code") {
+                    reply(&mut s, "200 OK", "", &token(n));
+                } else if body.contains(&format!("refresh_token=refresh-{n}")) {
+                    n += 1;
+                    reply(&mut s, "200 OK", "", &token(n));
+                } else {
+                    reply(
+                        &mut s,
+                        "400 Bad Request",
+                        "",
+                        r#"{"error":"invalid_grant"}"#,
+                    );
+                }
+            } else if target == "/graphql" && auth == format!("Bearer access-{n}") {
+                let b = if body.contains("broken") {
+                    r#"{"data":null,"errors":[{"message":"Cannot query field \"broken\""}]}"#
+                } else if body.contains("viewer { name }") {
+                    r#"{"data":{"viewer":{"name":"Felix"}}}"#
+                } else {
+                    r#"{"data":{"viewer":{"id":"u1"}}}"#
+                };
+                reply(&mut s, "200 OK", "", b);
+            } else if target == "/graphql" {
+                reply(
+                    &mut s,
+                    "401 Unauthorized",
+                    "",
+                    r#"{"errors":[{"message":"auth"}]}"#,
+                );
+            } else {
+                reply(&mut s, "404 Not Found", "", "");
+            }
+        }
+    });
+    (port, log)
+}
+
+/// The built-in `linear`, pointed at the fake: the authorization URL asks for
+/// `read,write`, login names who signed in, a day later the token refreshes and
+/// the new refresh token is kept, and GraphQL `errors` under a 200 fail `api`.
+#[test]
+fn linear_scopes_daily_refresh_graphql_errors() {
+    let (port, log) = fake_linear();
+    let tmp = std::env::temp_dir().join(format!("sesame-linear-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let sesame = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        c.args(args).env("SESAME_CONFIG_DIR", &config);
+        c
+    };
+    let run = |args: &[&str]| {
+        let out = sesame(args).output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let db = || rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+    let stored = || {
+        db().query_row(
+            "SELECT refresh_token, expires_at FROM tokens WHERE provider = 'linear'",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .unwrap()
+    };
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    };
+    // A day has passed: the stored access token is past its expiry.
+    let a_day_later = || {
+        db().execute(
+            "UPDATE tokens SET expires_at = ?1 WHERE provider = 'linear'",
+            [now() - 1],
+        )
+        .unwrap();
+    };
+
+    // 8752 is linear's fixed port; the test takes a free one so runs in
+    // parallel (and a real `sesame login linear`) do not collide.
+    let free = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok, _, err) = run(&[
+        "provider",
+        "set",
+        "linear",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/oauth/token"),
+        "--api-base",
+        &base,
+        "--host",
+        "127.0.0.1",
+        "--redirect-port",
+        &free,
+        "--identity-url",
+        &format!("{base}/graphql"),
+    ]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = run(&["provider", "show", "linear"]);
+    assert!(ok, "{err}");
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(shown["scope_separator"]["value"], ",");
+    assert_eq!(shown["scope_separator"]["from"], "built-in");
+    assert_eq!(
+        shown["error_fields"]["value"],
+        serde_json::json!(["errors"])
+    );
+
+    let (ok, _, _) = run(&["client", "linear", "--client-id", "cid", "--secret-stdin"]);
+    assert!(ok);
+
+    let mut login = sesame(&["login", "linear", "--no-browser"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(login.stderr.take().unwrap());
+    let auth_url = loop {
+        let mut l = String::new();
+        assert!(err.read_line(&mut l).unwrap() > 0, "no URL printed");
+        if let Some(u) = l.trim().strip_prefix("http") {
+            break format!("http{u}");
+        }
+    };
+    let u = url::Url::parse(&auth_url).unwrap();
+    let scope = u.query_pairs().find(|(k, _)| k == "scope").unwrap().1;
+    assert_eq!(scope, "read,write");
+    let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
+    assert!(page.contains("Signed in"));
+    let status = login.wait().unwrap();
+    let mut rest = String::new();
+    err.read_to_string(&mut rest).unwrap();
+    assert!(status.success(), "login failed: {rest}");
+    assert!(rest.contains("Logged in to `linear` (Felix)"), "{rest}");
+
+    let (refresh, expires) = stored();
+    assert_eq!(refresh, "refresh-1");
+    assert!((expires - now() - 86399).abs() < 60, "{expires}");
+    let (_, out, _) = run(&["providers"]);
+    assert!(out.contains("logged in (Felix)"), "{out}");
+
+    let query = r#"{"query":"{ viewer { id } }"}"#;
+    let (ok, out, err) = run(&["api", "linear", "/graphql", "-d", query]);
+    assert!(ok, "{err}");
+    assert!(out.contains("u1"), "{out}");
+
+    // Two days in a row: each refresh rotates the refresh token and keeps the new one.
+    for day in 2..=3 {
+        a_day_later();
+        let (ok, out, err) = run(&["api", "linear", "/graphql", "-d", query]);
+        assert!(ok, "day {day}: {err}");
+        assert!(out.contains("u1"), "{out}");
+        assert_eq!(stored().0, format!("refresh-{day}"));
+        assert!(stored().1 > now() + 86000);
+    }
+
+    let (ok, out, err) = run(&[
+        "api",
+        "linear",
+        "/graphql",
+        "-d",
+        r#"{"query":"{ broken }"}"#,
+    ]);
+    assert!(!ok, "a 200 with errors passed: {out}");
+    assert!(out.contains("Cannot query field"), "{out}");
+    assert!(err.contains("`errors`"), "{err}");
+
+    let log = log.lock().unwrap();
+    let refreshes = log
+        .iter()
+        .filter(|l| l.contains("grant_type=refresh_token"))
+        .count();
+    assert_eq!(refreshes, 2, "{log:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A provider shaped like Figma's: HTTP Basic at the token endpoint, refresh
+/// at its own endpoint whose answer has no refresh token, an authorization
+/// code that lasts 30 seconds, and the account read from `/v1/me`.
+#[test]
+fn separate_refresh_endpoint_and_expired_code() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        // base64("cid:the-secret")
+        let basic = "Basic Y2lkOnRoZS1zZWNyZXQ=";
+        let mut exchanges = 0;
+        let mut access = "access-1".to_string();
+        for stream in listener.incoming().flatten() {
+            let (target, headers, body) = read_request(&stream);
+            let h = |k: &str| header(&headers, k).unwrap_or_default();
+            log2.lock().unwrap().push(format!("{target} {body}"));
+            let mut s = stream;
+            if target.starts_with("/oauth?") {
+                let u = url::Url::parse(&format!("http://x{target}")).unwrap();
+                let q = |k: &str| {
+                    u.query_pairs()
+                        .find(|(n, _)| n == k)
+                        .unwrap()
+                        .1
+                        .into_owned()
+                };
+                let loc = format!("{}?code=the-code&state={}", q("redirect_uri"), q("state"));
+                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
+            } else if target == "/v1/oauth/token" {
+                assert_eq!(h("authorization"), basic);
+                assert!(!body.contains("client_id") && !body.contains("client_secret"));
+                assert!(body.contains("grant_type=authorization_code"), "{body}");
+                exchanges += 1;
+                if exchanges == 1 {
+                    // The code came back too late.
+                    reply(
+                        &mut s,
+                        "400 Bad Request",
+                        "",
+                        r#"{"error":true,"status":400,"message":"Invalid code"}"#,
+                    );
+                } else {
+                    reply(
+                        &mut s,
+                        "200 OK",
+                        "",
+                        r#"{"user_id_string":"1","access_token":"access-1","token_type":"bearer","expires_in":7776000,"refresh_token":"refresh-1"}"#,
+                    );
+                }
+            } else if target == "/v1/oauth/refresh" {
+                assert_eq!(h("authorization"), basic);
+                assert!(body.contains("refresh_token=refresh-1"), "{body}");
+                assert!(!body.contains("client_secret"));
+                access = "access-2".into();
+                reply(
+                    &mut s,
+                    "200 OK",
+                    "",
+                    r#"{"access_token":"access-2","token_type":"bearer","expires_in":7776000}"#,
+                );
+            } else if target == "/v1/me"
+                && h("authorization") == "Bearer access-1"
+                && access == "access-1"
+            {
+                reply(
+                    &mut s,
+                    "200 OK",
+                    "",
+                    r#"{"id":"1","email":"felix@example.com","handle":"Felix"}"#,
+                );
+            } else if target.starts_with("/v1/files/") {
+                if h("authorization") != format!("Bearer {access}") || access != "access-2" {
+                    // Refused, to make the CLI refresh.
+                    reply(&mut s, "401 Unauthorized", "", "{}");
+                } else {
+                    reply(&mut s, "200 OK", "", r#"{"name":"Design"}"#);
+                }
+            } else {
+                reply(&mut s, "404 Not Found", "", "");
+            }
+        }
+    });
+
+    let tmp = std::env::temp_dir().join(format!("sesame-figma-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let sesame = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        c.args(args).env("SESAME_CONFIG_DIR", &config);
+        c
+    };
+    let run = |args: &[&str]| {
+        let out = sesame(args).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(out.status.success(), "{args:?}: {err}");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    // Plays the browser; returns whether login succeeded and what it printed.
+    let login = || {
+        let mut login = sesame(&["login", "fig", "--no-browser"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut err = BufReader::new(login.stderr.take().unwrap());
+        let mut printed = String::new();
+        let auth_url = loop {
+            let mut l = String::new();
+            assert!(err.read_line(&mut l).unwrap() > 0, "no URL: {printed}");
+            printed.push_str(&l);
+            if let Some(u) = l.trim().strip_prefix("http") {
+                break format!("http{u}");
+            }
+        };
+        let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
+        assert!(page.contains("Signed in"));
+        let ok = login.wait().unwrap().success();
+        err.read_to_string(&mut printed).unwrap();
+        (ok, printed)
+    };
+
+    let base = format!("http://127.0.0.1:{port}");
+    run(&[
+        "provider",
+        "add",
+        "fig",
+        "--auth-url",
+        &format!("{base}/oauth"),
+        "--token-url",
+        &format!("{base}/v1/oauth/token"),
+        "--refresh-url",
+        &format!("{base}/v1/oauth/refresh"),
+        "--api-base",
+        &format!("{base}/v1"),
+        "--host",
+        "127.0.0.1",
+        "--scope",
+        "current_user:read",
+        "--client-auth",
+        "basic",
+        "--code-seconds",
+        "30",
+        "--identity-url",
+        &format!("{base}/v1/me"),
+        "--identity-field",
+        "email",
+    ]);
+    let shown: serde_json::Value =
+        serde_json::from_str(&run(&["provider", "show", "fig"])).unwrap();
+    assert_eq!(
+        shown["refresh_url"]["value"],
+        format!("{base}/v1/oauth/refresh")
+    );
+    assert_eq!(shown["code_seconds"]["value"], 30);
+    let shown: serde_json::Value =
+        serde_json::from_str(&run(&["provider", "show", "figma"])).unwrap();
+    assert_eq!(
+        shown["refresh_url"]["value"],
+        "https://api.figma.com/v1/oauth/refresh"
+    );
+    assert_eq!(shown["redirect_port"]["value"], 8753);
+
+    let mut client = sesame(&["client", "fig", "--client-id", "cid", "--secret-stdin"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    client
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"the-secret\n")
+        .unwrap();
+    assert!(client.wait().unwrap().success());
+
+    let (ok, out) = login();
+    assert!(!ok, "{out}");
+    assert!(out.contains("within 30 seconds"), "{out}");
+    assert!(
+        out.contains("most likely expired (it lasts 30 seconds); run `sesame login fig` again"),
+        "{out}"
+    );
+
+    let (ok, out) = login();
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("Logged in to `fig` (felix@example.com)"),
+        "{out}"
+    );
+    assert!(run(&["providers"]).contains("logged in (felix@example.com)"));
+
+    // A 401, a refresh at the refresh endpoint, then the call again.
+    assert_eq!(
+        run(&["api", "fig", "/files/abc"]).trim(),
+        r#"{"name":"Design"}"#
+    );
+    assert_eq!(run(&["token", "fig"]).trim(), "access-2");
+
+    let db = rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+    let refresh: String = db
+        .query_row(
+            "SELECT refresh_token FROM tokens WHERE provider = 'fig'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        refresh, "refresh-1",
+        "the refresh answer had none: the old one is kept"
+    );
+
+    let log = log.lock().unwrap();
+    assert!(
+        !log.iter()
+            .any(|l| l.starts_with("/v1/oauth/token ") && l.contains("refresh_token")),
+        "{log:?}"
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|l| l.starts_with("/v1/oauth/refresh "))
+            .count(),
+        1,
+        "{log:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+/// A provider shaped like Slack's: the user token under `authed_user` next
+/// to a bot token, the team name nested, and failures as HTTP 200 with
+/// `"ok": false` and an `error` code.
+fn fake_slack_provider() -> (u16, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let (target, headers, body) = read_request(&stream);
+            let auth = header(&headers, "authorization").unwrap_or_default();
+            log2.lock().unwrap().push(format!("{target} {body}"));
+            let mut s = stream;
+            let t = target.as_str();
+            if t.starts_with("/authorize") {
+                let loc = format!(
+                    "{}?code=the-code&state={}",
+                    query(t, "redirect_uri").unwrap(),
+                    query(t, "state").unwrap()
+                );
+                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
+            } else if t == "/token" {
+                reply(
+                    &mut s,
+                    "200 OK",
+                    "",
+                    r#"{"ok":true,"access_token":"xoxb-bot","team":{"id":"T1","name":"Acme"},
+                       "authed_user":{"id":"U1","access_token":"xoxp-1","token_type":"user"}}"#,
+                );
+            } else if t == "/api/auth.test" {
+                let b = if ["Bearer xoxp-1", "Bearer xoxp-pasted"].contains(&auth.as_str()) {
+                    r#"{"ok":true,"user":"felix"}"#
+                } else {
+                    r#"{"ok":false,"error":"invalid_auth"}"#
+                };
+                reply(&mut s, "200 OK", "", b);
+            } else if t.starts_with("/api/chat.postMessage") {
+                reply(
+                    &mut s,
+                    "200 OK",
+                    "",
+                    r#"{"ok":false,"error":"channel_not_found"}"#,
+                );
+            } else {
+                reply(&mut s, "404 Not Found", "", "");
+            }
+        }
+    });
+    (port, log)
+}
+
+fn query(target: &str, k: &str) -> Option<String> {
+    let u = url::Url::parse(&format!("http://x{target}")).unwrap();
+    u.query_pairs()
+        .find(|(n, _)| n == k)
+        .map(|(_, v)| v.into_owned())
+}
+
+/// A provider shaped like Slack: scopes in `user_scope`, no PKCE, the user
+/// token under `authed_user`, an https callback whose address the person
+/// pastes, failures as HTTP 200 with `"ok": false` and an `error` code; then a pasted token.
+#[test]
+fn https_paste_user_token_error_field_pasted_token() {
+    let (port, log) = fake_slack_provider();
+    let tmp = std::env::temp_dir().join(format!("sesame-paste-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let sesame = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        c.args(args).env("SESAME_CONFIG_DIR", &config);
+        c
+    };
+    let run = |args: &[&str]| {
+        let out = sesame(args).output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok_, _, err) = run(&[
+        "provider",
+        "add",
+        "chat",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/token"),
+        "--api-base",
+        &format!("{base}/api"),
+        "--host",
+        "127.0.0.1",
+        "--scope",
+        "channels:read",
+        "--scope",
+        "chat:write",
+        "--scope-param",
+        "user_scope",
+        "--pkce",
+        "false",
+        "--token-path",
+        "/authed_user",
+        "--site-name-field",
+        "/team/name",
+        "--redirect",
+        "https-paste",
+        "--redirect-port",
+        "8751",
+        "--error-field",
+        "error",
+    ]);
+    assert!(ok_, "{err}");
+    let (_, out, _) = run(&["provider", "show", "chat"]);
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    for (k, v) in [
+        ("scope_param", serde_json::json!("user_scope")),
+        ("pkce", serde_json::json!(false)),
+        ("token_path", serde_json::json!("/authed_user")),
+        ("site_name_field", serde_json::json!("/team/name")),
+        ("redirect", serde_json::json!("https-paste")),
+        ("error_fields", serde_json::json!(["error"])),
+    ] {
+        assert_eq!(
+            shown[k],
+            serde_json::json!({"value": v, "from": "user"}),
+            "{k}"
+        );
+    }
+    let (_, out, _) = run(&["setup", "chat"]);
+    assert!(out.contains("https://localhost:8751/callback"), "{out}");
+    assert!(run(&["client", "chat", "--client-id", "cid", "--no-secret"]).0);
+
+    // Login: play the browser up to the https redirect, which nothing answers,
+    // and paste the address it would end on. `tamper` edits that address.
+    let login = |tamper: &dyn Fn(String) -> String| {
+        let mut login = sesame(&["login", "chat", "--no-browser"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut err = BufReader::new(login.stderr.take().unwrap());
+        let auth_url = loop {
+            let mut l = String::new();
+            assert!(err.read_line(&mut l).unwrap() > 0, "no URL printed");
+            if let Some(u) = l.trim().strip_prefix("http") {
+                break format!("http{u}");
+            }
+        };
+        let no_follow = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let resp = no_follow.get(&auth_url).send().unwrap();
+        let landed = resp.headers()["location"].to_str().unwrap().to_string();
+        assert!(
+            landed.starts_with("https://localhost:8751/callback?code="),
+            "{landed}"
+        );
+        let mut stdin = login.stdin.take().unwrap();
+        writeln!(stdin, "{}", tamper(landed)).unwrap();
+        drop(stdin);
+        let status = login.wait().unwrap();
+        let mut rest = String::new();
+        err.read_to_string(&mut rest).unwrap();
+        (status.success(), rest, auth_url)
+    };
+
+    let (ok_, err, _) = login(&|u| {
+        let (head, _) = u.split_once("state=").unwrap();
+        format!("{head}state=forged")
+    });
+    assert!(!ok_ && err.contains("state mismatch"), "{err}");
+    assert!(!run(&["token", "chat"]).0, "a forged state stored a token");
+
+    let (ok_, err, auth_url) = login(&|u| u);
+    assert!(ok_, "{err}");
+    assert!(err.contains("Logged in to `chat` (Acme)"), "{err}");
+    assert_eq!(
+        query(&auth_url[base.len()..], "user_scope").as_deref(),
+        Some("channels:read chat:write")
+    );
+    for absent in ["scope", "code_challenge"] {
+        assert_eq!(query(&auth_url[base.len()..], absent), None, "{auth_url}");
+    }
+    assert!(
+        !log.lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("code_verifier")),
+        "PKCE sent"
+    );
+    assert_eq!(run(&["token", "chat"]).1.trim(), "xoxp-1");
+    let (_, out, _) = run(&["providers"]);
+    assert!(out.contains("logged in (Acme)"), "{out}");
+
+    let (ok_, out, err) = run(&["api", "chat", "/auth.test"]);
+    assert!(ok_ && out.contains(r#""user":"felix""#), "{out}{err}");
+    let (ok_, out, err) = run(&[
+        "api",
+        "chat",
+        "/chat.postMessage",
+        "-d",
+        r#"{"channel":"C1","text":"hi"}"#,
+    ]);
+    assert!(!ok_, "ok:false exited zero");
+    assert!(out.contains("channel_not_found"), "{out}");
+    assert!(err.contains("carries `error`"), "{err}");
+
+    // The fallback: a token pasted on stdin, no OAuth login.
+    assert!(run(&["logout", "chat"]).0);
+    let mut paste = sesame(&["login", "chat", "--token-stdin"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(paste.stdin.take().unwrap(), "xoxp-pasted").unwrap();
+    assert!(paste.wait().unwrap().success());
+    let (ok_, out, err) = run(&["api", "chat", "/auth.test"]);
+    assert!(ok_ && out.contains("felix"), "{out}{err}");
+    let (_, out, _) = run(&["providers"]);
+    assert!(out.contains("logged in (pasted token)"), "{out}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

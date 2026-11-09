@@ -1,6 +1,6 @@
 //! `sesame setup <provider>`: the numbered steps from nothing to a working
 //! `login`, written for an AI walking a person through them, and for the person.
-use crate::providers::Provider;
+use crate::providers::{Provider, Redirect};
 use std::fmt::Write;
 
 pub fn render(name: &str, p: &Provider) -> String {
@@ -44,8 +44,9 @@ pub fn render(name: &str, p: &Provider) -> String {
             &format!(
                 "No setup steps are written for `{name}`. To print them here, add them with\n\
                  sesame provider set {name} --setup-step '{{\"title\": …, \"page\": …, \"details\": …}}'\n\
-                 Register an authorization-code (PKCE) app with callback URL {callback}\n\
-                 and the scopes: {scopes}"
+                 Register an authorization-code{} app with callback URL {callback}\n\
+                 and the scopes: {scopes}",
+                if p.pkce { " (PKCE)" } else { "" }
             ),
         );
     }
@@ -92,17 +93,29 @@ pub fn render(name: &str, p: &Provider) -> String {
             ),
         )
     } else {
+        let within = match p.code_seconds {
+            Some(s) => format!(" within {s} seconds, before the code in it expires"),
+            None => String::new(),
+        };
         (
             format!(
                 "sesame client {name} --client-id <client id>\n\
                  It prompts for the client secret without echoing it.\n\
                  (An app without a secret: add --no-secret.)"
             ),
-            format!(
-                "sesame login {name}{services}\n\
-                 On a remote machine (SSH): open the printed URL anywhere, then paste the address\n\
-                 the browser ends on back into the terminal."
-            ),
+            match p.redirect {
+                Redirect::Loopback => format!(
+                    "sesame login {name}{services}\n\
+                     On a remote machine (SSH): open the printed URL anywhere, then paste the address\n\
+                     the browser ends on back into the terminal{within}."
+                ),
+                Redirect::HttpsPaste => format!(
+                    "sesame login {name}{services}\n\
+                     After approving, the browser ends on {callback}?code=… and says it cannot open\n\
+                     the page: that is expected. Copy the whole address from the address bar and paste\n\
+                     it into the terminal{within}."
+                ),
+            },
         )
     };
     step(
@@ -130,7 +143,12 @@ pub fn render(name: &str, p: &Provider) -> String {
         &mut out,
         "Check, then call the API",
         None,
-        &format!("sesame providers        # `{name}` shows logged in\n{api}"),
+        &format!(
+            "sesame providers        # `{name}` shows logged in\n\
+             {api}\n\
+             A token you got another way can be stored instead of logging in:\n\
+             sesame login {name} --token   (hidden input; no refresh, paste a new one when it stops working)"
+        ),
     );
     out.trim_end().to_string() + "\n"
 }
@@ -214,6 +232,31 @@ mod tests {
     }
 
     #[test]
+    fn slack() {
+        let out = render("slack", &built_in("slack"));
+        for want in [
+            "https://api.slack.com/apps",
+            "Create New App",
+            "From scratch",
+            "OAuth & Permissions",
+            "User Token Scopes",
+            "channels:read, groups:read",
+            "chat:write",
+            "Redirect URLs",
+            "enter https://localhost:8751/callback",
+            "Install to Workspace",
+            "xoxp-",
+            "sesame login slack --token",
+            "Basic Information",
+            "sesame client slack --client-id <client id>",
+            "ends on https://localhost:8751/callback?code=",
+        ] {
+            assert!(out.contains(want), "missing {want:?} in:\n{out}");
+        }
+        assert!(!out.contains("http://localhost"), "{out}");
+    }
+
+    #[test]
     fn notion() {
         let out = render("notion", &built_in("notion"));
         for want in [
@@ -224,6 +267,42 @@ mod tests {
             "Configuration tab",
             "sesame client notion --client-id <client id>",
             "sesame login notion",
+        ] {
+            assert!(out.contains(want), "missing {want:?} in:\n{out}");
+        }
+    }
+
+    #[test]
+    fn figma() {
+        let out = render("figma", &built_in("figma"));
+        for want in [
+            "https://www.figma.com/developers/apps",
+            "Create a new app",
+            "OAuth credentials",
+            "Redirect URL: http://localhost:8753/callback",
+            "current_user:read, file_content:read, file_comments:read",
+            "Draft",
+            "Private",
+            "sesame client figma --client-id <client id>",
+            "sesame login figma",
+            "within 30 seconds",
+        ] {
+            assert!(out.contains(want), "missing {want:?} in:\n{out}");
+        }
+        assert!(!out.contains("{callback}") && !out.contains("{scopes}"));
+    }
+
+    #[test]
+    fn linear() {
+        let out = render("linear", &built_in("linear"));
+        for want in [
+            "Settings > API > OAuth applications",
+            "https://linear.app/settings/api/applications/new",
+            "Callback URLs: http://localhost:8752/callback",
+            "Client ID and the Client secret",
+            "read, write",
+            "sesame client linear --client-id <client id>",
+            "sesame login linear",
         ] {
             assert!(out.contains(want), "missing {want:?} in:\n{out}");
         }
