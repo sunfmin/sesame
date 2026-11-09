@@ -32,6 +32,7 @@ fn step(title: &str, page: Option<&str>, details: &str) -> SetupStep {
 
 pub fn all() -> BTreeMap<String, Provider> {
     BTreeMap::from([
+        ("figma".into(), figma()),
         ("github".into(), github()),
         ("google".into(), google()),
         ("jira".into(), jira()),
@@ -48,6 +49,7 @@ fn github() -> Provider {
         about: "GitHub REST and GraphQL APIs (OAuth App)".into(),
         auth_url: "https://github.com/login/oauth/authorize".into(),
         token_url: "https://github.com/login/oauth/access_token".into(),
+        refresh_url: None,
         api_base: "https://api.github.com".into(),
         hosts: strings(&["api.github.com", "uploads.github.com"]),
         scopes: strings(&["repo", "read:org"]),
@@ -61,6 +63,7 @@ fn github() -> Provider {
         resources_url: None,
         site_name_field: None,
         redirect_port: None,
+        code_seconds: None,
         redirect_host: RedirectHost::Loopback,
         device_url: Some("https://github.com/login/device/code".into()),
         identity_url: Some("https://api.github.com/user".into()),
@@ -99,6 +102,7 @@ fn google() -> Provider {
         about: "Google APIs: Drive, Docs, Sheets, YouTube, ...".into(),
         auth_url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
         token_url: "https://oauth2.googleapis.com/token".into(),
+        refresh_url: None,
         api_base: "https://www.googleapis.com".into(),
         hosts: strings(&["*.googleapis.com"]),
         scopes: strings(&[
@@ -115,6 +119,7 @@ fn google() -> Provider {
         resources_url: None,
         site_name_field: None,
         redirect_port: None,
+        code_seconds: None,
         redirect_host: RedirectHost::Localhost,
         device_url: None,
         identity_url: None,
@@ -184,6 +189,7 @@ fn jira() -> Provider {
         about: "Jira Cloud (Atlassian OAuth 2.0 3LO)".into(),
         auth_url: "https://auth.atlassian.com/authorize".into(),
         token_url: "https://auth.atlassian.com/oauth/token".into(),
+        refresh_url: None,
         api_base: "https://api.atlassian.com/ex/jira/{resource_id}".into(),
         hosts: strings(&["api.atlassian.com"]),
         scopes: strings(&[
@@ -199,6 +205,7 @@ fn jira() -> Provider {
         resources_url: Some("https://api.atlassian.com/oauth/token/accessible-resources".into()),
         site_name_field: None,
         redirect_port: Some(8749),
+        code_seconds: None,
         redirect_host: RedirectHost::Localhost,
         device_url: None,
         identity_url: None,
@@ -245,6 +252,7 @@ fn notion() -> Provider {
         about: "Notion (public integration OAuth)".into(),
         auth_url: "https://api.notion.com/v1/oauth/authorize".into(),
         token_url: "https://api.notion.com/v1/oauth/token".into(),
+        refresh_url: None,
         api_base: "https://api.notion.com/v1".into(),
         hosts: strings(&["api.notion.com"]),
         scopes: Vec::new(),
@@ -256,6 +264,7 @@ fn notion() -> Provider {
         site_name_field: Some("workspace_name".into()),
         // Notion allows http only for localhost, and matches the port and path exactly.
         redirect_port: Some(8750),
+        code_seconds: None,
         redirect_host: RedirectHost::Localhost,
         device_url: None,
         identity_url: None,
@@ -283,6 +292,71 @@ It must match exactly: keep http, localhost (not 127.0.0.1) and the port. Save t
 The Configuration tab shows the OAuth client ID and client secret. Keep it open for the next step.
 Notion has no scopes: at login, the consent page asks which pages and databases sesame may reach.
 To change them later, log in again, or share a page with the integration from Notion.",
+            ),
+        ],
+    }
+}
+
+/// A Figma OAuth app: HTTP Basic at the token endpoint, refresh at its own
+/// endpoint (whose answer has no new refresh token), and an authorization code
+/// that lasts 30 seconds. Steps and endpoints from
+/// https://developers.figma.com/docs/rest-api/oauth-apps/ and scopes from
+/// https://developers.figma.com/docs/rest-api/scopes/.
+fn figma() -> Provider {
+    Provider {
+        about: "Figma REST API (OAuth app)".into(),
+        auth_url: "https://www.figma.com/oauth".into(),
+        token_url: "https://api.figma.com/v1/oauth/token".into(),
+        refresh_url: Some("https://api.figma.com/v1/oauth/refresh".into()),
+        api_base: "https://api.figma.com/v1".into(),
+        hosts: strings(&["api.figma.com"]),
+        scopes: strings(&[
+            "current_user:read",
+            "file_content:read",
+            "file_comments:read",
+        ]),
+        auth_params: BTreeMap::new(),
+        token_body: TokenBody::Form,
+        client_auth: ClientAuth::Basic,
+        api_headers: BTreeMap::new(),
+        resources_url: None,
+        site_name_field: None,
+        // Figma accepts only registered redirect URLs, so the port is fixed.
+        redirect_port: Some(8753),
+        code_seconds: Some(30),
+        redirect_host: RedirectHost::Localhost,
+        device_url: None,
+        identity_url: Some("https://api.figma.com/v1/me".into()),
+        identity_field: Some("email".into()),
+        setup: vec![
+            step(
+                "Create an OAuth app (My Apps on Figma's developer site)",
+                Some("https://www.figma.com/developers/apps"),
+                "\
+Sign in to Figma, then click Create a new app in the upper-right corner.
+Give it a name (e.g. \"sesame\") and pick the team or organization that owns it.",
+            ),
+            step(
+                "Add the redirect URL (the app's OAuth credentials page)",
+                None,
+                "\
+Redirect URL: {callback}
+Figma exchanges a code only for a registered redirect URL: keep http, localhost and the port.",
+            ),
+            step(
+                "Pick the scopes",
+                None,
+                "\
+Select the scopes sesame asks for at login: {scopes}
+(Add others, e.g. file_comments:write, if you will ask for them with `sesame login figma --scope`.)",
+            ),
+            step(
+                "Copy the client ID and secret, and decide who may sign in",
+                None,
+                "\
+The OAuth credentials page shows the Client ID and Client secret; keep it open for the next step.
+A new app is a Draft: only you and the plan's admins can authorize it. For your team or
+organization to use it, publish it as Private (no review by Figma); Public needs Figma's review.",
             ),
         ],
     }
