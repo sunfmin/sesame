@@ -91,9 +91,14 @@ build)
     installed=$([ -n "$stable" ] && "$rustup" target list --installed --toolchain stable) || installed=
     for target in $targets; do
         echo "$installed" | grep -qx "$target" && continue
+        if [ -n "$rustup" ]; then
+            why="that is not installed"
+        else
+            why="no rustup is installed (https://rustup.rs)"
+        fi
         # shellcheck disable=SC2086
         cat >&2 <<MSG
-release: build needs rustup's stable toolchain with the target $target, and ${rustup:+that is not installed}${rustup:-no rustup is installed (https://rustup.rs)}. With rustup, get it with:
+release: build needs rustup's stable toolchain with the target $target, and $why. With rustup, get it with:
     rustup toolchain install stable --profile minimal --target $(echo $targets)
 MSG
         exit 1
