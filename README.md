@@ -30,6 +30,7 @@ sesame api linear /graphql -d '{"query":"{ viewer { id name } }"}'   # GraphQL `
 sesame api hubspot /crm/v3/objects/contacts?limit=1
 curl -H "Authorization: Bearer $(sesame token jira)" ...
 sesame token jira --json                      # {"access_token": "…", "expires_at": <unix seconds or null>}
+sesame token jira --json --min-life 1200      # refreshed first unless it lasts 20 more minutes
 sesame providers                              # who you are signed in to, and each service's access
 sesame logout jira                            # forgets the local token only
 ```
@@ -160,7 +161,7 @@ sesame logout jira                            # forgets the local token only
 
   ```sh
   # on the machine with the login
-  token=$(sesame token gmail)                     # refreshed if it expires within a minute
+  token=$(sesame token gmail --min-life 1200)     # refreshed if it expires within 20 minutes
   # on the other, with no sesame.db
   SESAME_TOKEN_GMAIL=$token sesame api gmail /users/me/profile
   SESAME_PROVIDERS="{\"acme\": $(sesame provider show acme)}" SESAME_TOKEN_ACME=… sesame api acme /me

@@ -563,10 +563,24 @@ fn pick_resource(token: &mut Token, url: &str, site: Option<&str>) -> Result<(),
     Ok(())
 }
 
-/// The stored token, refreshed first when it expires within a minute (or when forced).
+/// The least life, in seconds, a stored token is used with: one that expires
+/// sooner is refreshed first.
+pub const MIN_LIFE: u64 = 60;
+
+/// When `valid_token` refreshes the stored token.
+#[derive(Clone, Copy)]
+pub enum Refresh {
+    /// Where it expires within these seconds (never fewer than `MIN_LIFE`).
+    Within(u64),
+    /// Always: the provider refused it.
+    Now,
+}
+
+/// The stored token, refreshed first as `refresh` says. The provider's new
+/// token is returned even where it lasts less than asked: its expiry says so.
 /// The read, the refresh and the write hold the database's lock, so a second
 /// process refreshing the same provider waits and then sees the new token.
-pub fn valid_token(name: &str, p: &Provider, force_refresh: bool) -> Result<Token, String> {
+pub fn valid_token(name: &str, p: &Provider, refresh: Refresh) -> Result<Token, String> {
     Store::open()?.locked(|store| {
         let Some(token) = store.token(name)? else {
             if client(store, name, p)?.is_none() {
@@ -576,8 +590,13 @@ pub fn valid_token(name: &str, p: &Provider, force_refresh: bool) -> Result<Toke
                 "not logged in to `{name}`; run `sesame login {name}`"
             ));
         };
-        let fresh = token.expires_at.is_none_or(|t| t > now() + 60);
-        if fresh && !force_refresh {
+        let fresh = match refresh {
+            Refresh::Within(secs) => token
+                .expires_at
+                .is_none_or(|t| t > now() + secs.max(MIN_LIFE)),
+            Refresh::Now => false,
+        };
+        if fresh {
             return Ok(token);
         }
         let refresh = token.refresh_token.clone().ok_or_else(|| {
