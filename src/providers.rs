@@ -80,6 +80,12 @@ pub struct Provider {
     /// device flow, and `--browser` the loopback redirect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_url: Option<String>,
+    /// The client id of a public client (no secret) shipped with the definition,
+    /// used when the person stored no client of their own. With a `device_url`
+    /// it signs in only through the device flow (GitHub's code exchange on the
+    /// loopback redirect needs a secret).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_client_id: Option<String>,
     /// A JSON endpoint on one of `hosts` naming who signed in, read after login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_url: Option<String>,
@@ -523,8 +529,12 @@ fn layers(name: &str) -> Result<(Option<Provider>, Fields, Provider), String> {
 /// table, each with where it comes from: `built-in`, `user`, or `default`
 /// (unset, so the default holds); a field without a value is left out.
 /// Each service is its own field, `services.<name>`, as `sesame.db` keeps it.
+/// `public_client_id` also says whether login uses it (`in_use`): not while
+/// the person has a client of their own stored.
 pub fn show(name: &str) -> Result<Value, String> {
     let (built_in, user, p) = layers(name)?;
+    let in_use = crate::oauth::client(&Store::open()?, name, &p)?
+        .is_some_and(|(_, s)| s == crate::oauth::ClientSource::BuiltIn);
     let from = |k: &str| {
         if user.contains_key(k) {
             "user"
@@ -544,7 +554,10 @@ pub fn show(name: &str) -> Result<Value, String> {
                 shown.insert(k, entry);
             }
         } else if let Some(value) = values.remove(f.name) {
-            let entry = serde_json::json!({ "value": value, "from": from(f.name) });
+            let mut entry = serde_json::json!({ "value": value, "from": from(f.name) });
+            if f.name == "public_client_id" {
+                entry["in_use"] = Value::Bool(in_use);
+            }
             shown.insert(f.name.into(), entry);
         }
     }
@@ -769,6 +782,7 @@ mod tests {
             code_seconds: Some(30),
             redirect_host: RedirectHost::Loopback,
             device_url: Some("https://a.example/device".into()),
+            public_client_id: Some("pub".into()),
             identity_url: Some("https://a.example/me".into()),
             identity_field: Some("login".into()),
             identity_body: Some(json!({"query": "q"})),

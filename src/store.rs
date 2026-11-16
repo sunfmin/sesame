@@ -283,6 +283,14 @@ impl Store {
             .map_err(|e| self.err(e))
     }
 
+    /// Forgets the stored client; returns whether there was one.
+    pub fn delete_client(&self, provider: &str) -> Result<bool, String> {
+        self.conn
+            .execute("DELETE FROM clients WHERE provider = ?1", [provider])
+            .map(|n| n > 0)
+            .map_err(|e| self.err(e))
+    }
+
     pub fn delete_token(&self, provider: &str) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM tokens WHERE provider = ?1", [provider])

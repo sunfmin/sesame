@@ -43,17 +43,21 @@ enum Cmd {
     },
     /// Print the steps to register a provider's OAuth app and get to a working login.
     Setup { provider: String },
-    /// Store the OAuth client (app) used to sign in to a provider.
+    /// Store your own OAuth client (app) to sign in to a provider with, in place
+    /// of the built-in one where the provider has one (github); `--reset` forgets it.
     Client {
         provider: String,
-        #[arg(long)]
-        client_id: String,
+        #[arg(long, required_unless_present = "reset")]
+        client_id: Option<String>,
         /// Read the client secret from stdin instead of prompting.
         #[arg(long)]
         secret_stdin: bool,
         /// The client has no secret (public client with PKCE).
         #[arg(long, conflicts_with = "secret_stdin")]
         no_secret: bool,
+        /// Forget your stored client: login goes back to the built-in one, if any.
+        #[arg(long, conflicts_with_all = ["client_id", "secret_stdin", "no_secret"])]
+        reset: bool,
     },
     /// Sign in through the provider's OAuth page and store the token. A provider
     /// with a device endpoint (github) prints a code to enter on its page instead.
@@ -165,7 +169,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             let store = Store::open()?;
             for (name, p) in providers::all()? {
                 let token = store.token(&name)?;
-                let client = store.client(&name)?;
+                let client = oauth::client(&store, &name, &p)?;
+                let source = client.as_ref().map(|(_, s)| s.label()).unwrap_or_default();
                 let (state, next) = match (&client, &token) {
                     (_, Some(t)) => (format!("logged in{}", who(t)), String::new()),
                     (None, None) => ("no client".to_string(), format!("sesame setup {name}")),
@@ -178,7 +183,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 } else {
                     format!("next: {next}")
                 };
-                println!("{name:<12} {state:<24} {next:<28} {}", p.about);
+                println!(
+                    "{name:<12} {state:<24} {source:<16} {next:<28} {}",
+                    p.about
+                );
                 for (service, svc) in &p.services {
                     let has = token.as_ref().map(oauth::granted).unwrap_or_default();
                     let state = if token.is_some() && svc.scopes.iter().all(|s| has.contains(s)) {
@@ -190,7 +198,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                         (Some(_), "not authorized") => format!("next: sesame login {service}"),
                         _ => String::new(),
                     };
-                    println!("  {service:<10} {state:<24} {next:<28} {}", svc.about);
+                    println!("  {service:<10} {state:<24} {:<16} {next:<28} {}", "", svc.about);
                 }
             }
         }
@@ -222,12 +230,31 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             print!("{}", setup::render(&t.provider, &t.p));
         }
         Cmd::Client {
+            provider, reset, ..
+        } if reset => {
+            let t = providers::find(&provider)?;
+            let had = Store::open()?.delete_client(&t.provider)?;
+            let then = if t.p.public_client_id.is_some() {
+                "login uses the built-in client"
+            } else {
+                "it has no built-in client: store one with `sesame client` to log in"
+            };
+            let what = if had {
+                "Forgot your"
+            } else {
+                "There was no stored"
+            };
+            eprintln!("{what} `{}` client; {then}.", t.provider);
+        }
+        Cmd::Client {
             provider,
             client_id,
             secret_stdin,
             no_secret,
+            ..
         } => {
             let provider = providers::find(&provider)?.provider;
+            let client_id = client_id.ok_or("give --client-id, or --reset")?;
             let client_secret = if no_secret {
                 None
             } else if secret_stdin {
