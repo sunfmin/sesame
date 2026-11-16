@@ -325,13 +325,17 @@ fn own_changes(built_in: &Provider, user: &mut Fields) {
 /// own changes: a provider they added before it became built-in keeps only
 /// the fields that differ from the built-in definition.
 fn stored(s: &Store) -> Result<BTreeMap<String, Fields>, String> {
-    let mut all = s.provider_fields()?;
+    Ok(own(s.provider_fields()?))
+}
+
+/// `user` with each built-in's fields reduced to its own changes.
+fn own(mut all: BTreeMap<String, Fields>) -> BTreeMap<String, Fields> {
     for (name, b) in built_in::all() {
         if let Some(user) = all.get_mut(&name) {
             own_changes(&b, user);
         }
     }
-    Ok(all)
+    all
 }
 
 fn unknown(name: &str, all: &BTreeMap<String, Provider>) -> String {
@@ -372,7 +376,19 @@ impl Target {
 }
 
 pub fn find(name: &str) -> Result<Target, String> {
-    let mut all = all()?;
+    find_in(all()?, name)
+}
+
+/// Every provider in force from definitions handed in, not from `sesame.db`:
+/// the built-ins, with `handed`'s fields over them as if stored.
+pub fn without_store(
+    handed: BTreeMap<String, Fields>,
+) -> Result<BTreeMap<String, Provider>, String> {
+    resolve(own(handed))
+}
+
+/// What `name` means among `all`.
+pub fn find_in(mut all: BTreeMap<String, Provider>, name: &str) -> Result<Target, String> {
     if let Some(p) = all.remove(name) {
         return Ok(Target {
             provider: name.into(),

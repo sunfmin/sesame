@@ -1982,3 +1982,183 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
     assert!(calls[1].contains("Bearer access-2"), "{log:?}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// Guild's split: a Hub holds the login, `sesame token <service>` there
+/// refreshes as needed; another machine, with no `sesame.db` at all, calls the
+/// API with the token handed in the environment and the definition the Hub
+/// shows, never refreshing it.
+#[test]
+fn handed_token_without_db() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let (target, headers, body) = read_request(&stream);
+            let auth = header(&headers, "authorization").unwrap_or_default();
+            let ver = header(&headers, "x-fake-version").unwrap_or_default();
+            log2.lock()
+                .unwrap()
+                .push(format!("{target} auth={auth} ver={ver} {body}"));
+            let mut s = stream;
+            if target.starts_with("/authorize") {
+                let u = url::Url::parse(&format!("http://x{target}")).unwrap();
+                let q = |k: &str| query(&target, k).unwrap_or_else(|| panic!("{k} in {u}"));
+                let loc = format!("{}?code=the-code&state={}", q("redirect_uri"), q("state"));
+                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
+            } else if target == "/token" && body.contains("grant_type=authorization_code") {
+                // Within a minute of expiring: the next use refreshes.
+                let b =
+                    r#"{"access_token":"access-1","refresh_token":"refresh-1","expires_in":30}"#;
+                reply(&mut s, "200 OK", "", b);
+            } else if target == "/token" {
+                assert!(body.contains("refresh_token=refresh-1"), "{body}");
+                let b =
+                    r#"{"access_token":"access-2","refresh_token":"refresh-1","expires_in":3600}"#;
+                reply(&mut s, "200 OK", "", b);
+            } else if target == "/alpha/v1/things" && auth == "Bearer access-2" {
+                reply(&mut s, "200 OK", "", r#"{"alpha":true}"#);
+            } else if target == "/alpha/v1/broken" && auth == "Bearer access-2" {
+                reply(&mut s, "200 OK", "", r#"{"errors":["no"]}"#);
+            } else {
+                reply(&mut s, "401 Unauthorized", "", "{}");
+            }
+        }
+    });
+    let tmp = std::env::temp_dir().join(format!("sesame-handed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let hub = tmp.join("hub");
+    let remote = tmp.join("remote");
+    std::fs::create_dir_all(&remote).unwrap();
+    let at = |config: &std::path::Path, args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        c.args(args).env("SESAME_CONFIG_DIR", config);
+        for (k, _) in std::env::vars() {
+            if k.starts_with("SESAME_TOKEN_") || k == "SESAME_PROVIDERS" {
+                c.env_remove(k);
+            }
+        }
+        c
+    };
+    let hub_cmd = |args: &[&str]| at(&hub, args);
+    let run = |mut c: Command| {
+        let out = c.output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+
+    // The Hub: the provider, its client and the login.
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok, out) = run(hub_cmd(&[
+        "provider",
+        "add",
+        "fake",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/token"),
+        "--api-base",
+        &base,
+        "--host",
+        "127.0.0.1",
+        "--api-header",
+        "X-Fake-Version: 7",
+        "--error-field",
+        "errors",
+        "--service",
+        &format!("name=alpha,api-base={base}/alpha/v1,scope=a.read"),
+    ]));
+    assert!(ok, "{out}");
+    let (ok, out) = run(hub_cmd(&[
+        "client",
+        "fake",
+        "--client-id",
+        "cid",
+        "--no-secret",
+    ]));
+    assert!(ok, "{out}");
+    browser_login(&hub_cmd, &["login", "alpha", "--no-browser"]);
+    // `sesame token <service>` on the Hub refreshes the expiring token.
+    let (ok, out) = run(hub_cmd(&["token", "alpha"]));
+    assert!(ok && out.trim() == "access-2", "{out}");
+    let refreshes = |log: &Arc<Mutex<Vec<String>>>| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("/token ") && l.contains("grant_type=refresh_token"))
+            .count()
+    };
+    assert_eq!(refreshes(&log), 1);
+    let (ok, shown) = run(hub_cmd(&["provider", "show", "fake"]));
+    assert!(ok, "{shown}");
+    let definitions = format!(r#"{{"fake": {shown}}}"#);
+
+    // The other machine: an empty config dir, the token and the definition handed.
+    let remote_cmd = |var: &str, token: &str, args: &[&str]| {
+        let mut c = at(&remote, args);
+        c.env(var, token).env("SESAME_PROVIDERS", &definitions);
+        c
+    };
+    let (ok, out) = run(remote_cmd(
+        "SESAME_TOKEN_ALPHA",
+        "access-2",
+        &["api", "alpha", "/things"],
+    ));
+    assert!(ok && out.contains(r#"{"alpha":true}"#), "{out}");
+    // The provider's variable serves its services too.
+    let (ok, out) = run(remote_cmd(
+        "SESAME_TOKEN_FAKE",
+        "access-2",
+        &["api", "alpha", "/things"],
+    ));
+    assert!(ok && out.contains(r#"{"alpha":true}"#), "{out}");
+    let (ok, out) = run(remote_cmd(
+        "SESAME_TOKEN_ALPHA",
+        "access-2",
+        &["token", "alpha"],
+    ));
+    assert!(ok && out.trim() == "access-2", "{out}");
+    // error_fields apply.
+    let (ok, out) = run(remote_cmd(
+        "SESAME_TOKEN_ALPHA",
+        "access-2",
+        &["api", "alpha", "/broken"],
+    ));
+    assert!(!ok && out.contains("carries `errors`"), "{out}");
+    // The token goes only to the provider's hosts.
+    let (ok, out) = run(remote_cmd(
+        "SESAME_TOKEN_ALPHA",
+        "access-2",
+        &["api", "alpha", "https://evil.example/x"],
+    ));
+    assert!(!ok && out.contains("refusing to send the token"), "{out}");
+    // A refused handed token is not refreshed: its holder hands a new one.
+    let (ok, out) = run(remote_cmd(
+        "SESAME_TOKEN_ALPHA",
+        "access-1",
+        &["api", "alpha", "/things"],
+    ));
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("the token handed in `SESAME_TOKEN_ALPHA` was refused or has expired"),
+        "{out}"
+    );
+    assert_eq!(refreshes(&log), 1, "a handed token was refreshed");
+    assert_eq!(
+        std::fs::read_dir(&remote).unwrap().count(),
+        0,
+        "the handed mode wrote to its config dir"
+    );
+
+    let log = log.lock().unwrap();
+    let calls: Vec<&String> = log
+        .iter()
+        .filter(|l| l.starts_with("/alpha/v1/things "))
+        .collect();
+    assert_eq!(calls.len(), 3, "{log:?}");
+    assert!(calls[0].contains("auth=Bearer access-2 ver=7"), "{log:?}");
+    assert!(calls[2].contains("auth=Bearer access-1 ver=7"), "{log:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

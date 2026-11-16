@@ -127,6 +127,27 @@ sesame logout jira                            # forgets the local token only
   refresh and retry. It exits non-zero on a non-2xx status, and on a 2xx whose
   JSON carries one of the provider's `error_fields` not empty.
 
+- **Handed token**: on a machine that should not hold the login, hand
+  `sesame api` and `sesame token` an access token in the environment, one per
+  provider or service: `SESAME_TOKEN_<NAME>`, the name in upper case with `-`
+  as `_` (`SESAME_TOKEN_GMAIL`, `SESAME_TOKEN_GOOGLE`; a service's variable is
+  used before its provider's). Nothing is read from or written to `sesame.db`,
+  no client is needed and nothing is refreshed; a 401 exits non-zero saying the
+  handed token was refused or has expired, and its holder must hand a new one.
+  The rest is as with a stored token: it goes only to the provider's hosts, and
+  the provider's `api_header`s and `error_fields` apply. A provider that is not
+  built in is defined by `SESAME_PROVIDERS`, a JSON object of `sesame provider
+  show` outputs by provider name. One machine holds the login and refreshes it,
+  so no two rotate each other's refresh token away:
+
+  ```sh
+  # on the machine with the login
+  token=$(sesame token gmail)                     # refreshed if it expires within a minute
+  # on the other, with no sesame.db
+  SESAME_TOKEN_GMAIL=$token sesame api gmail /users/me/profile
+  SESAME_PROVIDERS="{\"acme\": $(sesame provider show acme)}" SESAME_TOKEN_ACME=… sesame api acme /me
+  ```
+
 ## Registering the OAuth apps
 
 Each user (or you, once, for everyone) needs an OAuth client per provider.
