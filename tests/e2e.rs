@@ -2199,3 +2199,169 @@ fn handed_token_without_db() {
     assert!(calls[2].contains("auth=Bearer access-1 ver=7"), "{log:?}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A provider's built-in public client: used while no client is stored, with
+/// no secret, through the device flow only; a stored client replaces it, and
+/// `client --reset` brings it back.
+#[test]
+fn built_in_public_client() {
+    let (port, log) = serve(move |target, body| match target {
+        "/device" => {
+            let id = body
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("client_id="))
+                .unwrap_or_default()
+                .to_string();
+            let b = format!(
+                r#"{{"device_code":"dev-{id}","user_code":"AAAA-BBBB","verification_uri":"https://example.com/device","expires_in":60,"interval":0}}"#
+            );
+            ("200 OK", b)
+        }
+        "/token" => ("200 OK", r#"{"access_token":"tok","scope":"repo"}"#.into()),
+        _ => ("404 Not Found", "{}".into()),
+    });
+    let tmp = std::env::temp_dir().join(format!("sesame-public-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let sesame_in = |args: &[&str], input: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_sesame"))
+            .args(args)
+            .env("SESAME_CONFIG_DIR", &config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+    let sesame = |args: &[&str]| sesame_in(args, "");
+    let in_use = || {
+        let (ok, out) = sesame(&["provider", "show", "pub"]);
+        assert!(ok, "{out}");
+        let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(shown["public_client_id"]["value"], "builtin-id");
+        shown["public_client_id"]["in_use"].as_bool().unwrap()
+    };
+    let line = |out: &str| {
+        out.lines()
+            .find(|l| l.starts_with("pub "))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let token_calls = || {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("/token "))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok, out) = sesame(&[
+        "provider",
+        "add",
+        "pub",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/token"),
+        "--api-base",
+        &base,
+        "--host",
+        "127.0.0.1",
+        "--scope",
+        "repo",
+        "--device-url",
+        &format!("{base}/device"),
+        "--redirect-host",
+        "127.0.0.1",
+        "--public-client-id",
+        "builtin-id",
+    ]);
+    assert!(ok, "{out}");
+
+    // No client stored: the built-in one, with no secret.
+    let (_, out) = sesame(&["providers"]);
+    let l = line(&out);
+    assert!(
+        l.contains("not logged in")
+            && l.contains("built-in client")
+            && l.contains("sesame login pub"),
+        "{out}"
+    );
+    assert!(in_use());
+    let (ok, out) = sesame(&["setup", "pub"]);
+    assert!(ok && out.contains("No setup is needed"), "{out}");
+    let (ok, out) = sesame(&["login", "pub", "--no-browser"]);
+    assert!(ok && out.contains("Logged in to `pub`"), "{out}");
+    let calls = token_calls();
+    assert!(
+        calls.len() == 1
+            && calls[0].contains("device_code=dev-builtin-id")
+            && calls[0].contains("client_id=builtin-id")
+            && !calls[0].contains("client_secret"),
+        "{calls:?}"
+    );
+
+    // --browser with the built-in client: refused before anything is sent.
+    let (ok, out) = sesame(&["login", "pub", "--browser", "--no-browser"]);
+    assert!(
+        !ok && out.contains("only with the device flow") && out.contains("`sesame setup pub`"),
+        "{out}"
+    );
+    assert!(
+        !log.lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.starts_with("/authorize"))
+    );
+
+    // A stored client replaces it, secret and all.
+    let (ok, out) = sesame_in(
+        &["client", "pub", "--client-id", "mine", "--secret-stdin"],
+        "s3cret\n",
+    );
+    assert!(ok, "{out}");
+    let (_, out) = sesame(&["providers"]);
+    assert!(line(&out).contains("your client"), "{out}");
+    assert!(!in_use());
+    let (ok, out) = sesame(&["login", "pub", "--no-browser"]);
+    assert!(ok, "{out}");
+    let calls = token_calls();
+    assert!(
+        calls[1].contains("device_code=dev-mine")
+            && calls[1].contains("client_id=mine")
+            && calls[1].contains("client_secret=s3cret"),
+        "{calls:?}"
+    );
+
+    // --reset: back to the built-in client.
+    let (ok, out) = sesame(&["client", "pub", "--reset"]);
+    assert!(
+        ok && out.contains("login uses the built-in client"),
+        "{out}"
+    );
+    let (_, out) = sesame(&["providers"]);
+    assert!(line(&out).contains("built-in client"), "{out}");
+    assert!(in_use());
+    let (ok, out) = sesame(&["login", "pub", "--no-browser"]);
+    assert!(ok, "{out}");
+    let calls = token_calls();
+    assert!(
+        calls[2].contains("client_id=builtin-id") && !calls[2].contains("client_secret"),
+        "{calls:?}"
+    );
+    let (ok, out) = sesame(&["client", "pub", "--reset"]);
+    assert!(ok && out.contains("There was no stored"), "{out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

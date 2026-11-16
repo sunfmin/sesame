@@ -875,6 +875,10 @@ mod tests {
         }
         for (name, p) in &all {
             effective(name, Some(p), &Fields::new()).unwrap();
+            // Only GitHub ships a public client: the others need a secret,
+            // a platform review, or (Linear) an app not registered yet.
+            let want = (name == "github").then_some("Ov23lixcdQzENmcAaKYU");
+            assert_eq!(p.public_client_id.as_deref(), want, "{name}");
         }
     }
 
@@ -1055,6 +1059,7 @@ mod tests {
                 "not one of localhost, 127.0.0.1",
             ),
             ("device_url", json!("nope"), "device_url"),
+            ("public_client_id", json!(" "), "public_client_id is empty"),
             (
                 "identity_url",
                 json!("https://api.a.example/me"),

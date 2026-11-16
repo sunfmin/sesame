@@ -14,7 +14,7 @@ const FOR_AI: &str = "\
 If you are an AI using sesame for someone:
   1. Run `sesame providers` to see where each provider stands.
   2. For one showing `no client`, run `sesame setup <provider>` and walk the person
-     through its steps. Never ask for a client secret or a token in the chat: the
+     through its steps. One with a `built-in client` (github) needs no setup. Never ask for a client secret or a token in the chat: the
      person runs `sesame client` (or `sesame login --token`) in their own terminal,
      which prompts for it.
   3. Have the person run `sesame login <service>` (or `<provider>`) and approve access
@@ -183,10 +183,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 } else {
                     format!("next: {next}")
                 };
-                println!(
-                    "{name:<12} {state:<24} {source:<16} {next:<28} {}",
-                    p.about
-                );
+                println!("{name:<12} {state:<24} {source:<16} {next:<28} {}", p.about);
                 for (service, svc) in &p.services {
                     let has = token.as_ref().map(oauth::granted).unwrap_or_default();
                     let state = if token.is_some() && svc.scopes.iter().all(|s| has.contains(s)) {
@@ -198,7 +195,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                         (Some(_), "not authorized") => format!("next: sesame login {service}"),
                         _ => String::new(),
                     };
-                    println!("  {service:<10} {state:<24} {:<16} {next:<28} {}", "", svc.about);
+                    println!(
+                        "  {service:<10} {state:<24} {:<16} {next:<28} {}",
+                        "", svc.about
+                    );
                 }
             }
         }

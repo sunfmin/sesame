@@ -16,7 +16,7 @@ sesame api docs /documents/<id>
 sesame api youtube '/channels?part=snippet&mine=true'
 sesame api google https://www.googleapis.com/drive/v3/about?fields=user   # a full URL on the provider's hosts
 sesame api jira /rest/api/3/myself
-sesame login github                          # device flow: prints a code to enter on github.com/login/device
+sesame login github                          # no setup: sesame's built-in client, device flow (a code to enter on github.com/login/device)
 sesame api github /user
 sesame api github /graphql -d '{"query":"{ viewer { login } }"}'
 sesame api jira /rest/api/3/issue -d @issue.json      # -d implies POST; -X, -H, -i as in curl
@@ -106,6 +106,17 @@ sesame logout jira                            # forgets the local token only
   A provider with a `device_url` (github) uses the device flow instead: login
   prints a code to enter on the provider's page, from any machine, and needs no
   client secret; `sesame login <provider> --browser` takes the loopback redirect.
+- **Built-in client**: a provider can ship a public client, a client id with no
+  secret (`public_client_id`; github's is sesame's own OAuth App). Login uses it
+  while you have stored no client of your own, so `sesame login github` works
+  with no setup. Your client, once stored with `sesame client`, is used instead;
+  `sesame client <provider> --reset` forgets it and goes back to the built-in one.
+  `sesame providers` says which is used (`built-in client` or `your client`), and
+  `sesame provider show` marks `public_client_id` with `in_use`. With a
+  `device_url`, the built-in client signs in only through the device flow:
+  GitHub's code exchange on the loopback redirect needs the secret, so `--browser`
+  needs your own client. GitHub's built-in tokens do not expire (refreshing would
+  need the secret).
   A provider with an `identity_url` records who signed in, shown by `sesame providers`.
   A provider that takes only https callbacks (`--redirect https-paste`,
   as slack) uses `https://localhost:<redirect-port>/callback`: nothing listens
@@ -157,7 +168,8 @@ sesame logout jira                            # forgets the local token only
 
 ## Registering the OAuth apps
 
-Each user (or you, once, for everyone) needs an OAuth client per provider.
+github needs none: it has a built-in client. Elsewhere each user (or you, once,
+for everyone) needs an OAuth client per provider; on github your own is optional.
 `sesame setup <provider>` prints the steps, from creating the app on the
 provider's console to the first `sesame api` call; `sesame providers` says
 which providers still need one. The steps are part of each provider's
