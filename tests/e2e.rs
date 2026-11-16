@@ -188,6 +188,25 @@ fn login_call_refresh_logout() {
     let out = sesame(&["token", "fake"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "access-2");
 
+    // `--json`: the token with its expiry, one line; the refresh gave 3600 seconds.
+    let out = sesame(&["token", "fake", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let line = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(line.lines().count(), 1, "{line}");
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["access_token"], "access-2");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expires_at = v["expires_at"]
+        .as_u64()
+        .expect("expires_at in unix seconds");
+    assert!(
+        (now + 3500..=now + 3600).contains(&expires_at),
+        "{expires_at} vs {now}"
+    );
+
     let out = sesame(&["api", "fake", "https://evil.example/steal"])
         .output()
         .unwrap();
@@ -1505,6 +1524,13 @@ fn https_paste_user_token_error_field_pasted_token() {
     assert!(ok_ && out.contains("felix"), "{out}{err}");
     let (_, out, _) = run(&["providers"]);
     assert!(out.contains("logged in (pasted token)"), "{out}");
+    // A pasted token has no known expiry.
+    let (ok_, out, err) = run(&["token", "chat", "--json"]);
+    assert!(ok_, "{err}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+        serde_json::json!({"access_token": "xoxp-pasted", "expires_at": null})
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -2120,6 +2146,17 @@ fn handed_token_without_db() {
         &["token", "alpha"],
     ));
     assert!(ok && out.trim() == "access-2", "{out}");
+    // A handed token's expiry is not told to sesame.
+    let (ok, out) = run(remote_cmd(
+        "SESAME_TOKEN_ALPHA",
+        "access-2",
+        &["token", "alpha", "--json"],
+    ));
+    assert!(ok, "{out}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+        serde_json::json!({"access_token": "access-2", "expires_at": null})
+    );
     // error_fields apply.
     let (ok, out) = run(remote_cmd(
         "SESAME_TOKEN_ALPHA",
