@@ -1,4 +1,5 @@
 mod guide;
+mod handed;
 mod oauth;
 mod providers;
 mod setup;
@@ -86,9 +87,12 @@ enum Cmd {
     },
     /// Forget the stored token.
     Logout { provider: String },
-    /// Print a valid access token, refreshing it if needed (for curl and scripts).
+    /// Print a valid access token, refreshing it if needed (for curl and scripts),
+    /// or the token handed in the environment.
+    #[command(after_help = handed::HELP)]
     Token { provider: String },
-    /// Call the API with the provider's stored token.
+    /// Call the API with the provider's stored token, or one handed in the environment.
+    #[command(after_help = handed::HELP)]
     Api {
         /// A provider, or a service of one (`gmail`), whose API base paths are under.
         provider: String,
@@ -286,11 +290,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             eprintln!("Logged out of `{provider}` (the token of all its services).");
         }
         Cmd::Token { provider } => {
-            let t = providers::find(&provider)?;
-            println!(
-                "{}",
-                oauth::valid_token(&t.provider, &t.p, false)?.access_token
-            );
+            let token = match handed::find(&provider)? {
+                Some((_, h)) => h.token,
+                None => {
+                    let t = providers::find(&provider)?;
+                    oauth::valid_token(&t.provider, &t.p, false)?
+                }
+            };
+            println!("{}", token.access_token);
         }
         Cmd::Api {
             provider,
@@ -330,9 +337,15 @@ fn api(
     data: Option<String>,
     include: bool,
 ) -> Result<ExitCode, String> {
-    let t = providers::find(name)?;
+    let (t, handed) = match handed::find(name)? {
+        Some((t, h)) => (t, Some(h)),
+        None => (providers::find(name)?, None),
+    };
     let (name, p) = (t.provider.as_str(), &t.p);
-    let mut token = oauth::valid_token(name, p, false)?;
+    let mut token = match &handed {
+        Some(h) => h.token.clone(),
+        None => oauth::valid_token(name, p, false)?,
+    };
     let url = resolve(t.api_base(), p, &token, path)?;
     let body = match data.as_deref() {
         None => None,
@@ -379,7 +392,10 @@ fn api(
         req.send().map_err(|e| format!("{url}: {e}"))
     };
     let mut resp = send(&token)?;
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED && token.refresh_token.is_some() {
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+        && handed.is_none()
+        && token.refresh_token.is_some()
+    {
         token = oauth::valid_token(name, p, true)?;
         resp = send(&token)?;
     }
@@ -399,6 +415,12 @@ fn api(
         .unwrap_or_default()
         .to_string();
     let bytes = resp.bytes().map_err(|e| e.to_string())?;
+    if let (Some(h), reqwest::StatusCode::UNAUTHORIZED) = (&handed, status) {
+        eprintln!(
+            "sesame: the token handed in `{}` was refused or has expired; its holder must hand a new one",
+            h.var
+        );
+    }
     if status == reqwest::StatusCode::FORBIDDEN && lacks_scope(&challenge, &bytes) {
         eprintln!("{}", scope_hint(&t, &url));
     }
@@ -468,7 +490,7 @@ fn resolve(
             let id = token
                 .resource_id
                 .as_deref()
-                .ok_or("no site stored; log in again")?;
+                .ok_or("no site stored: log in again, or give a full URL")?;
             base = base.replace("{resource_id}", id);
         }
         let sep = if path.starts_with('/') { "" } else { "/" };
