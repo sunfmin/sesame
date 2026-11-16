@@ -90,7 +90,14 @@ enum Cmd {
     /// Print a valid access token, refreshing it if needed (for curl and scripts),
     /// or the token handed in the environment.
     #[command(after_help = handed::HELP)]
-    Token { provider: String },
+    Token {
+        provider: String,
+        /// Print one JSON line, `{"access_token": "…", "expires_at": <unix seconds>}`,
+        /// instead of the token alone; `expires_at` is null when sesame knows no
+        /// expiry (a pasted token, a handed one).
+        #[arg(long)]
+        json: bool,
+    },
     /// Call the API with the provider's stored token, or one handed in the environment.
     #[command(after_help = handed::HELP)]
     Api {
@@ -289,7 +296,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             Store::open()?.delete_token(&provider)?;
             eprintln!("Logged out of `{provider}` (the token of all its services).");
         }
-        Cmd::Token { provider } => {
+        Cmd::Token { provider, json } => {
             let token = match handed::find(&provider)? {
                 Some((_, h)) => h.token,
                 None => {
@@ -297,7 +304,15 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     oauth::valid_token(&t.provider, &t.p, false)?
                 }
             };
-            println!("{}", token.access_token);
+            if json {
+                let v = serde_json::json!({
+                    "access_token": token.access_token,
+                    "expires_at": token.expires_at,
+                });
+                println!("{v}");
+            } else {
+                println!("{}", token.access_token);
+            }
         }
         Cmd::Api {
             provider,

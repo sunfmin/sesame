@@ -29,6 +29,7 @@ sesame api figma /files/<key>
 sesame api linear /graphql -d '{"query":"{ viewer { id name } }"}'   # GraphQL `errors` exit non-zero
 sesame api hubspot /crm/v3/objects/contacts?limit=1
 curl -H "Authorization: Bearer $(sesame token jira)" ...
+sesame token jira --json                      # {"access_token": "…", "expires_at": <unix seconds or null>}
 sesame providers                              # who you are signed in to, and each service's access
 sesame logout jira                            # forgets the local token only
 ```
@@ -126,6 +127,12 @@ sesame logout jira                            # forgets the local token only
 - **`api`** sends the token only to the provider's `hosts`; a 401 triggers one
   refresh and retry. It exits non-zero on a non-2xx status, and on a 2xx whose
   JSON carries one of the provider's `error_fields` not empty.
+
+- **`token`** prints a valid access token alone, refreshed if it expires within
+  a minute. `--json` prints one JSON line instead,
+  `{"access_token": "…", "expires_at": <unix seconds>}`, so whoever hands the
+  token on knows when it expires; `expires_at` is `null` when sesame knows no
+  expiry (a pasted token, a handed one, or a provider that gave none).
 
 - **Handed token**: on a machine that should not hold the login, hand
   `sesame api` and `sesame token` an access token in the environment, one per
