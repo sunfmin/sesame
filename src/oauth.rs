@@ -39,6 +39,43 @@ pub fn no_client(name: &str) -> String {
     )
 }
 
+/// Whose OAuth client signs in: the person's own, stored with `sesame client`,
+/// or the provider's built-in public one (`public_client_id`, no secret).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClientSource {
+    User,
+    BuiltIn,
+}
+
+impl ClientSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            ClientSource::User => "your client",
+            ClientSource::BuiltIn => "built-in client",
+        }
+    }
+}
+
+/// The client in force for a provider: the stored one if any, else the
+/// built-in public client; `None` when there is neither. The one place that
+/// choice is made.
+pub fn client(
+    store: &Store,
+    name: &str,
+    p: &Provider,
+) -> Result<Option<(Client, ClientSource)>, String> {
+    if let Some(c) = store.client(name)? {
+        return Ok(Some((c, ClientSource::User)));
+    }
+    Ok(p.public_client_id.as_ref().map(|id| {
+        let c = Client {
+            client_id: id.clone(),
+            client_secret: None,
+        };
+        (c, ClientSource::BuiltIn)
+    }))
+}
+
 /// The HTTP client for every request sesame makes; some APIs (GitHub) refuse
 /// a request without a User-Agent.
 pub fn http() -> reqwest::blocking::Client {
@@ -82,7 +119,13 @@ fn wanted(t: &Target, granted: &[String]) -> Vec<String> {
 pub fn login(t: &Target, opts: &LoginOptions) -> Result<Token, String> {
     let (name, p) = (t.provider.as_str(), &t.p);
     let store = Store::open()?;
-    let client = store.client(name)?.ok_or_else(|| no_client(name))?;
+    let (client, source) = client(&store, name, p)?.ok_or_else(|| no_client(name))?;
+    if source == ClientSource::BuiltIn && opts.loopback && p.device_url.is_some() {
+        return Err(format!(
+            "the built-in client of `{name}` signs in only with the device flow; to sign in \
+             through the browser, register your own client: `sesame setup {name}`"
+        ));
+    }
     let before = store.token(name)?.map(|t| granted(&t)).unwrap_or_default();
     let scopes = opts.scopes.clone().unwrap_or_else(|| wanted(t, &before));
     let mut token = match &p.device_url {
@@ -526,7 +569,7 @@ fn pick_resource(token: &mut Token, url: &str, site: Option<&str>) -> Result<(),
 pub fn valid_token(name: &str, p: &Provider, force_refresh: bool) -> Result<Token, String> {
     Store::open()?.locked(|store| {
         let Some(token) = store.token(name)? else {
-            if store.client(name)?.is_none() {
+            if client(store, name, p)?.is_none() {
                 return Err(no_client(name));
             }
             return Err(format!(
@@ -540,7 +583,7 @@ pub fn valid_token(name: &str, p: &Provider, force_refresh: bool) -> Result<Toke
         let refresh = token.refresh_token.clone().ok_or_else(|| {
             format!("`{name}` token expired and has no refresh token; run `sesame login {name}`")
         })?;
-        let client = store.client(name)?.ok_or_else(|| no_client(name))?;
+        let (client, _) = client(store, name, p)?.ok_or_else(|| no_client(name))?;
         let form = vec![
             ("grant_type", "refresh_token".to_string()),
             ("refresh_token", refresh),

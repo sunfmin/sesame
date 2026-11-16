@@ -36,6 +36,21 @@ pub fn render(name: &str, p: &Provider) -> String {
         if p.about.is_empty() { name } else { &p.about }
     );
 
+    if p.public_client_id.is_some() {
+        let only = if p.device_url.is_some() {
+            "\nIt signs in with the device flow; `--browser` needs your own client."
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "No setup is needed: `sesame login {name}` works now, with sesame's built-in client\n\
+             (an app registered for everyone, with no secret).{only}\n\
+             Registering your own app is optional: for more control, or when your organization\n\
+             requires its own app. The steps for that follow. Once your client is stored, login\n\
+             uses it; `sesame client {name} --reset` goes back to the built-in one.\n"
+        );
+    }
     if p.setup.is_empty() {
         step(
             &mut out,
@@ -78,6 +93,11 @@ pub fn render(name: &str, p: &Provider) -> String {
             format!("\nsesame login {s:<10} # adds {about} to the one `{name}` token")
         })
         .collect();
+    let own = if p.public_client_id.is_some() {
+        ", with your own client"
+    } else {
+        ""
+    };
     let (client, login) = if p.device_url.is_some() {
         (
             format!(
@@ -89,7 +109,7 @@ pub fn render(name: &str, p: &Provider) -> String {
                 "sesame login {name}\n\
                  It prints a code and a page: the person opens the page (anywhere, also from a\n\
                  remote machine), enters the code and approves access.\n\
-                 sesame login {name} --browser signs in through the redirect to {callback} instead.{services}"
+                 sesame login {name} --browser signs in through the redirect to {callback} instead{own}.{services}"
             ),
         )
     } else {
@@ -208,6 +228,7 @@ mod tests {
         ] {
             assert!(out.contains(want), "missing {want:?} in:\n{out}");
         }
+        assert!(!out.contains("built-in client"), "{out}");
     }
 
     #[test]
@@ -225,6 +246,10 @@ mod tests {
             "sesame client github --client-id <client id> --no-secret",
             "sesame login github --browser",
             "enters the code",
+            "No setup is needed: `sesame login github` works now",
+            "`--browser` needs your own client",
+            "optional",
+            "sesame client github --reset",
         ] {
             assert!(out.contains(want), "missing {want:?} in:\n{out}");
         }

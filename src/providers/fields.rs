@@ -282,6 +282,18 @@ pub const FIELDS: &[Field] = &[
         look: "the OAuth guide's \"device flow\" section, or the metadata's device_authorization_endpoint",
     },
     Field {
+        name: "public_client_id",
+        flag: "public-client-id",
+        kind: Kind::Name,
+        required: false,
+        help: "The client id of a public client (no secret) that login uses when no client is \
+               stored with `sesame client`. With a `device_url`, it signs in only through the device flow.",
+        question: "Can one published app sign everyone in with no client secret: the device flow, \
+                   or PKCE whose code exchange and refresh both take no secret? If such an app is \
+                   registered for sesame, what is its client id (not a secret)?",
+        look: "the OAuth guide's public client, PKCE, device flow and refresh sections",
+    },
+    Field {
         name: "identity_url",
         flag: "identity-url",
         kind: Kind::Url,
