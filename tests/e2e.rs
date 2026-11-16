@@ -1993,19 +1993,74 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
     assert!(out.contains(r#""id":"1""#), "{out}");
     assert!(expires() > now() + 1700);
 
-    let log = log.lock().unwrap();
-    let refreshes: Vec<_> = log
+    let logged = log.lock().unwrap();
+    let refreshes: Vec<_> = logged
         .iter()
         .filter(|l| l.contains("grant_type=refresh_token"))
         .collect();
-    assert_eq!(refreshes.len(), 1, "{log:?}");
-    assert!(refreshes[0].starts_with("/oauth/v3/token "), "{log:?}");
-    assert!(refreshes[0].contains("client_secret=the-secret"), "{log:?}");
+    assert_eq!(refreshes.len(), 1, "{logged:?}");
+    assert!(refreshes[0].starts_with("/oauth/v3/token "), "{logged:?}");
+    assert!(
+        refreshes[0].contains("client_secret=the-secret"),
+        "{logged:?}"
+    );
     // Before the expiry, not after a 401: each API call went out once, the
     // second already with the refreshed token.
-    let calls: Vec<_> = log.iter().filter(|l| l.starts_with("/crm")).collect();
-    assert_eq!(calls.len(), 2, "{log:?}");
-    assert!(calls[1].contains("Bearer access-2"), "{log:?}");
+    let calls: Vec<_> = logged.iter().filter(|l| l.starts_with("/crm")).collect();
+    assert_eq!(calls.len(), 2, "{logged:?}");
+    assert!(calls[1].contains("Bearer access-2"), "{logged:?}");
+    drop(logged);
+    let refreshes = || {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("grant_type=refresh_token"))
+            .count()
+    };
+
+    // A holder that hands the token on: 1000 seconds left is enough for
+    // `token` alone, not for `--min-life 1700`, which refreshes first.
+    db().execute(
+        "UPDATE tokens SET expires_at = ?1 WHERE provider = 'hubspot'",
+        [now() + 1000],
+    )
+    .unwrap();
+    let token_json = |args: &[&str]| {
+        let (ok, out, err) = run(args);
+        assert!(ok, "{err}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()
+    };
+    let t = token_json(&["token", "hubspot", "--json"]);
+    assert_eq!(t["access_token"], "access-2");
+    assert!(
+        (t["expires_at"].as_i64().unwrap() - now() - 1000).abs() < 30,
+        "{t}"
+    );
+    assert_eq!(refreshes(), 1);
+    let t = token_json(&["token", "hubspot", "--json", "--min-life", "1700"]);
+    assert_eq!(t["access_token"], "access-3");
+    assert!(
+        (t["expires_at"].as_i64().unwrap() - now() - 1800).abs() < 30,
+        "{t}"
+    );
+    assert_eq!(expires(), t["expires_at"].as_i64().unwrap(), "stored");
+    assert_eq!(refreshes(), 2);
+    // Fresh enough now: no refresh. Asked for more than the provider gives:
+    // refreshed, and printed all the same with the expiry it has.
+    let t = token_json(&["token", "hubspot", "--json", "--min-life", "1700"]);
+    assert_eq!(t["access_token"], "access-3");
+    assert_eq!(refreshes(), 2);
+    let t = token_json(&["token", "hubspot", "--json", "--min-life", "3600"]);
+    assert_eq!(t["access_token"], "access-4");
+    assert!(
+        (t["expires_at"].as_i64().unwrap() - now() - 1800).abs() < 30,
+        "{t}"
+    );
+    assert_eq!(refreshes(), 3);
+
+    let (ok, out, err) = run(&["token", "--help"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("--min-life <SECONDS>"), "{out}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -2157,6 +2212,18 @@ fn handed_token_without_db() {
         serde_json::from_str::<serde_json::Value>(&out).unwrap(),
         serde_json::json!({"access_token": "access-2", "expires_at": null})
     );
+    // `--min-life` refreshes nothing for a handed token: it is printed as it is.
+    let (ok, out) = run(remote_cmd(
+        "SESAME_TOKEN_ALPHA",
+        "access-2",
+        &["token", "alpha", "--json", "--min-life", "1700"],
+    ));
+    assert!(ok, "{out}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+        serde_json::json!({"access_token": "access-2", "expires_at": null})
+    );
+    assert_eq!(refreshes(&log), 1, "a handed token was refreshed");
     // error_fields apply.
     let (ok, out) = run(remote_cmd(
         "SESAME_TOKEN_ALPHA",

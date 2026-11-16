@@ -101,6 +101,13 @@ enum Cmd {
         /// expiry (a pasted token, a handed one).
         #[arg(long)]
         json: bool,
+        /// Refresh the stored token first where it expires within these
+        /// seconds (60 without it), for a holder that hands it on and needs
+        /// it to last. The provider's new token is printed even where it
+        /// lasts less: its expiry (`--json`) says how long. A handed token is
+        /// printed as it is.
+        #[arg(long, value_name = "SECONDS")]
+        min_life: Option<u64>,
     },
     /// Call the API with the provider's stored token, or one handed in the environment.
     #[command(after_help = handed::HELP)]
@@ -323,12 +330,20 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             Store::open()?.delete_token(&provider)?;
             eprintln!("Logged out of `{provider}` (the token of all its services).");
         }
-        Cmd::Token { provider, json } => {
+        Cmd::Token {
+            provider,
+            json,
+            min_life,
+        } => {
             let token = match handed::find(&provider)? {
                 Some((_, h)) => h.token,
                 None => {
                     let t = providers::find(&provider)?;
-                    oauth::valid_token(&t.provider, &t.p, false)?
+                    oauth::valid_token(
+                        &t.provider,
+                        &t.p,
+                        oauth::Refresh::Within(min_life.unwrap_or(oauth::MIN_LIFE)),
+                    )?
                 }
             };
             if json {
@@ -386,7 +401,7 @@ fn api(
     let (name, p) = (t.provider.as_str(), &t.p);
     let mut token = match &handed {
         Some(h) => h.token.clone(),
-        None => oauth::valid_token(name, p, false)?,
+        None => oauth::valid_token(name, p, oauth::Refresh::Within(oauth::MIN_LIFE))?,
     };
     let url = resolve(t.api_base(), p, &token, path)?;
     let body = match data.as_deref() {
@@ -438,7 +453,7 @@ fn api(
         && handed.is_none()
         && token.refresh_token.is_some()
     {
-        token = oauth::valid_token(name, p, true)?;
+        token = oauth::valid_token(name, p, oauth::Refresh::Now)?;
         resp = send(&token)?;
     }
     let status = resp.status();
