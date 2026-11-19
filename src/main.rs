@@ -4,6 +4,9 @@ mod oauth;
 mod providers;
 mod setup;
 mod store;
+// build.rs runs it to stamp the version; compiled here too, for its tests.
+#[cfg_attr(not(test), allow(dead_code))]
+mod version;
 
 use clap::{Parser, Subcommand};
 use std::io::{IsTerminal, Read, Write};
@@ -26,7 +29,7 @@ If you are an AI using sesame for someone:
 
 /// Sign in to SaaS APIs from the terminal and call them with the stored token.
 #[derive(Parser)]
-#[command(name = "sesame", version, before_help = FOR_AI)]
+#[command(name = "sesame", version = env!("SESAME_VERSION"), before_help = FOR_AI)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
