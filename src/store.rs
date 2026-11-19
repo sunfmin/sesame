@@ -3,12 +3,14 @@
 //! names one with `SESAME_1PASSWORD_VAULT`, a 1Password vault written through
 //! a service account (`vault`, docs/adr/0001). The rest of sesame sees one
 //! `Store` and does not know which.
+mod migrate;
 mod sqlite;
 mod vault;
 
 use crate::providers::Fields;
 use std::collections::BTreeMap;
 
+pub use migrate::migrate;
 pub use vault::take_token;
 
 #[derive(Debug, Clone, PartialEq)]

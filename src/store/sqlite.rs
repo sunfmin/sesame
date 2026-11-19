@@ -214,6 +214,16 @@ impl Sqlite {
             .map_err(|e| self.err(e))
     }
 
+    /// The providers with a stored client or token.
+    pub fn logins(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT provider FROM clients UNION SELECT provider FROM tokens ORDER BY 1")
+            .map_err(|e| self.err(e))?;
+        let rows = stmt.query_map([], |r| r.get(0)).map_err(|e| self.err(e))?;
+        rows.collect::<Result<_, _>>().map_err(|e| self.err(e))
+    }
+
     /// Every provider's stored fields, by provider name.
     pub fn provider_fields(&self) -> Result<BTreeMap<String, Fields>, String> {
         let mut stmt = self

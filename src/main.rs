@@ -44,6 +44,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Box<ProviderCmd>,
     },
+    /// Move what sesame keeps from one store to another.
+    Store {
+        #[command(subcommand)]
+        cmd: StoreCmd,
+    },
     /// Print the steps to register a provider's OAuth app and get to a working login.
     Setup { provider: String },
     /// Store your own OAuth client (app) to sign in to a provider with, in place
@@ -131,6 +136,16 @@ enum Cmd {
         #[arg(short = 'i', long)]
         include: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum StoreCmd {
+    /// Copy every client, token and provider field in sesame.db into the
+    /// 1Password vault of `SESAME_1PASSWORD_VAULT`, then rename sesame.db
+    /// (not delete it). Overwrites nothing: what the vault already holds for a
+    /// provider is reported as a conflict. Run it again to go on after a run
+    /// cut short; once everything is copied it writes nothing.
+    Migrate,
 }
 
 #[derive(Subcommand)]
@@ -237,6 +252,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             ProviderCmd::Discover { url } => print!("{}", guide::discover(&url)?),
             ProviderCmd::Export { name } => print!("{}", providers::export(&name)?),
         },
+        Cmd::Store {
+            cmd: StoreCmd::Migrate,
+        } => store::migrate()?,
         Cmd::Setup { provider } => {
             let t = providers::find(&provider)?;
             print!("{}", setup::render(&t.provider, &t.p));
