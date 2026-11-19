@@ -133,6 +133,10 @@ impl Vault {
         Ok(Some(Vault { name, token }))
     }
 
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Runs `op` with `args`, `input` on its stdin, the token in its
     /// environment; its stdout.
     fn op(&self, args: &[&str], input: Option<&[u8]>) -> Result<String, OpError> {
@@ -353,10 +357,24 @@ impl Vault {
     }
 
     pub fn save_client(&self, provider: &str, c: &Client) -> Result<(), String> {
+        self.save_login(provider, Some(c), None)
+    }
+
+    /// Stores whichever of the provider's client and token are given, in one
+    /// write (none if nothing changes).
+    pub fn save_login(
+        &self,
+        provider: &str,
+        c: Option<&Client>,
+        t: Option<&Token>,
+    ) -> Result<(), String> {
         self.update(&title(provider), is_provider_field, |k| {
-            k.retain(|l, _| !CLIENT_FIELDS.contains(&l.as_str()));
-            put(k, CLIENT_ID, false, Some(c.client_id.clone()));
-            put(k, CLIENT_SECRET, true, c.client_secret.clone());
+            if let Some(c) = c {
+                put_client(k, c);
+            }
+            if let Some(t) = t {
+                put_token(k, t);
+            }
         })
     }
 
@@ -397,17 +415,7 @@ impl Vault {
     }
 
     pub fn save_token(&self, provider: &str, t: &Token) -> Result<(), String> {
-        self.update(&title(provider), is_provider_field, |k| {
-            k.retain(|l, _| !TOKEN_FIELDS.contains(&l.as_str()));
-            put(k, ACCESS_TOKEN, true, Some(t.access_token.clone()));
-            put(k, REFRESH_TOKEN, true, t.refresh_token.clone());
-            put(k, EXPIRES_AT, false, t.expires_at.map(|e| e.to_string()));
-            put(k, SCOPE, false, t.scope.clone());
-            put(k, RESOURCE_ID, false, t.resource_id.clone());
-            put(k, RESOURCE_NAME, false, t.resource_name.clone());
-            put(k, ACCOUNT, false, t.account.clone());
-            put(k, PASTED, false, t.pasted.then(|| "true".into()));
-        })
+        self.save_login(provider, None, Some(t))
     }
 
     pub fn delete_token(&self, provider: &str) -> Result<(), String> {
@@ -433,13 +441,21 @@ impl Vault {
 
     /// Replaces the provider's stored fields; none removes its field.
     pub fn save_provider_fields(&self, provider: &str, fields: &Fields) -> Result<(), String> {
-        let value = (!fields.is_empty()).then(|| Value::Object(fields.clone()).to_string());
+        self.save_many_provider_fields(&BTreeMap::from([(provider.to_string(), fields.clone())]))
+    }
+
+    /// Replaces the stored fields of each provider in `all`, in one write.
+    pub fn save_many_provider_fields(&self, all: &BTreeMap<String, Fields>) -> Result<(), String> {
         self.update(
             DEFINITIONS,
             |_| true,
             |k| {
-                k.remove(provider);
-                put(k, provider, false, value);
+                for (provider, fields) in all {
+                    k.remove(provider);
+                    let value =
+                        (!fields.is_empty()).then(|| Value::Object(fields.clone()).to_string());
+                    put(k, provider, false, value);
+                }
             },
         )
     }
@@ -452,6 +468,24 @@ fn title(provider: &str) -> String {
 
 fn is_provider_field(label: &str) -> bool {
     CLIENT_FIELDS.contains(&label) || TOKEN_FIELDS.contains(&label)
+}
+
+fn put_client(k: &mut Kept, c: &Client) {
+    k.retain(|l, _| !CLIENT_FIELDS.contains(&l.as_str()));
+    put(k, CLIENT_ID, false, Some(c.client_id.clone()));
+    put(k, CLIENT_SECRET, true, c.client_secret.clone());
+}
+
+fn put_token(k: &mut Kept, t: &Token) {
+    k.retain(|l, _| !TOKEN_FIELDS.contains(&l.as_str()));
+    put(k, ACCESS_TOKEN, true, Some(t.access_token.clone()));
+    put(k, REFRESH_TOKEN, true, t.refresh_token.clone());
+    put(k, EXPIRES_AT, false, t.expires_at.map(|e| e.to_string()));
+    put(k, SCOPE, false, t.scope.clone());
+    put(k, RESOURCE_ID, false, t.resource_id.clone());
+    put(k, RESOURCE_NAME, false, t.resource_name.clone());
+    put(k, ACCOUNT, false, t.account.clone());
+    put(k, PASTED, false, t.pasted.then(|| "true".into()));
 }
 
 fn put(k: &mut Kept, label: &str, concealed: bool, value: Option<String>) {
