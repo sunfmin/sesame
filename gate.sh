@@ -4,4 +4,5 @@ set -e
 cd "$(dirname "$0")"
 cargo fmt --all --check
 cargo clippy --all-targets --quiet -- -D warnings
-cargo test --quiet
+# The tests, measured against .slimfit/baseline.json.
+slimfit check

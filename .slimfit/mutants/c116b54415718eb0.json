@@ -1,0 +1,32 @@
+{
+  "tree": "679a80dfccb80cf5544438194ea98d5eda828c3c+4e9821968b0aebfc",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/api.rs:86:20: delete ! in Call::run",
+        "why": "a caller's own header must override the provider's default header",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/api.rs:92:20: delete ! in Call::run",
+        "why": "a JSON body gets Content-Type only when the caller gave none",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/api.rs:100:26: replace == with != in Call::run",
+        "why": "only a 401 triggers the one token refresh and retry",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/api.rs:101:13: replace && with || in Call::run",
+        "why": "a handed-in token is never refreshed on 401",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/api.rs:157:5: replace lacks_scope -> bool with false",
+        "why": "a 403 for a missing scope must print the scope hint",
+        "outcome": "killed"
+      }
+    ]
+  }
+}

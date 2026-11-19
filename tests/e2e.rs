@@ -515,9 +515,15 @@ fn fake_basic_provider() -> (u16, Arc<Mutex<Vec<String>>>) {
                     access = "access-1-revoked".into();
                     reply(&mut s, "401 Unauthorized", "", "{}");
                 } else {
+                    // `/types` answers the Content-Types it was sent instead.
+                    let name = if target.ends_with("/types") {
+                        "content-type"
+                    } else {
+                        "fake-version"
+                    };
                     let versions: Vec<_> = headers
                         .iter()
-                        .filter(|(k, _)| k == "fake-version")
+                        .filter(|(k, _)| k == name)
                         .map(|(_, v)| v.as_str())
                         .collect();
                     reply(&mut s, "200 OK", "", &format!("{versions:?}"));
@@ -629,6 +635,24 @@ fn basic_auth_provider_without_scopes() {
     assert_eq!(
         run(&["api", "fake", "/search", "-H", "fake-version: 2022-06-28"]).trim(),
         r#"["2022-06-28"]"#
+    );
+    // A body is sent as JSON, unless a -H gives its Content-Type.
+    assert_eq!(
+        run(&["api", "fake", "/types", "-d", "{}"]).trim(),
+        r#"["application/json"]"#
+    );
+    assert_eq!(
+        run(&[
+            "api",
+            "fake",
+            "/types",
+            "-d",
+            "a=b",
+            "-H",
+            "content-type: text/plain"
+        ])
+        .trim(),
+        r#"["text/plain"]"#
     );
     assert_eq!(run(&["token", "fake"]).trim(), "access-2");
     assert!(run(&["providers"]).contains("logged in (Acme Space)"));
