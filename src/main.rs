@@ -1,10 +1,10 @@
 mod api;
 mod guide;
-mod handed;
 mod oauth;
 mod providers;
 mod refresh;
 mod setup;
+mod source;
 mod store;
 // build.rs runs it to stamp the version; compiled here too, for its tests.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -104,7 +104,7 @@ enum Cmd {
     Logout { provider: String },
     /// Print a valid access token, refreshing it if needed (for curl and scripts),
     /// or the token handed in the environment.
-    #[command(after_help = handed::HELP)]
+    #[command(after_help = source::HELP)]
     Token {
         provider: String,
         /// Print one JSON line, `{"access_token": "…", "expires_at": <unix seconds>}`,
@@ -121,7 +121,7 @@ enum Cmd {
         min_life: Option<u64>,
     },
     /// Call the API with the provider's stored token, or one handed in the environment.
-    #[command(after_help = handed::HELP)]
+    #[command(after_help = source::HELP)]
     Api(api::Call),
 }
 
@@ -328,20 +328,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             json,
             min_life,
         } => {
-            let token = match handed::find(&provider)? {
-                Some((_, h)) => h.token,
-                None => {
-                    let store = Store::open()?;
-                    let t = providers::find(&store, &provider)?;
-                    let within = min_life.unwrap_or(refresh::MIN_LIFE);
-                    refresh::valid_token(
-                        &store,
-                        &t.provider,
-                        &t.p,
-                        refresh::Refresh::Within(within),
-                    )?
-                }
-            };
+            let (t, source) = source::find(&provider, Store::open)?;
+            let token = source.token(&t, min_life.unwrap_or(refresh::MIN_LIFE))?;
             if json {
                 let v = serde_json::json!({
                     "access_token": token.access_token,

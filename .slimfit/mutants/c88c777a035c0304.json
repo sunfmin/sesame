@@ -1,0 +1,32 @@
+{
+  "tree": "8feeafdf77507f9b11a9b051dc3b19b809821eb2+d1fba762150c532c",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/source.rs:75:34: replace match guard token.refresh_token.is_some() with true in Source::refused_with",
+        "why": "refresh only with a refresh token: the new rule's heart",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/source.rs:75:34: replace match guard token.refresh_token.is_some() with false in Source::refused_with",
+        "why": "a stored token with a refresh token must be retried",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/source.rs:70:9: replace Source::refused_with -> Result<Refused, String> with Ok(Default::default())",
+        "why": "the whole refused answer",
+        "outcome": "unviable"
+      },
+      {
+        "name": "src/source.rs:48:9: replace Source::token -> Result<Token, String> with Ok(Default::default())",
+        "why": "both commands take their token here",
+        "outcome": "unviable"
+      },
+      {
+        "name": "src/api.rs:85:26: replace == with != in Call::run",
+        "why": "api asks the source only on a 401",
+        "outcome": "killed"
+      }
+    ]
+  }
+}
