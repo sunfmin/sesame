@@ -312,8 +312,8 @@ fn resolve(mut user: BTreeMap<String, Fields>) -> Result<BTreeMap<String, Provid
     Ok(map)
 }
 
-pub fn all() -> Result<BTreeMap<String, Provider>, String> {
-    resolve(stored(&Store::open()?)?)
+pub fn all(store: &Store) -> Result<BTreeMap<String, Provider>, String> {
+    resolve(stored(store)?)
 }
 
 /// Keeps of `user` only the fields that change `built_in`: a value equal to
@@ -381,8 +381,8 @@ impl Target {
     }
 }
 
-pub fn find(name: &str) -> Result<Target, String> {
-    find_in(all()?, name)
+pub fn find(store: &Store, name: &str) -> Result<Target, String> {
+    find_in(all(store)?, name)
 }
 
 /// Every provider in force from definitions handed in, not from `sesame.db`:
@@ -447,7 +447,7 @@ fn check_name(what: &str, name: &str) -> Result<(), String> {
 }
 
 /// `sesame provider add`: a new provider, all of whose fields are the person's.
-pub fn add(name: &str, mut fields: Fields) -> Result<(), String> {
+pub fn add(store: &Store, name: &str, mut fields: Fields) -> Result<(), String> {
     check_name("provider", name)?;
     if built_in::all().contains_key(name) {
         return Err(format!(
@@ -456,7 +456,6 @@ pub fn add(name: &str, mut fields: Fields) -> Result<(), String> {
     }
     // A new provider has no service to drop.
     fields.retain(|_, v| !v.is_null());
-    let store = Store::open()?;
     store.locked(|s| {
         let mut all = stored(s)?;
         if all.contains_key(name) {
@@ -473,9 +472,8 @@ pub fn add(name: &str, mut fields: Fields) -> Result<(), String> {
 /// `sesame provider set`: changes the given fields; a service's given keys
 /// replace only those of that service. For a built-in provider only the
 /// fields that differ from the built-in definition are stored.
-pub fn set(name: &str, fields: Fields) -> Result<(), String> {
+pub fn set(store: &Store, name: &str, fields: Fields) -> Result<(), String> {
     let built_in = built_in::all().remove(name);
-    let store = Store::open()?;
     store.locked(|s| {
         let mut all = stored(s)?;
         let mut user = match (all.remove(name), &built_in) {
@@ -515,11 +513,11 @@ pub fn set(name: &str, fields: Fields) -> Result<(), String> {
 
 /// The built-in definition of `name`, if any, its stored fields, and the
 /// definition in force; an error for a name that is neither.
-fn layers(name: &str) -> Result<(Option<Provider>, Fields, Provider), String> {
+fn layers(store: &Store, name: &str) -> Result<(Option<Provider>, Fields, Provider), String> {
     let built_in = built_in::all().remove(name);
-    let user = stored(&Store::open()?)?.remove(name).unwrap_or_default();
+    let user = stored(store)?.remove(name).unwrap_or_default();
     if built_in.is_none() && user.is_empty() {
-        return Err(unknown(name, &all()?));
+        return Err(unknown(name, &all(store)?));
     }
     let p = effective(name, built_in.as_ref(), &user)?;
     Ok((built_in, user, p))
@@ -531,9 +529,9 @@ fn layers(name: &str) -> Result<(Option<Provider>, Fields, Provider), String> {
 /// Each service is its own field, `services.<name>`, as `sesame.db` keeps it.
 /// `public_client_id` also says whether login uses it (`in_use`): not while
 /// the person has a client of their own stored.
-pub fn show(name: &str) -> Result<Value, String> {
-    let (built_in, user, p) = layers(name)?;
-    let in_use = crate::oauth::client(&Store::open()?, name, &p)?
+pub fn show(store: &Store, name: &str) -> Result<Value, String> {
+    let (built_in, user, p) = layers(store, name)?;
+    let in_use = crate::oauth::client(store, name, &p)?
         .is_some_and(|(_, s)| s == crate::oauth::ClientSource::BuiltIn);
     let from = |k: &str| {
         if user.contains_key(k) {
@@ -567,8 +565,8 @@ pub fn show(name: &str) -> Result<Value, String> {
 /// `sesame provider export`: the `sesame provider add` command that makes
 /// this definition again in another `sesame.db`: every field of the table
 /// that is not its default, and every field the person gave.
-pub fn export(name: &str) -> Result<String, String> {
-    let (built_in, user, p) = layers(name)?;
+pub fn export(store: &Store, name: &str) -> Result<String, String> {
+    let (built_in, user, p) = layers(store, name)?;
     let values = as_fields(&p);
     let defaults = defaults();
     let mut out = String::new();
@@ -597,9 +595,8 @@ pub fn export(name: &str) -> Result<String, String> {
 /// `sesame provider rm`: forgets the person's fields. A provider they added is
 /// gone; a built-in one is back to its built-in definition. Returns what
 /// happened, for the person.
-pub fn remove(name: &str) -> Result<String, String> {
+pub fn remove(store: &Store, name: &str) -> Result<String, String> {
     let is_built_in = built_in::all().contains_key(name);
-    let store = Store::open()?;
     let had = store.locked(|s| {
         let had = s.provider_fields()?.contains_key(name);
         s.delete_provider_fields(name)?;
@@ -609,7 +606,7 @@ pub fn remove(name: &str) -> Result<String, String> {
         (true, true) => Ok(format!("`{name}` is back to its built-in definition.")),
         (true, false) => Ok(format!("`{name}` already has its built-in definition.")),
         (false, true) => Ok(format!("Removed the provider `{name}`.")),
-        (false, false) => Err(unknown(name, &all()?)),
+        (false, false) => Err(unknown(name, &all(store)?)),
     }
 }
 

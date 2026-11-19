@@ -3,9 +3,11 @@
 //! the request, refreshes and retries once on a 401, says which login adds a
 //! missing scope on a 403, and prints the answer.
 
+use crate::handed::{self, Handed};
+use crate::oauth;
 use crate::providers::{self, Provider, Target};
-use crate::store::Token;
-use crate::{handed, oauth};
+use crate::refresh::{self, Refresh};
+use crate::store::{Store, Token};
 use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 
@@ -42,14 +44,19 @@ impl Call {
             include,
         } = self;
         let (name, path, headers) = (provider.as_str(), path.as_str(), headers.as_slice());
-        let (t, handed) = match handed::find(name)? {
-            Some((t, h)) => (t, Some(h)),
-            None => (providers::find(name)?, None),
+        let (t, holder) = match handed::find(name)? {
+            Some((t, h)) => (t, Holder::Handed(h)),
+            None => {
+                let store = Store::open()?;
+                (providers::find(&store, name)?, Holder::Store(store))
+            }
         };
         let (name, p) = (t.provider.as_str(), &t.p);
-        let mut token = match &handed {
-            Some(h) => h.token.clone(),
-            None => oauth::valid_token(name, p, oauth::Refresh::Within(oauth::MIN_LIFE))?,
+        let mut token = match &holder {
+            Holder::Handed(h) => h.token.clone(),
+            Holder::Store(s) => {
+                refresh::valid_token(s, name, p, Refresh::Within(refresh::MIN_LIFE))?
+            }
         };
         let url = resolve(t.api_base(), p, &token, path)?;
         let body = match data.as_deref() {
@@ -97,11 +104,11 @@ impl Call {
             req.send().map_err(|e| format!("{url}: {e}"))
         };
         let mut resp = send(&token)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
-            && handed.is_none()
+        if let Holder::Store(s) = &holder
+            && resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && token.refresh_token.is_some()
         {
-            token = oauth::valid_token(name, p, oauth::Refresh::Now)?;
+            token = refresh::valid_token(s, name, p, Refresh::Now)?;
             resp = send(&token)?;
         }
         let status = resp.status();
@@ -120,7 +127,7 @@ impl Call {
             .unwrap_or_default()
             .to_string();
         let bytes = resp.bytes().map_err(|e| e.to_string())?;
-        if let (Some(h), reqwest::StatusCode::UNAUTHORIZED) = (&handed, status) {
+        if let (Holder::Handed(h), reqwest::StatusCode::UNAUTHORIZED) = (&holder, status) {
             eprintln!(
                 "sesame: the token handed in `{}` was refused or has expired; its holder must hand a new one",
                 h.var
@@ -149,6 +156,13 @@ impl Call {
         }
         Ok(ExitCode::SUCCESS)
     }
+}
+
+/// Where the call's token comes from: the environment, or the store, opened
+/// once for the call and its refresh.
+enum Holder {
+    Handed(Handed),
+    Store(Store),
 }
 
 /// A 403 for a token that lacks a scope: RFC 6750's `insufficient_scope`

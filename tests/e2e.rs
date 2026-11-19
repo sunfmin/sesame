@@ -3,6 +3,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// One request: its target, its headers (names lowercased) and its body.
@@ -968,28 +969,18 @@ fn linear_scopes_daily_refresh_graphql_errors() {
             String::from_utf8_lossy(&out.stderr).to_string(),
         )
     };
-    let db = || rusqlite::Connection::open(config.join("sesame.db")).unwrap();
-    let stored = || {
-        db().query_row(
-            "SELECT refresh_token, expires_at FROM tokens WHERE provider = 'linear'",
-            [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-        )
-        .unwrap()
-    };
     let now = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64
     };
-    // A day has passed: the stored access token is past its expiry.
-    let a_day_later = || {
-        db().execute(
-            "UPDATE tokens SET expires_at = ?1 WHERE provider = 'linear'",
-            [now() - 1],
-        )
-        .unwrap();
+    // The stored token's expiry, read as `token --json` prints it.
+    let expires = || {
+        let (ok, out, err) = run(&["token", "linear", "--json"]);
+        assert!(ok, "{err}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        v["expires_at"].as_i64().unwrap()
     };
 
     // 8752 is linear's fixed port; the test takes a free one so runs in
@@ -1056,9 +1047,7 @@ fn linear_scopes_daily_refresh_graphql_errors() {
     assert!(status.success(), "login failed: {rest}");
     assert!(rest.contains("Logged in to `linear` (Felix)"), "{rest}");
 
-    let (refresh, expires) = stored();
-    assert_eq!(refresh, "refresh-1");
-    assert!((expires - now() - 86399).abs() < 60, "{expires}");
+    assert!((expires() - now() - 86399).abs() < 60, "{}", expires());
     let (_, out, _) = run(&["providers"]);
     assert!(out.contains("logged in (Felix)"), "{out}");
 
@@ -1067,14 +1056,18 @@ fn linear_scopes_daily_refresh_graphql_errors() {
     assert!(ok, "{err}");
     assert!(out.contains("u1"), "{out}");
 
-    // Two days in a row: each refresh rotates the refresh token and keeps the new one.
+    // Two days in a row: each refresh rotates the refresh token and keeps
+    // the new one (the fake takes only the latest). A token of 86399 seconds
+    // does not last a day more, so `--min-life` a day refreshes it as a day
+    // passing would; refresh on expiry is `hubspot_…`'s and `refresh::tests`'.
     for day in 2..=3 {
-        a_day_later();
+        let (ok, out, err) = run(&["token", "linear", "--min-life", "86400"]);
+        assert!(ok, "day {day}: {err}");
+        assert_eq!(out.trim(), format!("access-{day}"));
         let (ok, out, err) = run(&["api", "linear", "/graphql", "-d", query]);
         assert!(ok, "day {day}: {err}");
         assert!(out.contains("u1"), "{out}");
-        assert_eq!(stored().0, format!("refresh-{day}"));
-        assert!(stored().1 > now() + 86000);
+        assert!(expires() > now() + 86000);
     }
 
     let (ok, out, err) = run(&[
@@ -1807,11 +1800,15 @@ fn services_share_one_token() {
 /// A HubSpot-shaped fake: the code is exchanged and refreshed at
 /// `/oauth/v3/token` with the client credentials in the form body, access
 /// tokens last 30 minutes, and the account is the number `portalId`.
-fn fake_hubspot() -> (u16, Arc<Mutex<Vec<String>>>) {
+/// The fake HubSpot, its request log, and the seconds the tokens it issues
+/// from now on last (1800 until the test changes it).
+fn fake_hubspot() -> (u16, Arc<Mutex<Vec<String>>>, Arc<AtomicU64>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let log = Arc::new(Mutex::new(Vec::new()));
     let log2 = log.clone();
+    let lasts = Arc::new(AtomicU64::new(1800));
+    let lasts2 = lasts.clone();
     std::thread::spawn(move || {
         let mut n = 1;
         for stream in listener.incoming().flatten() {
@@ -1820,8 +1817,9 @@ fn fake_hubspot() -> (u16, Arc<Mutex<Vec<String>>>) {
             log2.lock().unwrap().push(format!("{target} {auth} {body}"));
             let mut s = stream;
             let token = |n: i32| {
+                let lasts = lasts2.load(Ordering::SeqCst);
                 format!(
-                    r#"{{"access_token":"access-{n}","refresh_token":"refresh-1","expires_in":1800,"hub_id":247935561,"token_type":"bearer"}}"#
+                    r#"{{"access_token":"access-{n}","refresh_token":"refresh-1","expires_in":{lasts},"hub_id":247935561,"token_type":"bearer"}}"#
                 )
             };
             if target.starts_with("/oauth/authorize") {
@@ -1863,7 +1861,7 @@ fn fake_hubspot() -> (u16, Arc<Mutex<Vec<String>>>) {
             }
         }
     });
-    (port, log)
+    (port, log, lasts)
 }
 
 /// Someone who added `hubspot` themselves (`sesame provider add`, every field
@@ -1873,7 +1871,7 @@ fn fake_hubspot() -> (u16, Arc<Mutex<Vec<String>>>) {
 /// endpoint with the credentials in the body. `setup` prints the built-in's steps.
 #[test]
 fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
-    let (port, log) = fake_hubspot();
+    let (port, log, lasts) = fake_hubspot();
     let tmp = std::env::temp_dir().join(format!("sesame-hubspot-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let config = tmp.join("config");
@@ -1992,47 +1990,49 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
     let (_, out, _) = run(&["providers"]);
     assert!(out.contains("logged in (247935561)"), "{out}");
 
-    let expires = || {
-        db().query_row(
-            "SELECT expires_at FROM tokens WHERE provider = 'hubspot'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap()
+    let token_json = |args: &[&str]| {
+        let (ok, out, err) = run(args);
+        assert!(ok, "{err}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()
     };
-    assert!((expires() - now() - 1800).abs() < 60, "{}", expires());
+    let expires = |t: &serde_json::Value| t["expires_at"].as_i64().unwrap();
+    let t = token_json(&["token", "hubspot", "--json"]);
+    assert!((expires(&t) - now() - 1800).abs() < 60, "{t}");
 
     let (ok, out, err) = run(&["api", "hubspot", "/crm/v3/objects/contacts?limit=1"]);
     assert!(ok, "{err}");
     assert!(out.contains(r#""id":"1""#), "{out}");
 
-    // 29 and a half minutes later: the token has 30 seconds left and is refreshed first.
-    db().execute(
-        "UPDATE tokens SET expires_at = ?1 WHERE provider = 'hubspot'",
-        [now() + 30],
-    )
-    .unwrap();
+    // A token with 30 seconds left (what the fake gives for the next refresh,
+    // which `--min-life` asks for) is refreshed before the call.
+    lasts.store(30, Ordering::SeqCst);
+    let t = token_json(&["token", "hubspot", "--json", "--min-life", "3600"]);
+    assert_eq!(t["access_token"], "access-2");
+    assert!((expires(&t) - now() - 30).abs() < 30, "{t}");
+    lasts.store(1800, Ordering::SeqCst);
     let (ok, out, err) = run(&["api", "hubspot", "/crm/v3/objects/contacts?limit=1"]);
     assert!(ok, "{err}");
     assert!(out.contains(r#""id":"1""#), "{out}");
-    assert!(expires() > now() + 1700);
+    let t = token_json(&["token", "hubspot", "--json"]);
+    assert_eq!(t["access_token"], "access-3");
+    assert!(expires(&t) > now() + 1700, "{t}");
 
     let logged = log.lock().unwrap();
     let refreshes: Vec<_> = logged
         .iter()
         .filter(|l| l.contains("grant_type=refresh_token"))
         .collect();
-    assert_eq!(refreshes.len(), 1, "{logged:?}");
-    assert!(refreshes[0].starts_with("/oauth/v3/token "), "{logged:?}");
+    assert_eq!(refreshes.len(), 2, "{logged:?}");
+    assert!(refreshes[1].starts_with("/oauth/v3/token "), "{logged:?}");
     assert!(
-        refreshes[0].contains("client_secret=the-secret"),
+        refreshes[1].contains("client_secret=the-secret"),
         "{logged:?}"
     );
     // Before the expiry, not after a 401: each API call went out once, the
     // second already with the refreshed token.
     let calls: Vec<_> = logged.iter().filter(|l| l.starts_with("/crm")).collect();
     assert_eq!(calls.len(), 2, "{logged:?}");
-    assert!(calls[1].contains("Bearer access-2"), "{logged:?}");
+    assert!(calls[1].contains("Bearer access-3"), "{logged:?}");
     drop(logged);
     let refreshes = || {
         log.lock()
@@ -2044,43 +2044,29 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
 
     // A holder that hands the token on: 1000 seconds left is enough for
     // `token` alone, not for `--min-life 1700`, which refreshes first.
-    db().execute(
-        "UPDATE tokens SET expires_at = ?1 WHERE provider = 'hubspot'",
-        [now() + 1000],
-    )
-    .unwrap();
-    let token_json = |args: &[&str]| {
-        let (ok, out, err) = run(args);
-        assert!(ok, "{err}");
-        serde_json::from_str::<serde_json::Value>(&out).unwrap()
-    };
+    lasts.store(1000, Ordering::SeqCst);
+    let t = token_json(&["token", "hubspot", "--json", "--min-life", "3600"]);
+    assert_eq!(t["access_token"], "access-4");
+    lasts.store(1800, Ordering::SeqCst);
     let t = token_json(&["token", "hubspot", "--json"]);
-    assert_eq!(t["access_token"], "access-2");
-    assert!(
-        (t["expires_at"].as_i64().unwrap() - now() - 1000).abs() < 30,
-        "{t}"
-    );
-    assert_eq!(refreshes(), 1);
+    assert_eq!(t["access_token"], "access-4");
+    assert!((expires(&t) - now() - 1000).abs() < 30, "{t}");
+    assert_eq!(refreshes(), 3);
     let t = token_json(&["token", "hubspot", "--json", "--min-life", "1700"]);
-    assert_eq!(t["access_token"], "access-3");
-    assert!(
-        (t["expires_at"].as_i64().unwrap() - now() - 1800).abs() < 30,
-        "{t}"
-    );
-    assert_eq!(expires(), t["expires_at"].as_i64().unwrap(), "stored");
-    assert_eq!(refreshes(), 2);
+    assert_eq!(t["access_token"], "access-5");
+    assert!((expires(&t) - now() - 1800).abs() < 30, "{t}");
+    let stored = token_json(&["token", "hubspot", "--json"]);
+    assert_eq!(expires(&stored), expires(&t), "stored");
+    assert_eq!(refreshes(), 4);
     // Fresh enough now: no refresh. Asked for more than the provider gives:
     // refreshed, and printed all the same with the expiry it has.
     let t = token_json(&["token", "hubspot", "--json", "--min-life", "1700"]);
-    assert_eq!(t["access_token"], "access-3");
-    assert_eq!(refreshes(), 2);
+    assert_eq!(t["access_token"], "access-5");
+    assert_eq!(refreshes(), 4);
     let t = token_json(&["token", "hubspot", "--json", "--min-life", "3600"]);
-    assert_eq!(t["access_token"], "access-4");
-    assert!(
-        (t["expires_at"].as_i64().unwrap() - now() - 1800).abs() < 30,
-        "{t}"
-    );
-    assert_eq!(refreshes(), 3);
+    assert_eq!(t["access_token"], "access-6");
+    assert!((expires(&t) - now() - 1800).abs() < 30, "{t}");
+    assert_eq!(refreshes(), 5);
 
     let (ok, out, err) = run(&["token", "--help"]);
     assert!(ok, "{err}");

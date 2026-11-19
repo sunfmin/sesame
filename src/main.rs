@@ -3,6 +3,7 @@ mod guide;
 mod handed;
 mod oauth;
 mod providers;
+mod refresh;
 mod setup;
 mod store;
 // build.rs runs it to stamp the version; compiled here too, for its tests.
@@ -179,7 +180,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         Cmd::Providers => {
             let store = Store::open()?;
             store.read_many()?;
-            for (name, p) in providers::all()? {
+            for (name, p) in providers::all(&store)? {
                 let token = store.token(&name)?;
                 let client = oauth::client(&store, &name, &p)?;
                 let source = client.as_ref().map(|(_, s)| s.label()).unwrap_or_default();
@@ -214,41 +215,20 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 }
             }
         }
-        Cmd::Provider { cmd } => match *cmd {
-            ProviderCmd::Add { name, fields } => {
-                providers::add(&name, fields.0)?;
-                eprintln!("Added the provider `{name}`; next: sesame setup {name}");
-            }
-            ProviderCmd::Set { name, fields } => {
-                providers::set(&name, fields.0)?;
-                eprintln!(
-                    "Changed the provider `{name}`; see it with `sesame provider show {name}`."
-                );
-            }
-            ProviderCmd::Show { name } => {
-                let v = providers::show(&name)?;
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
-                );
-            }
-            ProviderCmd::Rm { name } => eprintln!("{}", providers::remove(&name)?),
-            ProviderCmd::Guide => print!("{}", guide::render()),
-            ProviderCmd::Discover { url } => print!("{}", guide::discover(&url)?),
-            ProviderCmd::Export { name } => print!("{}", providers::export(&name)?),
-        },
+        Cmd::Provider { cmd } => provider(*cmd)?,
         Cmd::Store {
             cmd: StoreCmd::Migrate,
         } => store::migrate()?,
         Cmd::Setup { provider } => {
-            let t = providers::find(&provider)?;
+            let t = providers::find(&Store::open()?, &provider)?;
             print!("{}", setup::render(&t.provider, &t.p));
         }
         Cmd::Client {
             provider, reset, ..
         } if reset => {
-            let t = providers::find(&provider)?;
-            let had = Store::open()?.delete_client(&t.provider)?;
+            let store = Store::open()?;
+            let t = providers::find(&store, &provider)?;
+            let had = store.delete_client(&t.provider)?;
             let then = if t.p.public_client_id.is_some() {
                 "login uses the built-in client"
             } else {
@@ -268,7 +248,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             no_secret,
             ..
         } => {
-            let provider = providers::find(&provider)?.provider;
+            let store = Store::open()?;
+            let provider = providers::find(&store, &provider)?.provider;
             let client_id = client_id.ok_or("give --client-id, or --reset")?;
             let client_secret = if no_secret {
                 None
@@ -281,7 +262,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             } else {
                 Some(rpassword::prompt_password("Client secret: ").map_err(|e| e.to_string())?)
             };
-            Store::open()?.save_client(
+            store.save_client(
                 &provider,
                 &Client {
                     client_id,
@@ -296,7 +277,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             token_stdin,
             ..
         } if token || token_stdin => {
-            let t = providers::find(&provider)?;
+            let store = Store::open()?;
+            let t = providers::find(&store, &provider)?;
             let (provider, p) = (t.provider, t.p);
             let pasted = if token_stdin {
                 let mut s = String::new();
@@ -307,7 +289,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             } else {
                 rpassword::prompt_password("Token: ").map_err(|e| e.to_string())?
             };
-            let t = oauth::save_pasted(&provider, &p, &pasted)?;
+            let t = oauth::save_pasted(&store, &provider, &p, &pasted)?;
             eprintln!("Stored the pasted `{provider}` token{}.", who(&t));
         }
         Cmd::Login {
@@ -318,14 +300,15 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             site,
             ..
         } => {
-            let t = providers::find(&provider)?;
+            let store = Store::open()?;
+            let t = providers::find(&store, &provider)?;
             let opts = oauth::LoginOptions {
                 scopes: (!scopes.is_empty()).then_some(scopes),
                 open_browser: !no_browser && std::env::var_os("SSH_CONNECTION").is_none(),
                 site,
                 loopback: browser,
             };
-            let token = oauth::login(&t, &opts)?;
+            let token = oauth::login(&store, &t, &opts)?;
             let service = t
                 .service
                 .as_ref()
@@ -334,8 +317,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             eprintln!("Logged in to `{}`{service}{}.", t.provider, who(&token));
         }
         Cmd::Logout { provider } => {
-            let provider = providers::find(&provider)?.provider;
-            Store::open()?.delete_token(&provider)?;
+            let store = Store::open()?;
+            let provider = providers::find(&store, &provider)?.provider;
+            store.delete_token(&provider)?;
             eprintln!("Logged out of `{provider}` (the token of all its services).");
         }
         Cmd::Token {
@@ -346,11 +330,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             let token = match handed::find(&provider)? {
                 Some((_, h)) => h.token,
                 None => {
-                    let t = providers::find(&provider)?;
-                    oauth::valid_token(
+                    let store = Store::open()?;
+                    let t = providers::find(&store, &provider)?;
+                    let within = min_life.unwrap_or(refresh::MIN_LIFE);
+                    refresh::valid_token(
+                        &store,
                         &t.provider,
                         &t.p,
-                        oauth::Refresh::Within(min_life.unwrap_or(oauth::MIN_LIFE)),
+                        refresh::Refresh::Within(within),
                     )?
                 }
             };
@@ -369,6 +356,32 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `sesame provider …`.
+fn provider(cmd: ProviderCmd) -> Result<(), String> {
+    match cmd {
+        ProviderCmd::Add { name, fields } => {
+            providers::add(&Store::open()?, &name, fields.0)?;
+            eprintln!("Added the provider `{name}`; next: sesame setup {name}");
+        }
+        ProviderCmd::Set { name, fields } => {
+            providers::set(&Store::open()?, &name, fields.0)?;
+            eprintln!("Changed the provider `{name}`; see it with `sesame provider show {name}`.");
+        }
+        ProviderCmd::Show { name } => {
+            let v = providers::show(&Store::open()?, &name)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
+            );
+        }
+        ProviderCmd::Rm { name } => eprintln!("{}", providers::remove(&Store::open()?, &name)?),
+        ProviderCmd::Guide => print!("{}", guide::render()),
+        ProviderCmd::Discover { url } => print!("{}", guide::discover(&url)?),
+        ProviderCmd::Export { name } => print!("{}", providers::export(&Store::open()?, &name)?),
+    }
+    Ok(())
+}
+
 /// ` (site, account)` for a token, from what login learned, and whether it
 /// was pasted; empty if nothing.
 fn who(t: &Token) -> String {
@@ -382,5 +395,34 @@ fn who(t: &Token) -> String {
         String::new()
     } else {
         format!(" ({})", parts.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A command opens the store once and hands it down: only the command
+    /// entry points (`main.rs`, `api.rs`) open it, never a function they call.
+    #[test]
+    fn only_commands_open_the_store() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src.clone()];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path.strip_prefix(&src).unwrap().to_string_lossy();
+                if ["main.rs", "api.rs"].contains(&rel.as_ref()) {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                assert!(
+                    !text.contains(concat!("Store", "::open(")),
+                    "{rel} opens the store: take a `&Store` from the command instead"
+                );
+            }
+        }
     }
 }
