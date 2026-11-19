@@ -2,7 +2,7 @@
 //! guarded by file permissions as gcloud's are: the directory 0700, the file 0600.
 use super::{Client, Token};
 use crate::providers::Fields;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -101,21 +101,55 @@ impl Sqlite {
             .conn
             .busy_timeout(BUSY_TIMEOUT)
             .map_err(|e| store.err(e))?;
-        store.locked(|| {
-            let s = &store;
-            let version: i64 = s
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// A database in memory, named `name` in errors, with nothing on disk:
+    /// `image` (what `image` gave) if any, else empty; migrated either way.
+    pub fn in_memory(name: &str, image: Option<&[u8]>) -> Result<Sqlite, String> {
+        let err = |e: rusqlite::Error| format!("{name}: {e}");
+        let mut conn = Connection::open_in_memory().map_err(err)?;
+        if let Some(image) = image {
+            conn.deserialize_read_exact(MAIN_DB, image, image.len(), false)
+                .map_err(err)?;
+        }
+        let store = Sqlite {
+            conn,
+            path: PathBuf::from(name),
+        };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// The whole database as bytes, for `in_memory` to take back.
+    pub fn image(&mut self) -> Result<Vec<u8>, String> {
+        let data = self
+            .conn
+            .serialize(MAIN_DB)
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        Ok(data.to_vec())
+    }
+
+    /// The connection, for a caller keeping tables of its own beside these.
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    fn migrate(&self) -> Result<(), String> {
+        self.locked(|| {
+            let version: i64 = self
                 .conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
-                .map_err(|e| s.err(e))?;
+                .map_err(|e| self.err(e))?;
             for (i, step) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-                s.conn.execute_batch(step).map_err(|e| s.err(e))?;
-                s.conn
+                self.conn.execute_batch(step).map_err(|e| self.err(e))?;
+                self.conn
                     .pragma_update(None, "user_version", i as i64 + 1)
-                    .map_err(|e| s.err(e))?;
+                    .map_err(|e| self.err(e))?;
             }
             Ok(())
-        })?;
-        Ok(store)
+        })
     }
 
     fn err(&self, e: rusqlite::Error) -> String {
@@ -396,6 +430,31 @@ mod tests {
         s.delete_token("p").unwrap();
         assert!(s.token("p").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_image_comes_back_whole_and_migrated() {
+        let mut s = Sqlite::in_memory("copy", None).unwrap();
+        s.save_client(
+            "p",
+            &Client {
+                client_id: "id".into(),
+                client_secret: Some("s".into()),
+            },
+        )
+        .unwrap();
+        let image = s.image().unwrap();
+        let back = Sqlite::in_memory("copy", Some(&image)).unwrap();
+        assert_eq!(
+            back.client("p").unwrap().unwrap().client_secret,
+            Some("s".into())
+        );
+        let v: i64 = back
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v as usize, MIGRATIONS.len());
+        assert!(Sqlite::in_memory("copy", Some(b"not a database")).is_err());
     }
 
     #[test]
