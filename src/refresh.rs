@@ -74,9 +74,10 @@ pub fn decide(token: Option<Token>, read: &Read, now: u64, refresh: Refresh) -> 
 /// token is returned even where it lasts less than asked: its expiry says so.
 /// The read, the refresh and the write hold the store's lock, so a second
 /// process refreshing the same provider waits and then sees the new token.
-/// Before refreshing, the store syncs (the vault's copy reads what another
-/// machine wrote): a token refreshed there, or for `Refresh::Now` any other
-/// token than the one refused, is used without refreshing again.
+/// Before refreshing, the token is read again as `Store::latest_token` (the
+/// vault's copy reads what another machine wrote): a token refreshed there,
+/// or for `Refresh::Now` any other token than the one refused, is used
+/// without refreshing again.
 pub fn valid_token(
     store: &Store,
     name: &str,
@@ -106,13 +107,13 @@ fn run(
 ) -> Result<Token, String> {
     store.locked(|store| {
         let mut read = Read::First;
+        let mut token = store.token(name)?;
         loop {
-            let token = store.token(name)?;
             let before = token.as_ref().map(|t| t.access_token.clone());
             match decide(token, &read, now, refresh) {
                 Step::Use(t) => return Ok(t),
                 Step::CatchUp => {
-                    store.sync(name)?;
+                    token = store.latest_token(name)?;
                     read = Read::CaughtUp { before };
                 }
                 Step::Refresh(t, refresh_token) => {

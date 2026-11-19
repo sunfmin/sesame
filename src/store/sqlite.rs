@@ -137,7 +137,7 @@ impl Sqlite {
     }
 
     fn migrate(&self) -> Result<(), String> {
-        self.locked(|| {
+        self.transaction(|| {
             let version: i64 = self
                 .conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -158,7 +158,20 @@ impl Sqlite {
 
     /// Runs `f` holding the database's write lock, so a read-then-write (a
     /// refresh) in another process waits for this one rather than racing it.
+    /// It serializes only (`Store::locked`'s contract): what `f` wrote is
+    /// committed even when `f` fails, as the vault's writes would stand.
     pub fn locked<T>(&self, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| self.err(e))?;
+        let result = f();
+        self.conn.execute_batch("COMMIT").map_err(|e| self.err(e))?;
+        result
+    }
+
+    /// Runs `f` as one transaction: all of it, or, when it fails, none.
+    /// Schema migrations only: the rest of sesame gets `locked`.
+    fn transaction<T>(&self, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
         self.conn
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| self.err(e))?;
@@ -335,6 +348,25 @@ mod tests {
 
     fn mode(p: &Path) -> u32 {
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    /// `locked` serializes only, as the vault does: a write made before `f`
+    /// fails stands, and the database is usable after.
+    #[test]
+    fn locked_keeps_writes_made_before_an_error() {
+        let s = Sqlite::in_memory("test", None).unwrap();
+        let c = |id: &str| Client {
+            client_id: id.into(),
+            client_secret: None,
+        };
+        let r: Result<(), String> = s.locked(|| {
+            s.save_client("p", &c("id"))?;
+            Err("midway".into())
+        });
+        assert_eq!(r, Err("midway".into()));
+        assert_eq!(s.client("p").unwrap(), Some(c("id")));
+        s.locked(|| s.save_client("q", &c("q"))).unwrap();
+        assert_eq!(s.client("q").unwrap(), Some(c("q")));
     }
 
     #[test]

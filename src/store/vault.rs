@@ -137,7 +137,8 @@ enum OpError {
 impl Vault {
     /// The vault `SESAME_1PASSWORD_VAULT` names, if any. Named, it must be
     /// usable: a missing token or a missing `op` is an error naming it.
-    pub fn from_env() -> Result<Option<Vault>, String> {
+    /// `current`: sync the copy even if it is young (a status listing).
+    pub fn from_env(current: bool) -> Result<Option<Vault>, String> {
         let Some(name) = vault_name() else {
             return Ok(None);
         };
@@ -166,7 +167,7 @@ impl Vault {
         let stale = v
             .synced_at()?
             .is_none_or(|t| t + COPY_LIFE <= crate::oauth::now());
-        if !opened || stale {
+        if !opened || stale || current {
             v.locked(|| v.sync(None))?;
         }
         Ok(Some(v))
@@ -556,6 +557,15 @@ impl Vault {
             k.retain(|l, _| !CLIENT_FIELDS.contains(&l.as_str()));
         })?;
         Ok(had.contains_key(CLIENT_ID))
+    }
+
+    /// `provider`'s token after a sync that reads its item whatever its
+    /// version: what a refresh decides on.
+    pub fn latest_token(&self, provider: &str) -> Result<Option<Token>, String> {
+        self.locked(|| {
+            self.sync(Some(provider))?;
+            self.token(provider)
+        })
     }
 
     pub fn token(&self, provider: &str) -> Result<Option<Token>, String> {
