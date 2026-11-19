@@ -369,6 +369,34 @@ mod tests {
         assert_eq!(s.client("q").unwrap(), Some(c("q")));
     }
 
+    /// A migration step that fails leaves none of itself: the next run
+    /// starts that step again from where the schema was.
+    #[test]
+    fn failed_migration_leaves_the_schema_as_it_was() {
+        let dir = tmp("failed-migration");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("sesame.db");
+        // The first step creates `clients`, then fails on this `tokens`.
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE tokens (x)")
+            .unwrap();
+        assert!(Sqlite::open_at(db.clone()).is_err());
+        let conn = Connection::open(&db).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let clients: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'clients'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((version, clients), (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn new_database_is_0600_in_a_0700_directory() {
         let dir = tmp("new").join("sesame");
