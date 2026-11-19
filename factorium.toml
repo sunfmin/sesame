@@ -10,3 +10,11 @@ slow_limit = 900
 steps = ["packaging/release.sh cut $FACTORIUM_VERSION"]
 formula = "sunfmin/tap/sesame"
 limit = 1800
+
+# slimfit's tasks and a sample of landed changes' mutants, filed as issues
+# while the host is idle (SPEC §1.16). No steps: no check is too slow for the
+# gate. every/limit from the times measured on sesame#12 (its comment).
+[idle]
+tasks = "slimfit --version && slimfit next --all --sample 5"
+every = 86400
+limit = 1800
