@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub fn migrate() -> Result<(), String> {
-    let Some(vault) = Vault::from_env()? else {
+    let Some(vault) = Vault::from_env(false)? else {
         return Err(format!(
             "`sesame store migrate` copies sesame.db into a 1Password vault, but {VAULT_VAR} is \
              not set: set it to the vault's name and {TOKEN_VAR} to the token of a service \

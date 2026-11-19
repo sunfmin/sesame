@@ -39,15 +39,16 @@ control session 2026-11-20: 「把整个 DB 缓存下来不就行了吗」, then
   asked for by id before its rows go (1Password was said to list new items
   late; on real op 2.42 a new item was listed at once, but the check is one
   read in a rare case). It runs:
-  - before a refresh (`valid_token`, under the lock), with the provider's
-    item read whatever its version: a token another machine refreshed is
+  - before a refresh (`valid_token`, under the lock, asks the store for
+    `latest_token`), with the provider's item read whatever its version: a token another machine refreshed is
     used as is; for a token the provider refused (`Refresh::Now`), any other
     token the vault now holds is tried first. So A's refresh, `client` and
     `provider set` reach B at B's next refresh, at the cost of the list;
   - when the copy is older than `COPY_LIFE` (1 h), so a provider whose token
     never expires (GitHub's, a pasted one) still sees another machine's
     change within the hour;
-  - for `sesame providers` (a status listing should be current);
+  - for `sesame providers` (a status listing should be current: it opens
+    the store with `Store::open_current`);
   - when there is no copy that opens: the first run, another token, damage.
 - **Sealed at rest.** The copy lives in memory (`rusqlite` `serialize`) and
   reaches disk only as `<config_dir>/1password-copy`: XChaCha20-Poly1305 with
@@ -60,7 +61,12 @@ control session 2026-11-20: 「把整个 DB 缓存下来不就行了吗」, then
   under the lock, so a reader never sees half of one.
 - **The lock** (`sesame.lock`, ADR 0001) now also guards the copy: taking it
   reloads the copy from disk, so a write by another process here is not
-  overwritten.
+  overwritten. Callers see neither the sync nor the copy: the store names what they
+  want (`latest_token`, `open_current`) and syncs behind it (sesame#11).
+- **`locked` serializes, nothing more** (sesame#11): writes go through to
+  1Password, which has no transaction, so an error midway undoes none of
+  them; `sesame.db` keeps the same rule (it commits what was written), so no
+  caller comes to rely on a rollback only one store gives.
 
 ## Considered options
 

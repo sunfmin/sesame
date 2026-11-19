@@ -1,0 +1,22 @@
+{
+  "tree": "98b6fbbe54b945c247aba56eeb0b8c7f1db5e5a1+d1fba762150c532c",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store/vault.rs:170:29: replace || with && in Vault::from_env",
+        "why": "sesame providers must sync a young vault copy (open_current)",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:565:9: replace Vault::latest_token -> Result<Option<Token>, String> with Ok(None)",
+        "why": "the vault refresh path must read the token after syncing",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store.rs:93:9: replace Store::latest_token -> Result<Option<Token>, String> with Ok(None)",
+        "why": "the refresh path decides on latest_token's answer",
+        "outcome": "killed"
+      }
+    ]
+  }
+}

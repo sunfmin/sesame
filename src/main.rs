@@ -179,8 +179,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.cmd {
         Cmd::Providers => {
-            let store = Store::open()?;
-            store.read_many()?;
+            let store = Store::open_current()?;
             for (name, p) in providers::all(&store)? {
                 let token = store.token(&name)?;
                 let client = oauth::client(&store, &name, &p)?;

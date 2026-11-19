@@ -45,7 +45,18 @@ impl Store {
     /// `SESAME_1PASSWORD_VAULT`, else `sesame.db`. A vault that is named but
     /// cannot be used is an error, never a silent fall back to `sesame.db`.
     pub fn open() -> Result<Store, String> {
-        match vault::Vault::from_env()? {
+        Store::open_with(false)
+    }
+
+    /// `open`, with a view current enough to list every provider's state
+    /// (`sesame providers`): the vault's local copy is synced first (one
+    /// request when nothing moved, docs/adr/0002). `sesame.db` is current.
+    pub fn open_current() -> Result<Store, String> {
+        Store::open_with(true)
+    }
+
+    fn open_with(current: bool) -> Result<Store, String> {
+        match vault::Vault::from_env(current)? {
             Some(v) => Ok(Store::Vault(v)),
             None => sqlite::Sqlite::open().map(Store::Sqlite),
         }
@@ -57,9 +68,14 @@ impl Store {
         sqlite::Sqlite::in_memory("test store", None).map(Store::Sqlite)
     }
 
-    /// Runs `f` holding this machine's lock on the store, so a read-then-write
-    /// (a refresh) in another process waits for this one rather than racing
-    /// it; what `f` reads is read afresh.
+    /// Runs `f` holding this machine's lock on the store: another process's
+    /// `locked` waits until `f` returns, so a read-then-write (a refresh) does
+    /// not race one elsewhere, and what `f` reads is read afresh.
+    ///
+    /// It serializes, nothing more: each write in `f` stands once made, and an
+    /// error from `f` undoes none of them (the vault writes through to
+    /// 1Password, which has no transaction; `sesame.db` keeps the same rule).
+    /// So `f` checks what it needs before its first write.
     pub fn locked<T>(&self, f: impl FnOnce(&Store) -> Result<T, String>) -> Result<T, String> {
         match self {
             Store::Sqlite(s) => s.locked(|| f(self)),
@@ -67,22 +83,16 @@ impl Store {
         }
     }
 
-    /// Before showing every provider's state (`sesame providers`): brings the
-    /// vault's local copy up to date (one request when nothing moved).
-    pub fn read_many(&self) -> Result<(), String> {
+    /// `provider`'s token as it stands now, to decide on refreshing it (call
+    /// it under `locked`): what another machine wrote included, so a token it
+    /// refreshed is used rather than refreshed again. `token` may answer from
+    /// the vault's local copy as last synced; this syncs it first, reading
+    /// `provider`'s item whatever its version (docs/adr/0002). `sesame.db` is
+    /// this machine's alone: the same as `token`.
+    pub fn latest_token(&self, provider: &str) -> Result<Option<Token>, String> {
         match self {
-            Store::Sqlite(_) => Ok(()),
-            Store::Vault(v) => v.locked(|| v.sync(None)),
-        }
-    }
-
-    /// Before deciding to refresh `provider`'s token (under `locked`): lets in
-    /// what other machines wrote, `provider`'s item read whatever happened.
-    /// `sesame.db` is this machine's alone: nothing to do.
-    pub fn sync(&self, provider: &str) -> Result<(), String> {
-        match self {
-            Store::Sqlite(_) => Ok(()),
-            Store::Vault(v) => v.sync(Some(provider)),
+            Store::Sqlite(s) => s.token(provider),
+            Store::Vault(v) => v.latest_token(provider),
         }
     }
 
