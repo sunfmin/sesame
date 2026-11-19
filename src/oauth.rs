@@ -116,10 +116,9 @@ fn wanted(t: &Target, granted: &[String]) -> Vec<String> {
 /// `device_url` (unless `opts.loopback`), otherwise the authorization-code flow
 /// with a loopback redirect. Then picks the site and reads who signed in, and
 /// stores the token, the provider's one, in place of the one before.
-pub fn login(t: &Target, opts: &LoginOptions) -> Result<Token, String> {
+pub fn login(store: &Store, t: &Target, opts: &LoginOptions) -> Result<Token, String> {
     let (name, p) = (t.provider.as_str(), &t.p);
-    let store = Store::open()?;
-    let (client, source) = client(&store, name, p)?.ok_or_else(|| no_client(name))?;
+    let (client, source) = client(store, name, p)?.ok_or_else(|| no_client(name))?;
     if source == ClientSource::BuiltIn && opts.loopback && p.device_url.is_some() {
         return Err(format!(
             "the built-in client of `{name}` signs in only with the device flow; to sign in \
@@ -497,7 +496,12 @@ fn token_from(p: &Provider, text: &str, previous: Option<&Token>) -> Result<Toke
 /// `sesame login --token`: stores a token the person got another way. It has
 /// no refresh token and no expiry: when it stops working, paste a new one.
 /// Who it belongs to is read from `identity_url`, as after a login.
-pub fn save_pasted(name: &str, p: &Provider, access_token: &str) -> Result<Token, String> {
+pub fn save_pasted(
+    store: &Store,
+    name: &str,
+    p: &Provider,
+    access_token: &str,
+) -> Result<Token, String> {
     let access_token = access_token.trim();
     if access_token.is_empty() || access_token.contains(char::is_whitespace) {
         return Err("the pasted token is empty or contains spaces".into());
@@ -518,7 +522,7 @@ pub fn save_pasted(name: &str, p: &Provider, access_token: &str) -> Result<Token
             Err(e) => eprintln!("Stored, but could not read who the token belongs to: {e}"),
         }
     }
-    Store::open()?.save_token(name, &token)?;
+    store.save_token(name, &token)?;
     Ok(token)
 }
 
@@ -563,71 +567,25 @@ fn pick_resource(token: &mut Token, url: &str, site: Option<&str>) -> Result<(),
     Ok(())
 }
 
-/// The least life, in seconds, a stored token is used with: one that expires
-/// sooner is refreshed first.
-pub const MIN_LIFE: u64 = 60;
-
-/// When `valid_token` refreshes the stored token.
-#[derive(Clone, Copy)]
-pub enum Refresh {
-    /// Where it expires within these seconds (never fewer than `MIN_LIFE`).
-    Within(u64),
-    /// Always: the provider refused it.
-    Now,
-}
-
-/// The stored token, refreshed first as `refresh` says. The provider's new
-/// token is returned even where it lasts less than asked: its expiry says so.
-/// The read, the refresh and the write hold the database's lock, so a second
-/// process refreshing the same provider waits and then sees the new token.
-/// Before refreshing, the store syncs (the vault's copy reads what another
-/// machine wrote): a token refreshed there, or for `Refresh::Now` any other
-/// token than the one refused, is used without refreshing again.
-pub fn valid_token(name: &str, p: &Provider, refresh: Refresh) -> Result<Token, String> {
-    let fresh = |t: &Token| match refresh {
-        Refresh::Within(secs) => t.expires_at.is_none_or(|t| t > now() + secs.max(MIN_LIFE)),
-        Refresh::Now => false,
-    };
-    Store::open()?.locked(|store| {
-        let mut token = store.token(name)?;
-        if let Some(t) = &token
-            && fresh(t)
-        {
-            return Ok(t.clone());
-        }
-        // Another machine may have logged in or refreshed already.
-        let refused = token.map(|t| t.access_token);
-        store.sync(name)?;
-        token = store.token(name)?;
-        let Some(token) = token else {
-            if client(store, name, p)?.is_none() {
-                return Err(no_client(name));
-            }
-            return Err(format!(
-                "not logged in to `{name}`; run `sesame login {name}`"
-            ));
-        };
-        if fresh(&token)
-            || (matches!(refresh, Refresh::Now) && Some(&token.access_token) != refused.as_ref())
-        {
-            return Ok(token);
-        }
-        let refresh = token.refresh_token.clone().ok_or_else(|| {
-            format!("`{name}` token expired and has no refresh token; run `sesame login {name}`")
-        })?;
-        let (client, _) = client(store, name, p)?.ok_or_else(|| no_client(name))?;
-        let form = vec![
-            ("grant_type", "refresh_token".to_string()),
-            ("refresh_token", refresh),
-        ];
-        let (status, text) = post(p, p.refresh_endpoint(), form, Some(&client))?;
-        if !status.is_success() {
-            return Err(format!(
-                "refresh endpoint answered {status}: {text}\nRun `sesame login {name}` again."
-            ));
-        }
-        let new = token_from(p, &text, Some(&token))?;
-        store.save_token(name, &new)?;
-        Ok(new)
-    })
+/// Trades `refresh_token`, `token`'s, at the provider's refresh endpoint for
+/// a new token, which keeps what the answer leaves out from `token`.
+pub fn refresh(
+    store: &Store,
+    name: &str,
+    p: &Provider,
+    token: &Token,
+    refresh_token: String,
+) -> Result<Token, String> {
+    let (client, _) = client(store, name, p)?.ok_or_else(|| no_client(name))?;
+    let form = vec![
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", refresh_token),
+    ];
+    let (status, text) = post(p, p.refresh_endpoint(), form, Some(&client))?;
+    if !status.is_success() {
+        return Err(format!(
+            "refresh endpoint answered {status}: {text}\nRun `sesame login {name}` again."
+        ));
+    }
+    token_from(p, &text, Some(token))
 }

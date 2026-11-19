@@ -51,6 +51,12 @@ impl Store {
         }
     }
 
+    /// An empty `sesame.db` in memory, for tests.
+    #[cfg(test)]
+    pub fn in_memory() -> Result<Store, String> {
+        sqlite::Sqlite::in_memory("test store", None).map(Store::Sqlite)
+    }
+
     /// Runs `f` holding this machine's lock on the store, so a read-then-write
     /// (a refresh) in another process waits for this one rather than racing
     /// it; what `f` reads is read afresh.
