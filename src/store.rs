@@ -4,6 +4,7 @@
 //! a service account (`vault`, docs/adr/0001). The rest of sesame sees one
 //! `Store` and does not know which.
 mod migrate;
+mod sealed;
 mod sqlite;
 mod vault;
 
@@ -60,12 +61,22 @@ impl Store {
         }
     }
 
-    /// Before reading many providers' clients and tokens (`sesame providers`):
-    /// lets the vault learn in one request which of them it holds.
+    /// Before showing every provider's state (`sesame providers`): brings the
+    /// vault's local copy up to date (one request when nothing moved).
     pub fn read_many(&self) -> Result<(), String> {
         match self {
             Store::Sqlite(_) => Ok(()),
-            Store::Vault(v) => v.list(),
+            Store::Vault(v) => v.locked(|| v.sync(None)),
+        }
+    }
+
+    /// Before deciding to refresh `provider`'s token (under `locked`): lets in
+    /// what other machines wrote, `provider`'s item read whatever happened.
+    /// `sesame.db` is this machine's alone: nothing to do.
+    pub fn sync(&self, provider: &str) -> Result<(), String> {
+        match self {
+            Store::Sqlite(_) => Ok(()),
+            Store::Vault(v) => v.sync(Some(provider)),
         }
     }
 

@@ -174,9 +174,10 @@ sesame logout jira                            # forgets the local token only
 With `SESAME_1PASSWORD_VAULT=<vault>` in the environment, sesame keeps
 everything `sesame.db` would hold (clients, tokens, your provider fields) in
 that 1Password vault instead, read and written by the 1Password CLI `op` as a
-**service account**, whose token is `OP_SERVICE_ACCOUNT_TOKEN`. Nothing of
-sesame's is then on disk (but an empty lock file, `sesame.lock`), and every
-machine with the same two variables uses the same logins. Unset, sesame uses
+**service account**, whose token is `OP_SERVICE_ACCOUNT_TOKEN`. Every machine
+with the same two variables uses the same logins; on disk there is only an
+encrypted copy of the vault's sesame items (below) and an empty lock file,
+`sesame.lock`. Unset, sesame uses
 `sesame.db` as before. There is no config file: a machine opts in by its
 environment, for example a `mytokens` profile carrying both.
 
@@ -228,14 +229,36 @@ Switching it on, end to end:
   is archived, so it can be restored in 1Password.
 - **Use a vault of its own**, one that is not in `mytokens onepassword list`:
   mytokens' two-way sync adopts and rewrites items it did not make.
+- **The local copy.** Each machine keeps a copy of the whole store (clients,
+  tokens with their refresh tokens, provider fields: the tables of
+  `sesame.db`, plus each item's version) in `<config dir>/1password-copy`,
+  encrypted (XChaCha20-Poly1305, the key derived from
+  `OP_SERVICE_ACCOUNT_TOKEN`): without the token it reads as nothing, and with
+  it the vault could be read anyway. sesame reads from the copy, so a call
+  whose token is still valid makes **no** `op` call and takes milliseconds.
+  Writes (`login`, `client`, `provider add/set/rm`, `logout`, a refresh) go
+  to the vault first, then the copy. A copy that does not open (the token
+  changed, the file damaged) is dropped and rebuilt from the vault.
+- **How fresh the copy is.** Before refreshing a token sesame syncs: it lists
+  the vault once and reads only the items whose version moved, so a token
+  another machine already refreshed is used without refreshing again, and
+  another machine's `client`, `provider set` or `logout` arrives too. It also
+  syncs when the copy is an hour old (for tokens that never expire), on
+  `sesame providers`, and when there is no copy. So a change made elsewhere
+  reaches a machine within its token's life (an hour for Google), at most an
+  hour.
 - **The budget.** A service account may read 1000 times and write 100 times an
   hour, and the account makes 1000 requests a day in all (shared with
   mytokens' vault sync, `op service-account ratelimit`); each `op` call takes
-  about 2 seconds. So `sesame api` and `sesame token` read two items (your
-  provider fields and the provider's) and write nothing unless they refresh;
-  a refresh writes the provider's item once. `sesame providers` lists the
-  vault once and reads each provider you hold. Secrets reach `op` only on its
-  stdin and the token only in its environment, never on its command line.
+  about a second. Measured against a real vault (sesame#4): a call with a
+  valid token, 0.03 s and no request; a refreshing call, 3.6 s (a list, a
+  read, a write) and 2 requests on the account's daily count. **Per day**, a
+  machine spends about 2 requests per refresh: a provider with hour-long
+  tokens used all day long is ~24 refreshes, ~50 requests; one whose token
+  does not expire, at most 24 hourly syncs. Calls in between are free, however
+  many. (Before the copy, every `sesame api` cost two reads: 500 calls a day
+  would have spent the account's whole budget.) Secrets reach `op` only on
+  its stdin and the token only in its environment, never on its command line.
 - **One machine refreshes each provider.** Two processes on one machine take
   turns (the lock file), but 1Password has no lock across machines: where a
   provider's refresh hands out a new refresh token, two machines refreshing
@@ -243,8 +266,6 @@ Switching it on, end to end:
   refresh token the provider has already replaced. Let one machine refresh it
   (`sesame token <name> --min-life …`) and hand the token to the others
   (`SESAME_TOKEN_<NAME>`, above), as without the vault.
-- A login made on one machine may take a few seconds to be seen by another:
-  1Password lists a new item only about 10 seconds after it is made.
 
 ## Registering the OAuth apps
 

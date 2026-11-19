@@ -42,6 +42,8 @@ sync), ~2 s per `op` call (mytokens ADR 0022, measured).
   is one `create`/`edit`/`delete` with the whole item. `sesame api` / `token`
   with no refresh: two reads, no write (tested, counted against the fake `op`).
   `sesame providers` lists the vault once and skips reading what is not there.
+  (Superseded by ADR 0002: reads come from a local copy, 0 requests with no
+  refresh.)
 - **Talking to `op`.** Templates go on stdin through a pipe with no
   `--template`; an edit carries `tags` (without them op wipes them) and keeps
   the fields, sections and tags someone else put on the item. The token is
@@ -70,6 +72,8 @@ sync), ~2 s per `op` call (mytokens ADR 0022, measured).
   config dir or in any `op` argv, call and write counts, the three errors.
 - **Not checked against real 1Password** when this was written: the machine
   had no `op` and no scratch vault profile (`mytokens env sesame-scratch`).
-  Unverified there: that `op item get <title>` finds an item made seconds
-  before (1Password *lists* a new item only ~10 s after `create`), and the
-  exact JSON op accepts for an edit that keeps fields it printed.
+  Checked in sesame#4 against `sesame-scratch` with op 2.42.0: `op item get
+  <title>` found an item 1.15 s after `create`, `op item list` listed it at
+  once (with its `version`), and an edit carrying the fields op printed was
+  accepted (version 1 → 2, tags kept). Reads and writes of the store go
+  through a local copy since (ADR 0002).

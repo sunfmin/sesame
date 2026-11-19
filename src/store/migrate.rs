@@ -31,7 +31,12 @@ pub fn migrate() -> Result<(), String> {
     }
     let conflicts = {
         let db = sqlite::Sqlite::open()?;
-        vault.locked(|| copy(&db, &vault))?
+        // What the vault holds, not what this machine's copy last saw of it:
+        // a conflict another machine just made is still one.
+        vault.locked(|| {
+            vault.sync(None)?;
+            copy(&db, &vault)
+        })?
     };
     if !conflicts.is_empty() {
         return Err(format!(

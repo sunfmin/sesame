@@ -2664,19 +2664,19 @@ fn one_password_vault_store() {
         "refresh-secret-1"
     );
 
-    // No refresh needed: two reads (the definitions, the provider's item), no write.
+    // No refresh needed: all from the local copy, no `op` call.
     let (ok, out, calls, writes) = counted(&["token", "hub"]);
     assert!(ok && out.trim() == "device-token", "{out}");
-    assert_eq!((calls, writes), (2, 0));
+    assert_eq!((calls, writes), (0, 0));
     let (ok, out, calls, writes) = counted(&["api", "hub", "/me"]);
     assert!(ok && out.contains(r#"{"me":"octo"}"#), "{out}");
-    assert_eq!((calls, writes), (2, 0));
+    assert_eq!((calls, writes), (0, 0));
     let (ok, out, calls, writes) = counted(&["token", "hub", "--json"]);
     assert!(
         ok && out.contains(r#""access_token":"device-token""#),
         "{out}"
     );
-    assert_eq!((calls, writes), (2, 0));
+    assert_eq!((calls, writes), (0, 0));
 
     // A refresh that returns the same refresh token: one write, of the new
     // access token and its expiry, the rest of the item as it was.
@@ -3071,5 +3071,234 @@ fn one_password_vault_migrate() {
         "{out}"
     );
     assert!(!db.exists());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The vault's local copy (docs/adr/0002): a call with a valid token makes no
+/// `op` call at all, provider resolution included; a refresh lists the vault
+/// once, reads the provider's item, and writes it only when it refreshed;
+/// the copy on disk holds no secret in plaintext and opens only under the
+/// service account token that sealed it; and what one machine writes reaches
+/// another at that one's next refresh, without it refreshing again.
+#[test]
+fn one_password_local_copy() {
+    // A login's token lasts 30 s, inside MIN_LIFE, so the first call
+    // refreshes it; a refresh's lasts an hour.
+    let mut refreshes = 0;
+    let (port, log) = serve(move |target, body| {
+        match target {
+        "/device" => (
+            "200 OK",
+            r#"{"device_code":"dev","user_code":"WDJB-MJHT","verification_uri":"https://example.com/device","expires_in":60,"interval":0}"#.into(),
+        ),
+        "/token" if body.contains("grant_type=urn") => (
+            "200 OK",
+            r#"{"access_token":"login-token","refresh_token":"refresh-secret","expires_in":30}"#.into(),
+        ),
+        "/token" if body.contains("grant_type=refresh_token") => {
+            refreshes += 1;
+            let b = format!(
+                r#"{{"access_token":"refreshed-{refreshes}","refresh_token":"refresh-secret","expires_in":3600}}"#
+            );
+            ("200 OK", b)
+        }
+        "/me" => ("200 OK", r#"{"me":"octo"}"#.into()),
+        _ => ("404 Not Found", "{}".into()),
+    }
+    });
+    let tmp = std::env::temp_dir().join(format!("sesame-copy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let vault = FakeVault::new(&tmp);
+    let (a, b) = (tmp.join("machine-a"), tmp.join("machine-b"));
+    // `sesame` on a machine (its config dir) under a service account token:
+    // whether it succeeded, its output, its `op` calls and how many wrote.
+    let run = |config: &std::path::Path, sa: &str, args: &[&str], stdin: &str| {
+        let before = vault.calls().len();
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        vault.env(&mut c);
+        let mut child = c
+            .args(args)
+            .env("SESAME_CONFIG_DIR", config)
+            .env("OP_SERVICE_ACCOUNT_TOKEN", sa)
+            .env("FAKE_OP_TOKEN", sa)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        let calls: Vec<_> = vault.calls().split_off(before);
+        let writes = calls
+            .iter()
+            .filter(|(a, _)| ["create", "edit", "delete"].contains(&a[1].as_str()))
+            .count();
+        (out.status.success(), text, calls.len(), writes)
+    };
+    let on = |config: &std::path::Path, args: &[&str]| run(config, SA_TOKEN, args, "");
+    let refresh_bodies = || -> Vec<String> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("/token") && l.contains("grant_type=refresh_token"))
+            .cloned()
+            .collect()
+    };
+
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok, out, ..) = on(
+        &a,
+        &[
+            "provider",
+            "add",
+            "hub",
+            "--auth-url",
+            &format!("{base}/authorize"),
+            "--token-url",
+            &format!("{base}/token"),
+            "--api-base",
+            &base,
+            "--host",
+            "127.0.0.1",
+            "--device-url",
+            &format!("{base}/device"),
+            "--about",
+            "first",
+        ],
+    );
+    assert!(ok, "{out}");
+    let (ok, out, ..) = run(
+        &a,
+        SA_TOKEN,
+        &["client", "hub", "--client-id", "cid-1", "--secret-stdin"],
+        "client-secret-1\n",
+    );
+    assert!(ok, "{out}");
+    let (ok, out, ..) = on(&a, &["login", "hub", "--no-browser"]);
+    assert!(ok, "{out}");
+
+    // Machine B, no copy yet: it fills one from the vault (a list and a read
+    // of each item), then calls with the token as the vault holds it.
+    let (ok, out, calls, writes) = on(&b, &["provider", "show", "hub"]);
+    assert!(ok && out.contains("first"), "{out}");
+    assert_eq!((calls, writes), (3, 0));
+
+    // A's login token is expiring: the first call refreshes (a list, the
+    // item's read, one write), the next makes no `op` call at all.
+    let (ok, out, calls, writes) = on(&a, &["api", "hub", "/me"]);
+    assert!(ok && out.contains("octo"), "{out}");
+    assert_eq!((calls, writes), (3, 1));
+    assert_eq!(refresh_bodies().len(), 1);
+    for args in [
+        &["api", "hub", "/me"][..],
+        &["token", "hub"],
+        &["provider", "show", "hub"],
+    ] {
+        let (ok, out, calls, writes) = on(&a, args);
+        assert!(ok, "{out}");
+        assert_eq!((calls, writes), (0, 0), "{args:?}");
+    }
+    let (_, out, ..) = on(&a, &["token", "hub"]);
+    assert_eq!(out.trim(), "refreshed-1");
+
+    // B's copy still has the login token, expiring: its next call syncs, finds
+    // A's refreshed token, and uses it without refreshing (no write).
+    let (ok, out, calls, writes) = on(&b, &["token", "hub"]);
+    assert!(ok && out.trim() == "refreshed-1", "{out}");
+    assert_eq!((calls, writes), (2, 0));
+    assert_eq!(refresh_bodies().len(), 1);
+    let (_, _, calls, _) = on(&b, &["api", "hub", "/me"]);
+    assert_eq!(calls, 0);
+
+    // A changes the provider's fields and client. B goes on with its copy
+    // until its next refresh, which reads both and refreshes with A's client.
+    let (ok, out, ..) = on(&a, &["provider", "set", "hub", "--about", "second"]);
+    assert!(ok, "{out}");
+    let (ok, out, ..) = run(
+        &a,
+        SA_TOKEN,
+        &["client", "hub", "--client-id", "cid-2", "--secret-stdin"],
+        "client-secret-2\n",
+    );
+    assert!(ok, "{out}");
+    let (ok, out, calls, _) = on(&b, &["provider", "show", "hub"]);
+    assert!(ok && out.contains("first") && calls == 0, "{out}");
+    let (ok, out, calls, writes) = on(&b, &["token", "hub", "--min-life", "7200"]);
+    assert!(ok && out.trim() == "refreshed-2", "{out}");
+    // The list; the definitions and the provider's item, both moved; the write.
+    assert_eq!((calls, writes), (4, 1));
+    let last = refresh_bodies().pop().unwrap();
+    assert!(last.contains("client_id=cid-2"), "{last}");
+    let (ok, out, calls, _) = on(&b, &["provider", "show", "hub"]);
+    assert!(ok && out.contains("second") && calls == 0, "{out}");
+
+    // Nothing under either config dir holds a secret in plaintext.
+    let secrets = [
+        "login-token",
+        "refreshed-1",
+        "refreshed-2",
+        "refresh-secret",
+        "client-secret-1",
+        "client-secret-2",
+        SA_TOKEN,
+    ];
+    for dir in [&a, &b] {
+        let files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert!(
+            files.iter().any(|f| f.ends_with("1password-copy")),
+            "{files:?}"
+        );
+        for path in files {
+            let bytes = std::fs::read(&path).unwrap();
+            for s in secrets {
+                assert!(
+                    !bytes.windows(s.len()).any(|w| w == s.as_bytes()),
+                    "{} holds {s}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    // Under another service account token (one rotated) the copy does not
+    // open: it is rebuilt from the vault, then used again.
+    let other = "ops_another-service-account";
+    let (ok, out, calls, writes) = run(&a, other, &["token", "hub"], "");
+    assert!(ok && out.trim() == "refreshed-2", "{out}");
+    assert_eq!((calls, writes), (3, 0));
+    let (_, _, calls, _) = run(&a, other, &["token", "hub"], "");
+    assert_eq!(calls, 0);
+    // And a damaged copy the same.
+    let copy = a.join("1password-copy");
+    let mut bytes = std::fs::read(&copy).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    std::fs::write(&copy, bytes).unwrap();
+    let (ok, out, calls, _) = run(&a, other, &["token", "hub"], "");
+    assert!(ok && out.trim() == "refreshed-2", "{out}");
+    assert_eq!(calls, 3);
+
+    // A logout elsewhere reaches B at its next sync (`sesame providers`).
+    let (ok, out, ..) = on(&a, &["logout", "hub"]);
+    assert!(ok, "{out}");
+    let (ok, out, ..) = on(&b, &["providers"]);
+    let hub = out
+        .lines()
+        .find(|l| l.starts_with("hub "))
+        .unwrap_or_default();
+    assert!(ok && hub.contains("not logged in"), "{out}");
+    let (ok, out, calls, _) = on(&b, &["token", "hub"]);
+    assert!(!ok && out.contains("not logged in"), "{out}");
+    // Not logged in: it looked in the vault (another machine may have).
+    assert_eq!(calls, 2);
     let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -580,9 +580,26 @@ pub enum Refresh {
 /// token is returned even where it lasts less than asked: its expiry says so.
 /// The read, the refresh and the write hold the database's lock, so a second
 /// process refreshing the same provider waits and then sees the new token.
+/// Before refreshing, the store syncs (the vault's copy reads what another
+/// machine wrote): a token refreshed there, or for `Refresh::Now` any other
+/// token than the one refused, is used without refreshing again.
 pub fn valid_token(name: &str, p: &Provider, refresh: Refresh) -> Result<Token, String> {
+    let fresh = |t: &Token| match refresh {
+        Refresh::Within(secs) => t.expires_at.is_none_or(|t| t > now() + secs.max(MIN_LIFE)),
+        Refresh::Now => false,
+    };
     Store::open()?.locked(|store| {
-        let Some(token) = store.token(name)? else {
+        let mut token = store.token(name)?;
+        if let Some(t) = &token
+            && fresh(t)
+        {
+            return Ok(t.clone());
+        }
+        // Another machine may have logged in or refreshed already.
+        let refused = token.map(|t| t.access_token);
+        store.sync(name)?;
+        token = store.token(name)?;
+        let Some(token) = token else {
             if client(store, name, p)?.is_none() {
                 return Err(no_client(name));
             }
@@ -590,13 +607,9 @@ pub fn valid_token(name: &str, p: &Provider, refresh: Refresh) -> Result<Token, 
                 "not logged in to `{name}`; run `sesame login {name}`"
             ));
         };
-        let fresh = match refresh {
-            Refresh::Within(secs) => token
-                .expires_at
-                .is_none_or(|t| t > now() + secs.max(MIN_LIFE)),
-            Refresh::Now => false,
-        };
-        if fresh {
+        if fresh(&token)
+            || (matches!(refresh, Refresh::Now) && Some(&token.access_token) != refused.as_ref())
+        {
             return Ok(token);
         }
         let refresh = token.refresh_token.clone().ok_or_else(|| {
