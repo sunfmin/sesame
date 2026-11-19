@@ -3,10 +3,10 @@
 //! the request, refreshes and retries once on a 401, says which login adds a
 //! missing scope on a 403, and prints the answer.
 
-use crate::handed::{self, Handed};
 use crate::oauth;
-use crate::providers::{self, Target};
-use crate::refresh::{self, Refresh};
+use crate::providers::Target;
+use crate::refresh;
+use crate::source::{self, Refused};
 use crate::store::{Store, Token};
 use crate::wire;
 use std::io::{IsTerminal, Read, Write};
@@ -45,20 +45,9 @@ impl Call {
             include,
         } = self;
         let (name, path, headers) = (provider.as_str(), path.as_str(), headers.as_slice());
-        let (t, holder) = match handed::find(name)? {
-            Some((t, h)) => (t, Holder::Handed(h)),
-            None => {
-                let store = Store::open()?;
-                (providers::find(&store, name)?, Holder::Store(store))
-            }
-        };
-        let (name, p) = (t.provider.as_str(), &t.p);
-        let mut token = match &holder {
-            Holder::Handed(h) => h.token.clone(),
-            Holder::Store(s) => {
-                refresh::valid_token(s, name, p, Refresh::Within(refresh::MIN_LIFE))?
-            }
-        };
+        let (t, source) = source::find(name, Store::open)?;
+        let p = &t.p;
+        let mut token = source.token(&t, refresh::MIN_LIFE)?;
         let url = wire::api_url(t.api_base(), p, &token, path)?;
         let body = match data.as_deref() {
             None => None,
@@ -92,12 +81,15 @@ impl Call {
             req.send().map_err(|e| format!("{url}: {e}"))
         };
         let mut resp = send(&token)?;
-        if let Holder::Store(s) = &holder
-            && resp.status() == reqwest::StatusCode::UNAUTHORIZED
-            && token.refresh_token.is_some()
-        {
-            token = refresh::valid_token(s, name, p, Refresh::Now)?;
-            resp = send(&token)?;
+        let mut tell = None;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            match source.refused(&t, &token)? {
+                Refused::Retry(new) => {
+                    token = new;
+                    resp = send(&token)?;
+                }
+                Refused::Tell(words) => tell = Some(words),
+            }
         }
         let status = resp.status();
         if include || !status.is_success() {
@@ -115,11 +107,8 @@ impl Call {
             .unwrap_or_default()
             .to_string();
         let bytes = resp.bytes().map_err(|e| e.to_string())?;
-        if let (Holder::Handed(h), reqwest::StatusCode::UNAUTHORIZED) = (&holder, status) {
-            eprintln!(
-                "sesame: the token handed in `{}` was refused or has expired; its holder must hand a new one",
-                h.var
-            );
+        if let Some(words) = tell {
+            eprintln!("{words}");
         }
         if status == reqwest::StatusCode::FORBIDDEN && wire::lacks_scope(&challenge, &bytes) {
             eprintln!("{}", scope_hint(&t, &url));
@@ -144,13 +133,6 @@ impl Call {
         }
         Ok(ExitCode::SUCCESS)
     }
-}
-
-/// Where the call's token comes from: the environment, or the store, opened
-/// once for the call and its refresh.
-enum Holder {
-    Handed(Handed),
-    Store(Store),
 }
 
 /// The next step for a call refused for want of a scope: log in to the service
