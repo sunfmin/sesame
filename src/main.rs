@@ -9,6 +9,7 @@ mod store;
 // build.rs runs it to stamp the version; compiled here too, for its tests.
 #[cfg_attr(not(test), allow(dead_code))]
 mod version;
+mod wire;
 
 use clap::{Parser, Subcommand};
 use std::io::Read;

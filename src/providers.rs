@@ -633,7 +633,7 @@ impl Provider {
                     .ok()
                     .and_then(|u| u.host_str().map(String::from))
                     .unwrap_or_default();
-                if !self.allows_host(&host) {
+                if !crate::wire::allows_host(self, &host) {
                     return Err(format!(
                         "identity_url `{u}`: the token goes only to hosts, and {host} is not one"
                     ));
@@ -671,7 +671,7 @@ impl Provider {
                 .ok()
                 .and_then(|u| u.host_str().map(String::from))
                 .unwrap_or_default();
-            if !self.allows_host(&host) {
+            if !crate::wire::allows_host(self, &host) {
                 return Err(format!(
                     "service `{n}` api_base `{}`: the token goes only to hosts, and {host} is not one",
                     s.api_base
@@ -697,34 +697,6 @@ impl Provider {
             Some(port) => self.redirect_uri(port),
             None => self.redirect_uri(0).replace(":0/", ":<any port>/"),
         }
-    }
-
-    /// Where a refresh goes: `refresh_url`, or else the token endpoint.
-    pub fn refresh_endpoint(&self) -> &str {
-        self.refresh_url.as_deref().unwrap_or(&self.token_url)
-    }
-
-    /// The first of `error_fields` a 2xx JSON answer carries with a value that
-    /// is not empty (`null`, `false`, `""`, `[]` and `{}` are empty).
-    pub fn error_in<'a>(&'a self, body: &[u8]) -> Option<&'a str> {
-        let v: Value = serde_json::from_slice(body).ok()?;
-        self.error_fields
-            .iter()
-            .find(|f| match v.get(f.as_str()) {
-                None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-                Some(Value::String(s)) => !s.is_empty(),
-                Some(Value::Array(a)) => !a.is_empty(),
-                Some(Value::Object(o)) => !o.is_empty(),
-                Some(_) => true,
-            })
-            .map(String::as_str)
-    }
-
-    pub fn allows_host(&self, host: &str) -> bool {
-        self.hosts.iter().any(|h| match h.strip_prefix("*.") {
-            Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
-            None => host == h,
-        })
     }
 }
 
@@ -994,14 +966,6 @@ mod tests {
     }
 
     #[test]
-    fn host_patterns() {
-        let p = built_in("google");
-        assert!(p.allows_host("docs.googleapis.com"));
-        assert!(!p.allows_host("googleapis.com.evil.com"));
-        assert!(!p.allows_host("evil.com"));
-    }
-
-    #[test]
     fn user_fields_override_only_themselves() {
         let g = built_in("google");
         let p = effective("google", Some(&g), &fields(json!({"scopes": ["email"]}))).unwrap();
@@ -1087,24 +1051,5 @@ mod tests {
         f.remove("token_url");
         let e = effective("a", None, &f).unwrap_err();
         assert!(e.contains("missing field `token_url`"), "{e}");
-    }
-
-    #[test]
-    fn error_fields_fail_only_when_not_empty() {
-        let p = built_in("linear");
-        assert_eq!(
-            p.error_in(br#"{"errors":[{"message":"x"}]}"#),
-            Some("errors")
-        );
-        for ok in [
-            &br#"{"data":{}}"#[..],
-            br#"{"data":{},"errors":[]}"#,
-            br#"{"errors":null}"#,
-            br#"[1]"#,
-            b"not json",
-        ] {
-            assert_eq!(p.error_in(ok), None, "{}", String::from_utf8_lossy(ok));
-        }
-        assert_eq!(built_in("google").error_in(br#"{"errors":[1]}"#), None);
     }
 }
