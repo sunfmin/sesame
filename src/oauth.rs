@@ -2,12 +2,11 @@
 //! off), the code coming back on a loopback redirect or pasted from an https
 //! one; or the device flow (RFC 8628). Plus refresh, and storing a token the
 //! person pasted.
-use crate::providers::{ClientAuth, Provider, Redirect, Target, TokenBody};
+use crate::providers::{Provider, Redirect, Target};
 use crate::store::{Client, Store, Token};
+use crate::wire::{self, Grant, Poll};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
@@ -128,9 +127,7 @@ pub fn login(store: &Store, t: &Target, opts: &LoginOptions) -> Result<Token, St
     let before = store.token(name)?.map(|t| granted(&t)).unwrap_or_default();
     let scopes = opts.scopes.clone().unwrap_or_else(|| wanted(t, &before));
     let mut token = match &p.device_url {
-        Some(device_url) if !opts.loopback => {
-            device_flow(p, &client, device_url, &scopes, opts.open_browser)?
-        }
+        Some(_) if !opts.loopback => device_flow(p, &client, &scopes, opts.open_browser)?,
         _ => loopback_flow(name, p, &client, &scopes, opts.open_browser)?,
     };
     if token.scope.is_none() && !scopes.is_empty() {
@@ -139,8 +136,8 @@ pub fn login(store: &Store, t: &Target, opts: &LoginOptions) -> Result<Token, St
     if let Some(resources_url) = &p.resources_url {
         pick_resource(&mut token, resources_url, opts.site.as_deref())?;
     }
-    if let (Some(url), Some(field)) = (&p.identity_url, &p.identity_field) {
-        match identify(p, &token, url, field) {
+    if let (Some(url), Some(_)) = (&p.identity_url, &p.identity_field) {
+        match identify(p, &token, url) {
             Ok(account) => token.account = Some(account),
             Err(e) => eprintln!("Signed in, but could not read who you are: {e}"),
         }
@@ -169,25 +166,14 @@ fn loopback_flow(
     let verifier = random();
     let state = random();
 
-    let mut url = url::Url::parse(&p.auth_url).map_err(|e| e.to_string())?;
-    {
-        let mut q = url.query_pairs_mut();
-        q.append_pair("response_type", "code")
-            .append_pair("client_id", &client.client_id)
-            .append_pair("redirect_uri", &redirect_uri);
-        if !scopes.is_empty() {
-            q.append_pair(&p.scope_param, &scopes.join(&p.scope_separator));
-        }
-        q.append_pair("state", &state);
-        if p.pkce {
-            let challenge = B64.encode(Sha256::digest(verifier.as_bytes()));
-            q.append_pair("code_challenge", &challenge)
-                .append_pair("code_challenge_method", "S256");
-        }
-        for (k, v) in &p.auth_params {
-            q.append_pair(k, v);
-        }
-    }
+    let url = wire::authorize_url(
+        p,
+        &client.client_id,
+        &redirect_uri,
+        scopes,
+        &state,
+        &verifier,
+    )?;
 
     eprintln!("Open this URL to sign in:\n\n  {url}\n");
     let within = match p.code_seconds {
@@ -242,35 +228,16 @@ fn loopback_flow(
     }
     let code = param("code").ok_or("redirect carried no code")?;
 
-    let mut form = vec![
-        ("grant_type", "authorization_code".to_string()),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-    ];
-    if p.pkce {
-        form.push(("code_verifier", verifier));
-    }
-    let (status, text) = post(p, &p.token_url, form, Some(client))?;
+    let grant = Grant::Code {
+        code: &code,
+        redirect_uri: &redirect_uri,
+        verifier: &verifier,
+    };
+    let (status, text) = post(wire::token_request(p, grant, client)?)?;
     if !status.is_success() {
-        return Err(code_refused(name, p, status, &text));
+        return Err(wire::code_refused(name, p, status, &text));
     }
-    token_from(p, &text, None)
-}
-
-/// The error for a refused code exchange. An `invalid_grant`, or any 4xx from a
-/// provider whose code lasts only seconds, most likely means the code expired.
-fn code_refused(name: &str, p: &Provider, status: reqwest::StatusCode, text: &str) -> String {
-    let mut e = format!("token endpoint answered {status}: {text}");
-    if text.contains("invalid_grant") || (p.code_seconds.is_some() && status.is_client_error()) {
-        let lasts = match p.code_seconds {
-            Some(s) => format!(" (it lasts {s} seconds)"),
-            None => String::new(),
-        };
-        e.push_str(&format!(
-            "\nThe authorization code most likely expired{lasts}; run `sesame login {name}` again."
-        ));
-    }
-    e
+    wire::token_from(p, &text, None, now())
 }
 
 /// Answers the browser's redirect to the loopback callback and sends its
@@ -303,7 +270,6 @@ fn listen(listener: TcpListener, origin: &str, tx: mpsc::Sender<String>) {
 fn device_flow(
     p: &Provider,
     client: &Client,
-    device_url: &str,
     scopes: &[String],
     open_browser: bool,
 ) -> Result<Token, String> {
@@ -316,11 +282,7 @@ fn device_flow(
         expires_in: Option<u64>,
         interval: Option<u64>,
     }
-    let mut form = vec![("client_id", client.client_id.clone())];
-    if !scopes.is_empty() {
-        form.push(("scope", scopes.join(&p.scope_separator)));
-    }
-    let (status, text) = post(p, device_url, form, None)?;
+    let (status, text) = post(wire::token_request(p, Grant::Device(scopes), client)?)?;
     if !status.is_success() {
         return Err(format!("device endpoint answered {status}: {text}"));
     }
@@ -343,37 +305,11 @@ fn device_flow(
     let mut interval = d.interval.unwrap_or(5);
     loop {
         std::thread::sleep(Duration::from_secs(interval));
-        let form = vec![
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:device_code".to_string(),
-            ),
-            ("device_code", d.device_code.clone()),
-        ];
-        let (status, text) = post(p, &p.token_url, form, Some(client))?;
-        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-        match v.get("error").and_then(|e| e.as_str()) {
-            None if status.is_success() => return token_from(p, &text, None),
-            None => return Err(format!("token endpoint answered {status}: {text}")),
-            Some("authorization_pending") => {}
-            // The provider may name the new interval (GitHub does); else 5s more.
-            Some("slow_down") => {
-                interval = v
-                    .get("interval")
-                    .and_then(|i| i.as_u64())
-                    .unwrap_or(interval + 5)
-            }
-            Some("expired_token" | "token_expired") => {
-                return Err("the code expired before access was approved; run login again".into());
-            }
-            Some("access_denied") => return Err("access was denied on the provider's page".into()),
-            Some(e) => {
-                let detail = v
-                    .get("error_description")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or_default();
-                return Err(format!("provider refused: {e} {detail}"));
-            }
+        let poll = wire::token_request(p, Grant::DeviceCode(&d.device_code), client)?;
+        let (status, text) = post(poll)?;
+        match wire::device_poll(p, status, &text, interval, now())? {
+            Poll::Token(t) => return Ok(t),
+            Poll::Again(next) => interval = next,
         }
         if now() + interval > deadline {
             return Err("the code expired before access was approved; run login again".into());
@@ -381,9 +317,8 @@ fn device_flow(
     }
 }
 
-/// Reads `field` of the provider's `identity_url` answer: the account signed in.
-/// A `field` starting with `/` is a JSON pointer; `identity_body` makes the call a POST.
-fn identify(p: &Provider, token: &Token, url: &str, field: &str) -> Result<String, String> {
+/// Who signed in: the provider's `identity_url` answer, read as `wire::identity_from` says.
+fn identify(p: &Provider, token: &Token, url: &str) -> Result<String, String> {
     let req = match &p.identity_body {
         Some(b) => http().post(url).json(b),
         None => http().get(url),
@@ -395,102 +330,19 @@ fn identify(p: &Provider, token: &Token, url: &str, field: &str) -> Result<Strin
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.bytes())
         .map_err(|e| format!("{url}: {e}"))?;
-    if let Some(f) = p.error_in(&bytes) {
-        let text = String::from_utf8_lossy(&bytes);
-        return Err(format!("{url} answered with `{f}`: {text}"));
-    }
-    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("{url}: {e}"))?;
-    let found = if field.starts_with('/') {
-        v.pointer(field)
-    } else {
-        v.get(field)
-    };
-    match found {
-        Some(serde_json::Value::String(s)) => Ok(s.clone()),
-        None | Some(serde_json::Value::Null) => Err(format!("{url} has no `{field}`")),
-        Some(other) => Ok(other.to_string()),
-    }
+    wire::identity_from(p, &bytes)
 }
 
-#[derive(serde::Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: Option<u64>,
-    scope: Option<String>,
-}
-
-/// POSTs `form` to one of the provider's OAuth endpoints, in its `token_body`
-/// encoding, asking for JSON; with `client`, authenticated as its `client_auth` says.
-fn post(
-    p: &Provider,
-    url: &str,
-    mut form: Vec<(&str, String)>,
-    client: Option<&Client>,
-) -> Result<(reqwest::StatusCode, String), String> {
-    let mut req = http().post(url).header("Accept", "application/json");
-    match (client, p.client_auth) {
-        (None, _) => {}
-        (Some(c), ClientAuth::Body) => {
-            form.push(("client_id", c.client_id.clone()));
-            if let Some(s) = &c.client_secret {
-                form.push(("client_secret", s.clone()));
-            }
-        }
-        (Some(c), ClientAuth::Basic) => {
-            req = req.basic_auth(&c.client_id, c.client_secret.as_ref());
-        }
+/// Sends a request `wire` built; the answer's status and text.
+fn post(r: wire::Request) -> Result<(reqwest::StatusCode, String), String> {
+    let mut req = http().post(&r.url).body(r.body);
+    for (k, v) in r.headers {
+        req = req.header(k, v);
     }
-    let req = match p.token_body {
-        TokenBody::Form => req.form(&form),
-        TokenBody::Json => req.json(
-            &form
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeMap<_, _>>(),
-        ),
-    };
-    let resp = req.send().map_err(|e| format!("{url}: {e}"))?;
+    let resp = req.send().map_err(|e| format!("{}: {e}", r.url))?;
     let status = resp.status();
     let text = resp.text().map_err(|e| e.to_string())?;
     Ok((status, text))
-}
-
-/// The token in a token endpoint's answer: at `token_path`, or at the top
-/// level when nothing with an `access_token` is there (a Slack refresh).
-fn token_from(p: &Provider, text: &str, previous: Option<&Token>) -> Result<Token, String> {
-    if let Some(f) = p.error_in(text.as_bytes()) {
-        return Err(format!("token endpoint answered with `{f}`: {text}"));
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("token response: {e}: {text}"))?;
-    let site_name = p
-        .site_name_field
-        .as_deref()
-        .and_then(|f| match f.starts_with('/') {
-            true => v.pointer(f),
-            false => v.get(f),
-        })
-        .and_then(|n| n.as_str())
-        .map(String::from);
-    let at = v
-        .pointer(&p.token_path)
-        .filter(|t| t.get("access_token").is_some())
-        .unwrap_or(&v);
-    let t = TokenResponse::deserialize(at).map_err(|e| format!("token response: {e}: {text}"))?;
-    Ok(Token {
-        access_token: t.access_token,
-        // Providers that do not rotate refresh tokens omit it on refresh.
-        refresh_token: t
-            .refresh_token
-            .or_else(|| previous.and_then(|p| p.refresh_token.clone())),
-        expires_at: t.expires_in.map(|s| now() + s),
-        scope: t.scope.or_else(|| previous.and_then(|p| p.scope.clone())),
-        resource_id: previous.and_then(|p| p.resource_id.clone()),
-        resource_name: site_name.or_else(|| previous.and_then(|p| p.resource_name.clone())),
-        account: previous.and_then(|p| p.account.clone()),
-        pasted: false,
-    })
 }
 
 /// `sesame login --token`: stores a token the person got another way. It has
@@ -516,8 +368,8 @@ pub fn save_pasted(
         account: None,
         pasted: true,
     };
-    if let (Some(url), Some(field)) = (&p.identity_url, &p.identity_field) {
-        match identify(p, &token, url, field) {
+    if let (Some(url), Some(_)) = (&p.identity_url, &p.identity_field) {
+        match identify(p, &token, url) {
             Ok(account) => token.account = Some(account),
             Err(e) => eprintln!("Stored, but could not read who the token belongs to: {e}"),
         }
@@ -527,43 +379,23 @@ pub fn save_pasted(
 }
 
 fn pick_resource(token: &mut Token, url: &str, site: Option<&str>) -> Result<(), String> {
-    #[derive(serde::Deserialize)]
-    struct Resource {
-        id: String,
-        #[serde(default)]
-        name: String,
-        #[serde(default)]
-        url: String,
-    }
-    let list: Vec<Resource> = http()
+    let bytes = http()
         .get(url)
         .bearer_auth(&token.access_token)
         .header("Accept", "application/json")
         .send()
         .and_then(|r| r.error_for_status())
-        .and_then(|r| r.json())
+        .and_then(|r| r.bytes())
         .map_err(|e| format!("listing sites: {e}"))?;
-    let chosen = match site {
-        Some(s) => list
-            .iter()
-            .find(|r| r.name == s || r.url.contains(s) || r.id == s),
-        None => list.first(),
-    }
-    .ok_or_else(|| {
-        let names: Vec<_> = list
-            .iter()
-            .map(|r| format!("{} ({})", r.name, r.url))
-            .collect();
-        format!("no matching site; this login reaches: {}", names.join(", "))
-    })?;
-    if site.is_none() && list.len() > 1 {
+    let (chosen, others) = wire::pick_site(&bytes, site)?;
+    if others {
         eprintln!(
             "Using site {} ({}); pick another with --site.",
             chosen.name, chosen.url
         );
     }
-    token.resource_id = Some(chosen.id.clone());
-    token.resource_name = Some(chosen.name.clone());
+    token.resource_id = Some(chosen.id);
+    token.resource_name = Some(chosen.name);
     Ok(())
 }
 
@@ -577,15 +409,12 @@ pub fn refresh(
     refresh_token: String,
 ) -> Result<Token, String> {
     let (client, _) = client(store, name, p)?.ok_or_else(|| no_client(name))?;
-    let form = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh_token),
-    ];
-    let (status, text) = post(p, p.refresh_endpoint(), form, Some(&client))?;
+    let grant = Grant::Refresh(&refresh_token);
+    let (status, text) = post(wire::token_request(p, grant, &client)?)?;
     if !status.is_success() {
         return Err(format!(
             "refresh endpoint answered {status}: {text}\nRun `sesame login {name}` again."
         ));
     }
-    token_from(p, &text, Some(token))
+    wire::token_from(p, &text, Some(token), now())
 }

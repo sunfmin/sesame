@@ -5,9 +5,10 @@
 
 use crate::handed::{self, Handed};
 use crate::oauth;
-use crate::providers::{self, Provider, Target};
+use crate::providers::{self, Target};
 use crate::refresh::{self, Refresh};
 use crate::store::{Store, Token};
+use crate::wire;
 use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 
@@ -58,7 +59,7 @@ impl Call {
                 refresh::valid_token(s, name, p, Refresh::Within(refresh::MIN_LIFE))?
             }
         };
-        let url = resolve(t.api_base(), p, &token, path)?;
+        let url = wire::api_url(t.api_base(), p, &token, path)?;
         let body = match data.as_deref() {
             None => None,
             Some("@-") => {
@@ -76,29 +77,16 @@ impl Call {
         let method = method.unwrap_or_else(|| if body.is_some() { "POST" } else { "GET" }.into());
         let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
             .map_err(|e| e.to_string())?;
+        let headers = wire::api_headers(p, headers, body.is_some())?;
         let http = oauth::http();
         let send = |token: &Token| {
             let mut req = http
                 .request(method.clone(), url.clone())
                 .bearer_auth(&token.access_token);
-            let mut given = Vec::new();
-            for h in headers {
-                let (k, v) = h
-                    .split_once(':')
-                    .ok_or_else(|| format!("header `{h}` has no `:`"))?;
-                given.push(k.trim().to_ascii_lowercase());
-                req = req.header(k.trim(), v.trim());
+            for (k, v) in &headers {
+                req = req.header(k, v);
             }
-            for (k, v) in &p.api_headers {
-                if !given.contains(&k.to_ascii_lowercase()) {
-                    req = req.header(k, v);
-                }
-            }
-            let has_type = given.iter().any(|k| k == "content-type");
             if let Some(b) = &body {
-                if !has_type {
-                    req = req.header("Content-Type", "application/json");
-                }
                 req = req.body(b.clone());
             }
             req.send().map_err(|e| format!("{url}: {e}"))
@@ -133,7 +121,7 @@ impl Call {
                 h.var
             );
         }
-        if status == reqwest::StatusCode::FORBIDDEN && lacks_scope(&challenge, &bytes) {
+        if status == reqwest::StatusCode::FORBIDDEN && wire::lacks_scope(&challenge, &bytes) {
             eprintln!("{}", scope_hint(&t, &url));
         }
         let mut out = std::io::stdout().lock();
@@ -150,7 +138,7 @@ impl Call {
         if !status.is_success() {
             return Ok(ExitCode::FAILURE);
         }
-        if let Some(f) = p.error_in(&bytes) {
+        if let Some(f) = wire::error_in(p, &bytes) {
             eprintln!("sesame: the answer carries `{f}`: the call failed despite {status}");
             return Ok(ExitCode::FAILURE);
         }
@@ -163,16 +151,6 @@ impl Call {
 enum Holder {
     Handed(Handed),
     Store(Store),
-}
-
-/// A 403 for a token that lacks a scope: RFC 6750's `insufficient_scope`
-/// challenge, or Google's `insufficientPermissions` / `ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
-fn lacks_scope(challenge: &str, body: &[u8]) -> bool {
-    let body = String::from_utf8_lossy(body);
-    challenge.contains("insufficient_scope")
-        || ["insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"]
-            .iter()
-            .any(|m| body.contains(m))
 }
 
 /// The next step for a call refused for want of a scope: log in to the service
@@ -194,30 +172,4 @@ fn scope_hint(t: &Target, url: &url::Url) -> String {
             p = t.provider
         ),
     }
-}
-
-fn resolve(api_base: &str, p: &Provider, token: &Token, path: &str) -> Result<url::Url, String> {
-    let url = if path.starts_with("https://") || path.starts_with("http://") {
-        url::Url::parse(path).map_err(|e| e.to_string())?
-    } else {
-        let mut base = api_base.to_string();
-        if base.contains("{resource_id}") {
-            let id = token
-                .resource_id
-                .as_deref()
-                .ok_or("no site stored: log in again, or give a full URL")?;
-            base = base.replace("{resource_id}", id);
-        }
-        let sep = if path.starts_with('/') { "" } else { "/" };
-        url::Url::parse(&format!("{}{sep}{path}", base.trim_end_matches('/')))
-            .map_err(|e| e.to_string())?
-    };
-    let host = url.host_str().unwrap_or("");
-    if !p.allows_host(host) {
-        return Err(format!(
-            "refusing to send the token to {host}: not one of {:?}",
-            p.hosts
-        ));
-    }
-    Ok(url)
 }
