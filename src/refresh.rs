@@ -74,6 +74,9 @@ pub fn decide(token: Option<Token>, read: &Read, now: u64, refresh: Refresh) -> 
 /// token is returned even where it lasts less than asked: its expiry says so.
 /// The read, the refresh and the write hold the store's lock, so a second
 /// process refreshing the same provider waits and then sees the new token.
+/// Before refreshing, the store syncs (the vault's copy reads what another
+/// machine wrote): a token refreshed there, or for `Refresh::Now` any other
+/// token than the one refused, is used without refreshing again.
 pub fn valid_token(
     store: &Store,
     name: &str,
