@@ -179,13 +179,42 @@ with the same two variables uses the same logins; on disk there is only an
 encrypted copy of the vault's sesame items (below) and an empty lock file,
 `sesame.lock`. Unset, sesame uses
 `sesame.db` as before. There is no config file: a machine opts in by its
-environment, for example a `mytokens` profile carrying both:
+environment, for example a `mytokens` profile carrying both.
 
-```sh
-mytokens put sesame --set "SESAME_1PASSWORD_VAULT=sesame"
-mytokens put sesame --fields "OP_SERVICE_ACCOUNT_TOKEN"     # prompted; give it read and write on the vault
-(eval "$(mytokens env sesame)"; sesame api github /user)
-```
+Switching it on, end to end:
+
+1. **A vault of its own** (see below why): in 1Password, create a vault, say
+   `sesame` (`op vault create sesame`, signed in as yourself).
+2. **A service account with read and write on that vault only**: in
+   1Password's Developer > Service Accounts (or `op service-account create
+   sesame --vault sesame:read_items,write_items`), give it no other vault, and
+   copy its token, shown once.
+3. **Both variables in mytokens**, never in a shell rc or a file:
+
+   ```sh
+   mytokens put sesame --set "SESAME_1PASSWORD_VAULT=sesame"
+   mytokens put sesame --fields "OP_SERVICE_ACCOUNT_TOKEN"     # prompted: paste the service account's token
+   ```
+
+4. **Move what `sesame.db` holds into the vault**, so you keep your logins
+   instead of signing in to every provider again:
+
+   ```sh
+   (eval "$(mytokens env sesame)"; sesame store migrate)
+   (eval "$(mytokens env sesame)"; sesame providers)    # every login, now from the vault
+   ```
+
+   `store migrate` copies every client, token and provider field, one write per
+   provider (and one for all provider fields), within the service account's
+   write budget. It overwrites nothing: where the vault already holds something
+   else for a provider, that is reported as a conflict, left as it is, and the
+   command says how to settle it. A run cut short (the budget, an error) goes on
+   where it stopped when run again; once all is copied it writes nothing. Only
+   then is `sesame.db` renamed to `sesame.db.migrated-<date>`, not deleted: it
+   prints how to go back (unset `SESAME_1PASSWORD_VAULT`, rename it back) and,
+   since it still holds the secrets in plaintext, how to delete it once sesame
+   works from the vault. Without `SESAME_1PASSWORD_VAULT` it refuses, saying
+   what to set.
 
 - The vault named but the token missing, `op` not on PATH, or a vault the
   service account cannot read: sesame stops with an error saying which. It

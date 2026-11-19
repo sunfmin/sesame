@@ -2844,6 +2844,236 @@ fn one_password_vault_errors() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// `sesame store migrate` copies sesame.db into the vault: a run cut short by
+/// the write budget goes on when run again, an item the vault already holds
+/// otherwise is reported and left as it is, a second run writes nothing, and
+/// after a full copy sesame.db is renamed and every command works from the
+/// vault alone.
+#[test]
+fn one_password_vault_migrate() {
+    let (port, _log) = serve(move |target, body| {
+        match target {
+        "/device" => (
+            "200 OK",
+            r#"{"device_code":"dev","user_code":"WDJB-MJHT","verification_uri":"https://example.com/device","expires_in":60,"interval":0}"#.into(),
+        ),
+        "/token" if body.contains("grant_type=urn") => (
+            "200 OK",
+            r#"{"access_token":"device-token","refresh_token":"refresh-secret-1","expires_in":3600,"scope":"repo"}"#.into(),
+        ),
+        "/user" => ("200 OK", r#"{"login":"octo"}"#.into()),
+        "/me" => ("200 OK", r#"{"me":"octo"}"#.into()),
+        _ => ("404 Not Found", "{}".into()),
+    }
+    });
+    let tmp = std::env::temp_dir().join(format!("sesame-migrate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let vault = FakeVault::new(&tmp);
+    let run = |in_vault: bool, args: &[&str], stdin: &str, setup: &dyn Fn(&mut Command)| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        vault.env(&mut c);
+        if !in_vault {
+            c.env_remove("SESAME_1PASSWORD_VAULT");
+        }
+        setup(&mut c);
+        let mut child = c
+            .args(args)
+            .env("SESAME_CONFIG_DIR", &config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+    let local = |args: &[&str], stdin: &str| run(false, args, stdin, &|_| {});
+    let writes = || {
+        vault
+            .calls()
+            .iter()
+            .filter(|(a, _)| ["create", "edit", "delete"].contains(&a[1].as_str()))
+            .count()
+    };
+    // A migrate run: (ok, output, writes it made).
+    let migrate = |setup: &dyn Fn(&mut Command)| {
+        let before = writes();
+        let (ok, out) = run(true, &["store", "migrate"], "", setup);
+        (ok, out, writes() - before)
+    };
+
+    // sesame.db: a token with refresh (`hub`), a client only (`cli`), a
+    // pasted token (`pst`), and the user provider fields defining them.
+    let base = format!("http://127.0.0.1:{port}");
+    for name in ["hub", "cli", "pst"] {
+        let (ok, out) = local(
+            &[
+                "provider",
+                "add",
+                name,
+                "--auth-url",
+                &format!("{base}/authorize"),
+                "--token-url",
+                &format!("{base}/token"),
+                "--api-base",
+                &base,
+                "--host",
+                "127.0.0.1",
+                "--scope",
+                "repo",
+                "--device-url",
+                &format!("{base}/device"),
+                "--identity-url",
+                &format!("{base}/user"),
+                "--identity-field",
+                "login",
+            ],
+            "",
+        );
+        assert!(ok, "{out}");
+    }
+    let (ok, out) = local(
+        &["client", "hub", "--client-id", "hub-id", "--secret-stdin"],
+        "hub-secret\n",
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = local(&["login", "hub", "--no-browser"], "");
+    assert!(ok && out.contains("Logged in to `hub` (octo)"), "{out}");
+    let (ok, out) = local(
+        &["client", "cli", "--client-id", "cli-id", "--no-secret"],
+        "",
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = local(&["login", "pst", "--token-stdin"], "pasted-secret");
+    assert!(ok, "{out}");
+    let db = config.join("sesame.db");
+    assert!(db.exists());
+
+    // Without the vault: refuses, saying what to set.
+    let (ok, out) = run(false, &["store", "migrate"], "", &|_| {});
+    assert!(
+        !ok && out.contains("SESAME_1PASSWORD_VAULT is not set"),
+        "{out}"
+    );
+    assert!(vault.calls().is_empty());
+
+    // The vault already holds another client for `cli`.
+    let mut c = Command::new(vault.bin.join("op"));
+    vault.env(&mut c);
+    let mut op = c
+        .args(["item", "create", "--vault", VAULT, "--format", "json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    op.stdin
+        .take()
+        .unwrap()
+        .write_all(
+            serde_json::json!({
+                "title": "sesame.cli",
+                "category": "SECURE_NOTE",
+                "tags": ["sesame"],
+                "fields": [{"label": "client_id", "type": "STRING", "value": "other-id"}],
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+    assert!(op.wait().unwrap().success());
+    let conflicting = vault.item("sesame.cli").unwrap();
+
+    // Cut short by the budget after one write: says so, keeps sesame.db.
+    let budget = (writes() + 1).to_string();
+    let (ok, out, wrote) = migrate(&|c| {
+        c.env("FAKE_OP_MAX_WRITES", &budget);
+    });
+    assert!(!ok && out.contains("sesame store migrate` again"), "{out}");
+    // One write made, the next refused.
+    assert_eq!(wrote, 2, "{out}");
+    assert!(vault.item("sesame-providers").is_some() && vault.item("sesame.hub").is_none());
+    assert!(db.exists());
+
+    // Goes on: copies the rest, reports the conflict and leaves it as it is.
+    let (ok, out, wrote) = migrate(&|_| {});
+    assert!(
+        !ok && out.contains("Conflict") && out.contains("`cli`"),
+        "{out}"
+    );
+    assert_eq!(wrote, 2, "{out}");
+    assert_eq!(vault.item("sesame.cli").unwrap(), conflicting);
+    assert!(db.exists());
+    // Again: nothing written, the conflict still reported.
+    let (ok, out, wrote) = migrate(&|_| {});
+    assert!(!ok && out.contains("`cli`"), "{out}");
+    assert_eq!(wrote, 0, "{out}");
+
+    // Keep the vault's client: drop sesame.db's. Now everything is in the vault.
+    let (ok, out) = local(&["client", "cli", "--reset"], "");
+    assert!(ok, "{out}");
+    let (ok, out, wrote) = migrate(&|_| {});
+    assert!(ok, "{out}");
+    assert_eq!(wrote, 0, "{out}");
+    assert!(!db.exists());
+    let moved: Vec<_> = std::fs::read_dir(&config)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().contains("sesame.db.migrated-"))
+        .collect();
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    let moved = &moved[0];
+    assert!(
+        out.contains("plaintext")
+            && out.contains(&format!("rm {}", moved.display()))
+            && out.contains(&format!("mv {} {}", moved.display(), db.display())),
+        "{out}"
+    );
+
+    // Run again over the same database: writes nothing.
+    std::fs::copy(moved, &db).unwrap();
+    let (ok, out, wrote) = migrate(&|_| {});
+    assert!(ok && out.contains("already holds all"), "{out}");
+    assert_eq!(wrote, 0, "{out}");
+    assert!(!db.exists());
+
+    // From the vault alone, sesame.db out of the way.
+    for entry in std::fs::read_dir(&config).unwrap() {
+        let p = entry.unwrap().path();
+        if p.to_string_lossy().contains("sesame.db.") {
+            std::fs::remove_file(p).unwrap();
+        }
+    }
+    let item = vault.item("sesame.hub").unwrap();
+    assert_eq!(field(&item, "client_secret").unwrap().0, "CONCEALED");
+    assert_eq!(
+        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
+        "refresh-secret-1"
+    );
+    let vaulted = |args: &[&str]| run(true, args, "", &|_| {});
+    let (ok, out) = vaulted(&["token", "hub"]);
+    assert!(ok && out.trim() == "device-token", "{out}");
+    let (ok, out) = vaulted(&["api", "hub", "/me"]);
+    assert!(ok && out.contains(r#"{"me":"octo"}"#), "{out}");
+    let (ok, out) = vaulted(&["token", "pst"]);
+    assert!(ok && out.trim() == "pasted-secret", "{out}");
+    let (ok, out) = vaulted(&["providers"]);
+    assert!(
+        ok && out.contains("logged in (octo)") && out.contains("pasted token"),
+        "{out}"
+    );
+    assert!(!db.exists());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The vault's local copy (docs/adr/0002): a call with a valid token makes no
 /// `op` call at all, provider resolution included; a refresh lists the vault
 /// once, reads the provider's item, and writes it only when it refreshed;

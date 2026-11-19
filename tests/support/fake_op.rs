@@ -4,7 +4,9 @@
 //! environment carried the service account token. It answers as op 2.x does
 //! where sesame depends on it: errors on stderr with an `[ERROR] <date> <time>`
 //! prefix, "isn't an item", "isn't a vault", a template only from a stdin pipe
-//! without `--template`, and an edit without `tags` wiping them.
+//! without `--template`, and an edit without `tags` wiping them. With
+//! `FAKE_OP_MAX_WRITES=<n>`, a write after the first n logged is refused as
+//! op refuses one over the service account's budget.
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -44,6 +46,24 @@ fn main() {
     writeln!(log, "{line}").unwrap();
     if token.is_none() || token != expected {
         fail("authentication failed: invalid service account token");
+    }
+    let is_write = |argv: &[Value]| {
+        argv.len() > 1
+            && argv[0] == "item"
+            && ["create", "edit", "delete"].iter().any(|w| argv[1] == *w)
+    };
+    if let Ok(max) = std::env::var("FAKE_OP_MAX_WRITES") {
+        let writes = std::fs::read_to_string(dir.join("calls.log"))
+            .unwrap()
+            .lines()
+            .filter(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                is_write(v["argv"].as_array().unwrap())
+            })
+            .count();
+        if writes > max.parse().unwrap() && is_write(line["argv"].as_array().unwrap()) {
+            fail("Too many requests. Your client has been rate-limited. Try again in 3600 seconds");
+        }
     }
     if args.iter().any(|a| a == "--template") {
         fail("cannot create an item from template and stdin at the same time");
