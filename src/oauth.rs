@@ -80,7 +80,7 @@ pub fn client(
 /// a request without a User-Agent.
 pub fn http() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
-        .user_agent(concat!("sesame/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("sesame/", env!("SESAME_VERSION")))
         .build()
         .unwrap_or_default()
 }

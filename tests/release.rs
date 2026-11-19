@@ -1,21 +1,43 @@
-//! `packaging/release.sh`'s steps that publish nothing: `check` and `formula`.
+//! `packaging/release.sh`'s steps that publish nothing: `check-tag` and `dry`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/packaging/release.sh");
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn release(args: &[&str], dist: &Path) -> Output {
-    Command::new("sh")
+fn release(args: &[&str], dir: &Path) -> Output {
+    // A `gh` and a `git` ahead on PATH that leave a mark: neither may run.
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["gh", "git"] {
+        let stub = bin.join(tool);
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nexit 1\n",
+                dir.join("published").display()
+            ),
+        )
+        .unwrap();
+        Command::new("chmod").arg("+x").arg(&stub).status().unwrap();
+    }
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let out = Command::new("sh")
         .arg(SCRIPT)
         .args(args)
-        .env("DIST", dist)
+        .env("DIST", dir.join("dist"))
+        .env("BUILT", env!("CARGO_BIN_EXE_sesame"))
+        .env("PATH", path)
         .output()
-        .expect("run release.sh")
+        .expect("run release.sh");
+    assert!(
+        !dir.join("published").exists(),
+        "release.sh {args:?} ran gh or git"
+    );
+    out
 }
 
-fn tmp(name: &str) -> std::path::PathBuf {
+fn tmp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sesame-release-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -23,53 +45,62 @@ fn tmp(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn check_takes_only_the_tag_of_the_version() {
-    let dist = tmp("check");
-    assert!(
-        release(&["check", &format!("v{VERSION}")], &dist)
-            .status
-            .success()
-    );
-    let wrong = release(&["check", "v9.9.9"], &dist);
-    assert!(!wrong.status.success());
-    assert!(String::from_utf8_lossy(&wrong.stderr).contains("is not v"));
+fn check_tag_takes_only_a_version_tag() {
+    let dir = tmp("check-tag");
+    for good in ["v0.1.0", "v1.22.333"] {
+        assert!(
+            release(&["check-tag", good], &dir).status.success(),
+            "{good}"
+        );
+    }
+    for bad in [
+        "", "v1", "v1.2", "1.2.3", "v1.2.3.4", "v1..3", "v1.2.x", "v1.2.3;x",
+    ] {
+        let out = release(&["check-tag", bad], &dir);
+        assert_eq!(out.status.code(), Some(2), "{bad:?}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
-fn formula_points_at_the_tap_release_with_each_archive_sum() {
-    let dist = tmp("formula");
-    let missing = release(&["formula"], &dist);
-    assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("package it first"));
-
-    for arch in ["arm64", "x86_64"] {
-        std::fs::write(
-            dist.join(format!("sesame-{VERSION}-macos-{arch}.tar.gz")),
-            arch,
-        )
-        .unwrap();
-    }
-    let out = release(&["formula"], &dist);
+fn dry_packages_the_development_build_for_both_arches_and_checks_the_formula() {
+    let dir = tmp("dry");
+    let out = release(&["dry"], &dir);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let formula = String::from_utf8(out.stdout).unwrap();
+
+    let said = Command::new(env!("CARGO_BIN_EXE_sesame"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    let said = String::from_utf8(said.stdout).unwrap();
+    let version = said.trim().strip_prefix("sesame ").unwrap();
+    assert!(version.contains("+"), "a development build says {version}");
+
+    let dist = dir.join("dist");
+    let formula = std::fs::read_to_string(dist.join("sesame.rb")).unwrap();
     let base =
-        format!("https://github.com/sunfmin/homebrew-tap/releases/download/sesame-v{VERSION}");
+        format!("https://github.com/sunfmin/homebrew-tap/releases/download/sesame-v{version}");
     assert!(formula.contains("class Sesame < Formula"));
-    assert!(formula.contains(&format!("version \"{VERSION}\"")));
-    assert!(formula.contains(&format!(
-        "url \"{base}/sesame-{VERSION}-macos-arm64.tar.gz\""
-    )));
-    assert!(formula.contains(&format!(
-        "url \"{base}/sesame-{VERSION}-macos-x86_64.tar.gz\""
-    )));
+    assert!(formula.contains(&format!("version \"{version}\"")));
     for arch in ["arm64", "x86_64"] {
+        let archive = format!("sesame-{version}-macos-{arch}.tar.gz");
+        assert!(
+            formula.contains(&format!("url \"{base}/{archive}\"")),
+            "{arch}"
+        );
+        let listed = Command::new("tar")
+            .arg("-tzf")
+            .arg(dist.join(&archive))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&listed.stdout).trim(), "sesame");
         let sum = Command::new("shasum")
             .args(["-a", "256"])
-            .arg(dist.join(format!("sesame-{VERSION}-macos-{arch}.tar.gz")))
+            .arg(dist.join(&archive))
             .output()
             .unwrap();
         let sum = String::from_utf8(sum.stdout).unwrap();
@@ -82,15 +113,5 @@ fn formula_points_at_the_tap_release_with_each_archive_sum() {
     assert!(formula.contains(
         "assert_equal \"sesame #{version}\", shell_output(\"#{bin}/sesame --version\").strip"
     ));
-    let rb = dist.join("sesame.rb");
-    std::fs::write(&rb, &formula).unwrap();
-    let ruby = Command::new("ruby").arg("-c").arg(&rb).output();
-    if let Ok(ruby) = ruby {
-        assert!(
-            ruby.status.success(),
-            "{}",
-            String::from_utf8_lossy(&ruby.stderr)
-        );
-    }
-    std::fs::remove_dir_all(&dist).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
 }
