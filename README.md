@@ -132,6 +132,8 @@ sesame logout jira                            # forgets the local token only
   set), protected only by file permissions, as gcloud does: the file is 0600,
   the directory 0700. Do not put `~/.config/sesame` in a dotfiles repo or a
   synced folder.
+  To keep them out of the disk and share them between machines instead, use
+  a 1Password vault: see [Keeping logins in 1Password](#keeping-logins-in-1password-optional).
 - **`logout`** deletes the local token only; to revoke it, remove the app's
   access on the provider's side (Google account permissions, Atlassian
   connected apps, Notion's Settings > Connections, GitHub's Settings > Applications,
@@ -166,6 +168,54 @@ sesame logout jira                            # forgets the local token only
   SESAME_TOKEN_GMAIL=$token sesame api gmail /users/me/profile
   SESAME_PROVIDERS="{\"acme\": $(sesame provider show acme)}" SESAME_TOKEN_ACME=… sesame api acme /me
   ```
+
+## Keeping logins in 1Password (optional)
+
+With `SESAME_1PASSWORD_VAULT=<vault>` in the environment, sesame keeps
+everything `sesame.db` would hold (clients, tokens, your provider fields) in
+that 1Password vault instead, read and written by the 1Password CLI `op` as a
+**service account**, whose token is `OP_SERVICE_ACCOUNT_TOKEN`. Nothing of
+sesame's is then on disk (but an empty lock file, `sesame.lock`), and every
+machine with the same two variables uses the same logins. Unset, sesame uses
+`sesame.db` as before. There is no config file: a machine opts in by its
+environment, for example a `mytokens` profile carrying both:
+
+```sh
+mytokens put sesame --set "SESAME_1PASSWORD_VAULT=sesame"
+mytokens put sesame --fields "OP_SERVICE_ACCOUNT_TOKEN"     # prompted; give it read and write on the vault
+(eval "$(mytokens env sesame)"; sesame api github /user)
+```
+
+- The vault named but the token missing, `op` not on PATH, or a vault the
+  service account cannot read: sesame stops with an error saying which. It
+  never falls back to `sesame.db`.
+- **The items.** `sesame.<provider>` holds that provider's client and token, one
+  field each (`client_id`, `client_secret`, `access_token`, `refresh_token`,
+  `expires_at`, `scope`, `resource_id`, `resource_name`, `account`, `pasted`),
+  the secrets concealed: `op read op://<vault>/sesame.google/refresh_token`.
+  `sesame-providers` holds your provider fields, one JSON field per provider.
+  All are Secure Notes tagged `sesame`. Fields you add to an item yourself are
+  kept. An item left with nothing (`logout` and `client --reset` of a provider)
+  is archived, so it can be restored in 1Password.
+- **Use a vault of its own**, one that is not in `mytokens onepassword list`:
+  mytokens' two-way sync adopts and rewrites items it did not make.
+- **The budget.** A service account may read 1000 times and write 100 times an
+  hour, and the account makes 1000 requests a day in all (shared with
+  mytokens' vault sync, `op service-account ratelimit`); each `op` call takes
+  about 2 seconds. So `sesame api` and `sesame token` read two items (your
+  provider fields and the provider's) and write nothing unless they refresh;
+  a refresh writes the provider's item once. `sesame providers` lists the
+  vault once and reads each provider you hold. Secrets reach `op` only on its
+  stdin and the token only in its environment, never on its command line.
+- **One machine refreshes each provider.** Two processes on one machine take
+  turns (the lock file), but 1Password has no lock across machines: where a
+  provider's refresh hands out a new refresh token, two machines refreshing
+  at once can leave one of them with a
+  refresh token the provider has already replaced. Let one machine refresh it
+  (`sesame token <name> --min-life …`) and hand the token to the others
+  (`SESAME_TOKEN_<NAME>`, above), as without the vault.
+- A login made on one machine may take a few seconds to be seen by another:
+  1Password lists a new item only about 10 seconds after it is made.
 
 ## Registering the OAuth apps
 

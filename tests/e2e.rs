@@ -2432,3 +2432,414 @@ fn built_in_public_client() {
     assert!(ok && out.contains("There was no stored"), "{out}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A 1Password vault for a test: the fake `op` (tests/support/fake_op.rs) on
+/// a PATH of its own, its items and call log in `dir`.
+struct FakeVault {
+    dir: std::path::PathBuf,
+    bin: std::path::PathBuf,
+}
+
+const VAULT: &str = "scratch";
+const SA_TOKEN: &str = "ops_service-account-secret";
+
+impl FakeVault {
+    fn new(tmp: &std::path::Path) -> FakeVault {
+        let dir = tmp.join("op");
+        let bin = tmp.join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        // cargo test builds the example next to sesame, in target/<profile>/examples.
+        let fake = std::path::Path::new(env!("CARGO_BIN_EXE_sesame"))
+            .parent()
+            .unwrap()
+            .join("examples/fake-op");
+        assert!(
+            fake.exists(),
+            "{} missing: run `cargo test`",
+            fake.display()
+        );
+        std::os::unix::fs::symlink(&fake, bin.join("op")).unwrap();
+        FakeVault { dir, bin }
+    }
+
+    /// Sets `c` up to use the vault, as a machine that opted in would.
+    fn env<'a>(&self, c: &'a mut Command) -> &'a mut Command {
+        c.env("SESAME_1PASSWORD_VAULT", VAULT)
+            .env("OP_SERVICE_ACCOUNT_TOKEN", SA_TOKEN)
+            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+            .env("FAKE_OP_DIR", &self.dir)
+            .env("FAKE_OP_TOKEN", SA_TOKEN)
+            .env("FAKE_OP_VAULT", VAULT)
+    }
+
+    /// Every `op` call so far: its argv, and whether it had the token.
+    fn calls(&self) -> Vec<(Vec<String>, bool)> {
+        std::fs::read_to_string(self.dir.join("calls.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                let argv = v["argv"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|a| a.as_str().unwrap().to_string())
+                    .collect();
+                (argv, v["token"].as_bool().unwrap())
+            })
+            .collect()
+    }
+
+    fn items(&self) -> Vec<serde_json::Value> {
+        std::fs::read(self.dir.join("items.json"))
+            .map(|b| serde_json::from_slice(&b).unwrap())
+            .unwrap_or_default()
+    }
+
+    fn item(&self, title: &str) -> Option<serde_json::Value> {
+        self.items().into_iter().find(|i| i["title"] == title)
+    }
+
+    /// `op read op://<vault>/<title>/<field>`, as a person would.
+    fn read(&self, reference: &str) -> String {
+        let mut c = Command::new(self.bin.join("op"));
+        self.env(&mut c);
+        let out = c.args(["read", reference]).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+}
+
+/// The field `label` of an item: (type, value).
+fn field(item: &serde_json::Value, label: &str) -> Option<(String, String)> {
+    item["fields"]
+        .as_array()?
+        .iter()
+        .find(|f| f["label"] == label)
+        .map(|f| {
+            (
+                f["type"].as_str().unwrap().to_string(),
+                f["value"].as_str().unwrap().to_string(),
+            )
+        })
+}
+
+/// With `SESAME_1PASSWORD_VAULT` set, every command keeps its clients, tokens
+/// and provider fields in the vault, through `op`: nothing secret under the
+/// config dir, no secret or service account token in any `op` argv, at most
+/// two `op` calls and no write for a call that needs no refresh, and a
+/// refresh that returns the same refresh token writes only the new access token.
+#[test]
+fn one_password_vault_store() {
+    let mut refreshes = 0;
+    let (port, _log) = serve(move |target, body| {
+        match target {
+        "/device" => (
+            "200 OK",
+            r#"{"device_code":"dev","user_code":"WDJB-MJHT","verification_uri":"https://example.com/device","expires_in":60,"interval":0}"#.into(),
+        ),
+        "/token" if body.contains("grant_type=urn") => (
+            "200 OK",
+            r#"{"access_token":"device-token","refresh_token":"refresh-secret-1","expires_in":3600,"scope":"repo"}"#.into(),
+        ),
+        "/token" if body.contains("grant_type=authorization_code") => (
+            "200 OK",
+            r#"{"access_token":"browser-token","refresh_token":"refresh-secret-1","expires_in":3600}"#.into(),
+        ),
+        "/token" if body.contains("grant_type=refresh_token") => {
+            assert!(body.contains("refresh_token=refresh-secret-1"), "{body}");
+            refreshes += 1;
+            let b = format!(
+                r#"{{"access_token":"refreshed-{refreshes}","refresh_token":"refresh-secret-1","expires_in":3600}}"#
+            );
+            ("200 OK", b)
+        }
+        "/user" => ("200 OK", r#"{"login":"octo"}"#.into()),
+        "/me" => ("200 OK", r#"{"me":"octo"}"#.into()),
+        _ => ("404 Not Found", "{}".into()),
+    }
+    });
+    let tmp = std::env::temp_dir().join(format!("sesame-vault-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let vault = FakeVault::new(&tmp);
+    let run = |args: &[&str], stdin: Option<&str>| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        vault.env(&mut c);
+        let mut child = c
+            .args(args)
+            .env("SESAME_CONFIG_DIR", &config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.unwrap_or_default().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+    let sesame = |args: &[&str]| run(args, None);
+    // The `op` calls a command makes, and how many of them write.
+    let counted = |args: &[&str]| {
+        let before = vault.calls().len();
+        let (ok, out) = sesame(args);
+        let calls: Vec<_> = vault.calls().split_off(before);
+        let writes = calls
+            .iter()
+            .filter(|(a, _)| ["create", "edit", "delete"].contains(&a[1].as_str()))
+            .count();
+        (ok, out, calls.len(), writes)
+    };
+
+    let base = format!("http://127.0.0.1:{port}");
+    let (ok, out) = sesame(&[
+        "provider",
+        "add",
+        "hub",
+        "--auth-url",
+        &format!("{base}/authorize"),
+        "--token-url",
+        &format!("{base}/token"),
+        "--api-base",
+        &base,
+        "--host",
+        "127.0.0.1",
+        "--scope",
+        "repo",
+        "--device-url",
+        &format!("{base}/device"),
+        "--redirect-host",
+        "127.0.0.1",
+        "--identity-url",
+        &format!("{base}/user"),
+        "--identity-field",
+        "login",
+    ]);
+    assert!(ok, "{out}");
+    let (ok, out) = sesame(&["provider", "set", "hub", "--about", "The hub"]);
+    assert!(ok, "{out}");
+    let (ok, out) = sesame(&["provider", "show", "hub"]);
+    assert!(ok, "{out}");
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(shown["about"]["value"], "The hub");
+    assert_eq!(shown["device_url"]["from"], "user");
+    let defs = vault.item("sesame-providers").expect("definitions item");
+    assert!(field(&defs, "hub").unwrap().1.contains("The hub"));
+
+    let (ok, out) = run(
+        &["client", "hub", "--client-id", "cid", "--secret-stdin"],
+        Some("client-secret-xyz\n"),
+    );
+    assert!(ok, "{out}");
+
+    // The device flow.
+    let (ok, out) = sesame(&["login", "hub", "--no-browser"]);
+    assert!(ok && out.contains("Logged in to `hub` (octo)"), "{out}");
+    let item = vault.item("sesame.hub").expect("the provider's item");
+    assert_eq!(item["tags"], serde_json::json!(["sesame"]));
+    assert_eq!(item["category"], "SECURE_NOTE");
+    for (label, kind) in [
+        ("client_id", "STRING"),
+        ("client_secret", "CONCEALED"),
+        ("access_token", "CONCEALED"),
+        ("refresh_token", "CONCEALED"),
+        ("account", "STRING"),
+    ] {
+        assert_eq!(field(&item, label).unwrap().0, kind, "{label}");
+    }
+    assert_eq!(
+        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
+        "refresh-secret-1"
+    );
+
+    // No refresh needed: two reads (the definitions, the provider's item), no write.
+    let (ok, out, calls, writes) = counted(&["token", "hub"]);
+    assert!(ok && out.trim() == "device-token", "{out}");
+    assert_eq!((calls, writes), (2, 0));
+    let (ok, out, calls, writes) = counted(&["api", "hub", "/me"]);
+    assert!(ok && out.contains(r#"{"me":"octo"}"#), "{out}");
+    assert_eq!((calls, writes), (2, 0));
+    let (ok, out, calls, writes) = counted(&["token", "hub", "--json"]);
+    assert!(
+        ok && out.contains(r#""access_token":"device-token""#),
+        "{out}"
+    );
+    assert_eq!((calls, writes), (2, 0));
+
+    // A refresh that returns the same refresh token: one write, of the new
+    // access token and its expiry, the rest of the item as it was.
+    let before = vault.item("sesame.hub").unwrap();
+    let (ok, out, calls, writes) = counted(&["token", "hub", "--json", "--min-life", "7200"]);
+    assert!(
+        ok && out.contains(r#""access_token":"refreshed-1""#),
+        "{out}"
+    );
+    assert_eq!((calls, writes), (3, 1));
+    let after = vault.item("sesame.hub").unwrap();
+    let changed: Vec<&str> = [
+        "client_id",
+        "client_secret",
+        "access_token",
+        "refresh_token",
+        "expires_at",
+        "scope",
+        "account",
+    ]
+    .into_iter()
+    .filter(|l| field(&before, l) != field(&after, l))
+    .collect();
+    assert!(
+        changed == ["access_token"] || changed == ["access_token", "expires_at"],
+        "{changed:?}"
+    );
+    assert_eq!(
+        after["tags"],
+        serde_json::json!(["sesame"]),
+        "an edit keeps the tag"
+    );
+
+    // The loopback flow (`--browser`), the test playing the browser.
+    let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+    vault.env(&mut c);
+    let mut login = c
+        .args(["login", "hub", "--browser", "--no-browser"])
+        .env("SESAME_CONFIG_DIR", &config)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(login.stderr.take().unwrap());
+    let auth_url = loop {
+        let mut l = String::new();
+        assert!(
+            err.read_line(&mut l).unwrap() > 0,
+            "login ended before printing a URL"
+        );
+        if let Some(u) = l.trim().strip_prefix("http") {
+            break format!("http{u}");
+        }
+    };
+    let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
+    assert!(page.contains("Signed in"));
+    let status = login.wait().unwrap();
+    let mut rest = String::new();
+    err.read_to_string(&mut rest).unwrap();
+    assert!(status.success(), "login --browser failed: {rest}");
+    let (_, out) = sesame(&["token", "hub"]);
+    assert_eq!(out.trim(), "browser-token");
+
+    // A pasted token.
+    let (ok, out) = run(
+        &["login", "hub", "--token-stdin"],
+        Some("pasted-secret-token"),
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = sesame(&["providers"]);
+    assert!(
+        ok && out.contains("logged in (octo, pasted token)"),
+        "{out}"
+    );
+    assert!(out.contains("your client"), "{out}");
+    let (_, out) = sesame(&["token", "hub"]);
+    assert_eq!(out.trim(), "pasted-secret-token");
+
+    // Nothing of sesame's under the config dir holds a secret: no sesame.db at all.
+    assert!(!config.join("sesame.db").exists());
+    let secrets = [
+        "client-secret-xyz",
+        "device-token",
+        "browser-token",
+        "refreshed-1",
+        "refresh-secret-1",
+        "pasted-secret-token",
+        SA_TOKEN,
+    ];
+    for entry in std::fs::read_dir(&config).unwrap() {
+        let path = entry.unwrap().path();
+        let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+        for s in secrets {
+            assert!(!text.contains(s), "{} holds {s}", path.display());
+        }
+    }
+    // Nor any `op` argv; every call had the service account token, in its environment.
+    let calls = vault.calls();
+    for (argv, had_token) in &calls {
+        assert!(had_token, "{argv:?}");
+        for s in secrets {
+            assert!(!argv.iter().any(|a| a.contains(s)), "{s} in {argv:?}");
+        }
+    }
+
+    let (ok, out) = sesame(&["client", "hub", "--reset"]);
+    assert!(ok && out.contains("Forgot your `hub` client"), "{out}");
+    let item = vault.item("sesame.hub").unwrap();
+    assert!(field(&item, "client_secret").is_none() && field(&item, "access_token").is_some());
+    // Logged out with no client left: the item is archived.
+    let (ok, out) = sesame(&["logout", "hub"]);
+    assert!(ok, "{out}");
+    assert!(vault.item("sesame.hub").is_none());
+    let (ok, out) = sesame(&["token", "hub"]);
+    assert!(!ok && out.contains("no OAuth client for `hub`"), "{out}");
+    let (ok, out) = sesame(&["provider", "rm", "hub"]);
+    assert!(ok, "{out}");
+    assert!(vault.items().is_empty(), "{:?}", vault.items());
+    assert!(!config.join("sesame.db").exists());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A vault named but unusable is one clear error, never sesame.db instead.
+#[test]
+fn one_password_vault_errors() {
+    let tmp = std::env::temp_dir().join(format!("sesame-vault-err-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let config = tmp.join("config");
+    let vault = FakeVault::new(&tmp);
+    let sesame = |setup: &dyn Fn(&mut Command)| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
+        vault.env(&mut c);
+        c.args(["token", "github"])
+            .env("SESAME_CONFIG_DIR", &config);
+        setup(&mut c);
+        let out = c.output().unwrap();
+        assert!(!out.status.success());
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+
+    let err = sesame(&|c| {
+        c.env_remove("OP_SERVICE_ACCOUNT_TOKEN");
+    });
+    assert!(
+        err.contains("SESAME_1PASSWORD_VAULT is set (`scratch`)")
+            && err.contains("OP_SERVICE_ACCOUNT_TOKEN is not set"),
+        "{err}"
+    );
+    let err = sesame(&|c| {
+        c.env("PATH", "/usr/bin:/bin");
+    });
+    assert!(err.contains("`op` is not on PATH"), "{err}");
+    let err = sesame(&|c| {
+        c.env("SESAME_1PASSWORD_VAULT", "elsewhere");
+    });
+    assert!(
+        err.contains("cannot read the 1Password vault `elsewhere`") && err.lines().count() == 1,
+        "{err}"
+    );
+    let err = sesame(&|c| {
+        c.env("FAKE_OP_TOKEN", "another");
+    });
+    assert!(err.contains("authentication failed"), "{err}");
+    assert!(!config.join("sesame.db").exists());
+    let _ = std::fs::remove_dir_all(&tmp);
+}

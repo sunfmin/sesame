@@ -36,7 +36,7 @@ struct Cli {
 enum Cmd {
     /// List the providers and their services, and whether you are signed in to each.
     Providers,
-    /// Add, change, show or remove a provider definition (stored in sesame.db).
+    /// Add, change, show or remove a provider definition (stored in sesame.db, or the 1Password vault of `SESAME_1PASSWORD_VAULT`).
     Provider {
         #[command(subcommand)]
         cmd: Box<ProviderCmd>,
@@ -161,6 +161,7 @@ enum ProviderCmd {
 }
 
 fn main() -> ExitCode {
+    store::take_token();
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
@@ -174,6 +175,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.cmd {
         Cmd::Providers => {
             let store = Store::open()?;
+            store.read_many()?;
             for (name, p) in providers::all()? {
                 let token = store.token(&name)?;
                 let client = oauth::client(&store, &name, &p)?;
