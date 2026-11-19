@@ -1,0 +1,8 @@
+# How factorium gates sesame (factorium SPEC.md §5). The cut is not set up
+# yet: packaging/release.sh still has afkconvoy's split steps.
+
+[gate]
+fast = "./gate.sh"
+fast_limit = 900
+slow = "./gate.sh"
+slow_limit = 900
