@@ -1,0 +1,32 @@
+{
+  "tree": "0e0e7e947141929e0a1e8837c4d40eb2bd8e2b06+9cca5427005945ac",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/wire.rs:220:68: replace && with || in code_refused",
+        "why": "a refused code is called expired only for invalid_grant or a short-lived code's 4xx",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/wire.rs:309:47: replace > with >= in pick_site",
+        "why": "picking another site is suggested only when the login reaches more than one",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/wire.rs:253:17: replace match guard status.is_success() with true in device_poll",
+        "why": "a device-poll answer without error is a token only on 2xx",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/wire.rs:398:17: replace && with || in api_headers",
+        "why": "JSON's Content-Type is added only for a body without a given Content-Type",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/wire.rs:369:40: replace || with && in allows_host",
+        "why": "a wildcard host matches the domain itself or a subdomain, nothing else",
+        "outcome": "killed"
+      }
+    ]
+  }
+}
