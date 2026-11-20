@@ -1,0 +1,6 @@
+{
+  "tree": "995744638d722b737bae37a44aa839cc4a596739+d1fba762150c532c",
+  "picker": "codex:01a1f7fd-361c-74d3-8052-e51741b065d5:default",
+  "author": "claude-code:1ff35979-9f40-52fc-9782-433d08885b43:opus",
+  "none": "The standing and refresh tests directly cover the mutated decisions and return values, and replacing the entire CLI dispatcher would break the end-to-end tests."
+}

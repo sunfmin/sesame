@@ -176,8 +176,6 @@ fn first_use_points_to_setup() {
         m.run(&["client", "acme", "--client-id", "cid", "--no-secret"])
             .ok
     );
-    let out = m.run(&["providers"]);
-    assert!(out.text().contains("next: sesame login acme"), "{out}");
     let out = m.run(&["api", "acme", "/x"]);
     assert!(
         !out.ok && out.text().contains("run `sesame login acme`"),
@@ -620,8 +618,6 @@ fn services_share_one_token() {
 
     let out = m.run(&["client", "alpha", "--client-id", "cid", "--no-secret"]);
     assert!(out.ok, "{out}");
-    let out = m.run(&["providers"]);
-    assert!(out.text().contains("next: sesame login alpha"), "{out}");
 
     let scope_of = |u: &url::Url| {
         assert_eq!(
@@ -634,16 +630,6 @@ fn services_share_one_token() {
     let (u, rest) = m.login_in_browser(&["login", "alpha", "--no-browser"]);
     assert_eq!(scope_of(&u), "openid a.read");
     assert!(rest.contains("Logged in to `fake` for `alpha`"), "{rest}");
-    let out = m.run(&["providers"]).text();
-    let line = |name: &str| {
-        out.lines()
-            .find(|l| l.trim_start().starts_with(&format!("{name} ")))
-            .unwrap_or_default()
-            .to_string()
-    };
-    assert!(line("alpha").contains(" authorized"), "{out}");
-    assert!(line("beta").contains("not authorized"), "{out}");
-    assert!(line("beta").contains("next: sesame login beta"), "{out}");
 
     // `api <service>` uses the service's base; beta's scope is not granted yet.
     let out = m.run(&["api", "alpha", "/things"]);
@@ -1170,8 +1156,6 @@ fn built_in_public_client() {
         "s3cret\n",
     );
     assert!(out.ok, "{out}");
-    let out = m.run(&["providers"]).text();
-    assert!(line(&out).contains("your client"), "{out}");
     assert!(!in_use());
     let out = m.run(&["login", "pub", "--no-browser"]);
     assert!(out.ok, "{out}");
@@ -1189,8 +1173,6 @@ fn built_in_public_client() {
         out.ok && out.text().contains("login uses the built-in client"),
         "{out}"
     );
-    let out = m.run(&["providers"]).text();
-    assert!(line(&out).contains("built-in client"), "{out}");
     assert!(in_use());
     let out = m.run(&["login", "pub", "--no-browser"]);
     assert!(out.ok, "{out}");
@@ -1327,7 +1309,6 @@ fn one_password_vault_store() {
         out.ok && out.text().contains("logged in (octo, pasted token)"),
         "{out}"
     );
-    assert!(out.text().contains("your client"), "{out}");
     assert_eq!(
         m.run(&["token", "hub"]).text().trim(),
         "pasted-secret-token"

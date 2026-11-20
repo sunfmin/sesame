@@ -5,6 +5,7 @@ mod providers;
 mod refresh;
 mod setup;
 mod source;
+mod standing;
 mod store;
 // build.rs runs it to stamp the version; compiled here too, for its tests.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -12,9 +13,10 @@ mod version;
 mod wire;
 
 use clap::{Parser, Subcommand};
+use standing::who;
 use std::io::Read;
 use std::process::ExitCode;
-use store::{Client, Store, Token};
+use store::{Client, Store};
 
 const FOR_AI: &str = "\
 If you are an AI using sesame for someone:
@@ -181,33 +183,16 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         Cmd::Providers => {
             let store = Store::open_current()?;
             for (name, p) in providers::all(&store)? {
-                let token = store.token(&name)?;
-                let client = oauth::client(&store, &name, &p)?;
-                let source = client.as_ref().map(|(_, s)| s.label()).unwrap_or_default();
-                let (state, next) = match (&client, &token) {
-                    (_, Some(t)) => (format!("logged in{}", who(t)), String::new()),
-                    (None, None) => ("no client".to_string(), format!("sesame setup {name}")),
-                    (Some(_), None) => {
-                        ("not logged in".to_string(), format!("sesame login {name}"))
-                    }
-                };
-                let next = if next.is_empty() {
-                    next
-                } else {
-                    format!("next: {next}")
-                };
+                let st = standing::standing(&store, &name, &p)?;
+                let state = st.state.label();
+                let source = st.source().map(|s| s.label()).unwrap_or_default();
+                let next_col =
+                    |n: Option<&String>| n.map(|n| format!("next: {n}")).unwrap_or_default();
+                let next = next_col(st.next().as_ref());
                 println!("{name:<12} {state:<24} {source:<16} {next:<28} {}", p.about);
-                for (service, svc) in &p.services {
-                    let has = token.as_ref().map(oauth::granted).unwrap_or_default();
-                    let state = if token.is_some() && svc.scopes.iter().all(|s| has.contains(s)) {
-                        "authorized"
-                    } else {
-                        "not authorized"
-                    };
-                    let next = match (&client, state) {
-                        (Some(_), "not authorized") => format!("next: sesame login {service}"),
-                        _ => String::new(),
-                    };
+                for (s, svc) in st.services.iter().zip(p.services.values()) {
+                    let (service, state) = (&s.name, s.label());
+                    let next = next_col(s.next.as_ref());
                     println!(
                         "  {service:<10} {state:<24} {:<16} {next:<28} {}",
                         "", svc.about
@@ -229,7 +214,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             let store = Store::open()?;
             let t = providers::find(&store, &provider)?;
             let had = store.delete_client(&t.provider)?;
-            let then = if t.p.public_client_id.is_some() {
+            let then = if oauth::client(&store, &t.provider, &t.p)?.is_some() {
                 "login uses the built-in client"
             } else {
                 "it has no built-in client: store one with `sesame client` to log in"
@@ -368,22 +353,6 @@ fn provider(cmd: ProviderCmd) -> Result<(), String> {
         ProviderCmd::Export { name } => print!("{}", providers::export(&Store::open()?, &name)?),
     }
     Ok(())
-}
-
-/// ` (site, account)` for a token, from what login learned, and whether it
-/// was pasted; empty if nothing.
-fn who(t: &Token) -> String {
-    let parts: Vec<&str> = [&t.resource_name, &t.account]
-        .into_iter()
-        .flatten()
-        .map(String::as_str)
-        .chain(t.pasted.then_some("pasted token"))
-        .collect();
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", parts.join(", "))
-    }
 }
 
 #[cfg(test)]
