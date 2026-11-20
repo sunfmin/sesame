@@ -22,17 +22,19 @@
 //! `op item list`, then a read of each item whose version moved) when a token
 //! must be refreshed, when it is older than `COPY_LIFE`, for `sesame
 //! providers`, and when there is none that opens.
+mod op;
+
 use super::sealed::Sealer;
 use super::sqlite::Sqlite;
 use super::{Client, Token};
 use crate::providers::Fields;
+use op::{Item, Op, OpCli, OpError};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -103,35 +105,24 @@ fn vault_name() -> Option<String> {
     std::env::var(VAULT_VAR).ok().filter(|v| !v.is_empty())
 }
 
-/// An item as `op item get --format json` prints it.
-#[derive(Clone)]
-struct Item {
-    id: String,
-    json: Value,
-}
-
-/// What a process has read of the vault under the lock, by item title;
-/// `None`: no such item. Cleared on taking the lock, so a read-then-write sees
-/// other processes' writes.
-static ITEMS: Mutex<BTreeMap<String, Option<Item>>> = Mutex::new(BTreeMap::new());
-/// Whether this process holds the lock (a nested `locked` runs inside it).
-static HELD: AtomicBool = AtomicBool::new(false);
-
 /// What sesame keeps in an item: field label → (concealed, value).
 type Kept = BTreeMap<String, (bool, String)>;
 
 pub struct Vault {
     name: String,
-    token: String,
+    /// What answers the vault's requests: `op`, or the tests' vault in memory.
+    op: Box<dyn Op>,
     sealer: Sealer,
+    /// Where the copy and the lock live: the config dir.
+    dir: PathBuf,
     /// The local copy, as last loaded from disk or written.
     copy: Mutex<Sqlite>,
-}
-
-enum OpError {
-    /// The item does not exist.
-    NoItem,
-    Failed(String),
+    /// What has been read of the vault under the lock, by item title; `None`:
+    /// no such item. Cleared on taking the lock, so a read-then-write sees
+    /// other processes' writes.
+    items: Mutex<BTreeMap<String, Option<Item>>>,
+    /// Whether this vault holds the lock (a nested `locked` runs inside it).
+    held: AtomicBool,
 }
 
 impl Vault {
@@ -156,14 +147,11 @@ impl Vault {
                  (`brew install 1password-cli`), or unset {VAULT_VAR} to use sesame.db"
             ));
         }
-        let sealer = Sealer::new(&token, &format!("sesame's copy of 1Password vault {name}"));
-        let (copy, opened) = load(&sealer)?;
-        let v = Vault {
-            name,
-            token,
-            sealer,
-            copy: Mutex::new(copy),
+        let op = OpCli {
+            vault: name.clone(),
+            token: token.clone(),
         };
+        let (v, opened) = Vault::new(name, &token, super::config_dir(), Box::new(op))?;
         let stale = v
             .synced_at()?
             .is_none_or(|t| t + COPY_LIFE <= crate::oauth::now());
@@ -171,6 +159,28 @@ impl Vault {
             v.locked(|| v.sync(None))?;
         }
         Ok(Some(v))
+    }
+
+    /// Vault `name` through `op`, its copy (and whether one opened) sealed
+    /// under `token` in `dir`.
+    fn new(
+        name: String,
+        token: &str,
+        dir: PathBuf,
+        op: Box<dyn Op>,
+    ) -> Result<(Vault, bool), String> {
+        let sealer = Sealer::new(token, &format!("sesame's copy of 1Password vault {name}"));
+        let (copy, opened) = load(&sealer, &dir)?;
+        let v = Vault {
+            name,
+            op,
+            sealer,
+            dir,
+            copy: Mutex::new(copy),
+            items: Mutex::new(BTreeMap::new()),
+            held: AtomicBool::new(false),
+        };
+        Ok((v, opened))
     }
 
     fn copy(&self) -> MutexGuard<'_, Sqlite> {
@@ -210,7 +220,7 @@ impl Vault {
     /// over it, so a reader sees the old copy or the new, never half.
     fn save(&self) -> Result<(), String> {
         let image = self.copy().image()?;
-        let path = copy_path();
+        let path = copy_path(&self.dir);
         let tmp = path.with_extension("tmp");
         let at = |e: std::io::Error, p: &PathBuf| format!("{}: {e}", p.display());
         let mut f = std::fs::OpenOptions::new()
@@ -232,24 +242,13 @@ impl Vault {
     /// it). An item the copy holds that the list lacks is asked for by id
     /// before its rows go: 1Password may list a new item late.
     pub fn sync(&self, provider: Option<&str>) -> Result<(), String> {
-        let args = [
-            "item", "list", "--vault", &self.name, "--tags", TAG, "--format", "json",
-        ];
-        let out = self
-            .op(&args, None)
-            .map_err(|e| self.failed("listing items", e))?;
-        let items: Vec<Value> = serde_json::from_str(&out)
-            .map_err(|e| format!("1Password vault `{}`: listing items: {e}", self.name))?;
-        let listed: BTreeMap<String, (String, u64)> = items
-            .iter()
-            .filter_map(|i| {
-                let title = i["title"].as_str().filter(|t| is_ours_title(t))?;
-                let id = i["id"].as_str()?;
-                Some((
-                    title.into(),
-                    (id.into(), i["version"].as_u64().unwrap_or(0)),
-                ))
-            })
+        let listed: BTreeMap<String, (String, u64)> = self
+            .op
+            .list(TAG)
+            .map_err(|e| self.failed("listing items", e))?
+            .into_iter()
+            .filter(|i| is_ours_title(&i.title))
+            .map(|i| (i.title, (i.id, i.version)))
             .collect();
         let copied = self.copied()?;
         let forced = provider.map(title);
@@ -324,47 +323,6 @@ impl Vault {
         &self.name
     }
 
-    /// Runs `op` with `args`, `input` on its stdin, the token in its
-    /// environment; its stdout.
-    fn op(&self, args: &[&str], input: Option<&[u8]>) -> Result<String, OpError> {
-        let mut child = Command::new("op")
-            .args(args)
-            .env(TOKEN_VAR, &self.token)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| OpError::Failed(format!("running `op`: {e}")))?;
-        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
-            // op takes an item template from stdin only when it is a pipe.
-            stdin
-                .write_all(input)
-                .map_err(|e| OpError::Failed(format!("writing to `op`: {e}")))?;
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| OpError::Failed(format!("running `op`: {e}")))?;
-        if out.status.success() {
-            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-        }
-        let err = op_message(&String::from_utf8_lossy(&out.stderr));
-        if err.contains("isn't an item") {
-            return Err(OpError::NoItem);
-        }
-        if err.contains("isn't a vault") {
-            return Err(OpError::Failed(format!(
-                "the service account cannot read the 1Password vault `{}` ({VAULT_VAR}): \
-                 check its name and that the service account has access to it ({err})",
-                self.name
-            )));
-        }
-        Err(OpError::Failed(err))
-    }
-
     fn failed(&self, what: &str, e: OpError) -> String {
         match e {
             OpError::NoItem => format!("1Password vault `{}`: {what}: no such item", self.name),
@@ -376,23 +334,16 @@ impl Vault {
     /// The item titled `title` (asked for by `id` where known), read from
     /// the vault once per lock.
     fn get(&self, title: &str, id: Option<&str>) -> Result<Option<Item>, String> {
-        if let Some(hit) = ITEMS.lock().unwrap().get(title) {
+        if let Some(hit) = self.items().get(title) {
             return Ok(hit.clone());
         }
-        let query = id.unwrap_or(title);
-        let args = [
-            "item", "get", query, "--vault", &self.name, "--format", "json",
-        ];
-        let item = match self.op(&args, None) {
-            Ok(out) => {
-                let item = parse_item(&out).map_err(|e| format!("reading `{title}`: {e}"))?;
-                // An id now titled otherwise is no longer that item.
-                (item.json["title"].as_str().is_none_or(|t| t == title)).then_some(item)
-            }
+        let item = match self.op.get(id.unwrap_or(title)) {
+            // An id now titled otherwise is no longer that item.
+            Ok(item) => (item.json["title"].as_str().is_none_or(|t| t == title)).then_some(item),
             Err(OpError::NoItem) => None,
             Err(e) => return Err(self.failed(&format!("reading `{title}`"), e)),
         };
-        ITEMS.lock().unwrap().insert(title.into(), item.clone());
+        self.items().insert(title.into(), item.clone());
         Ok(item)
     }
 
@@ -401,19 +352,23 @@ impl Vault {
     /// nothing remembered of the vault: 1Password has no lock, so this keeps
     /// two processes here from both refreshing or overwriting each other's copy.
     pub fn locked<T>(&self, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        if HELD.swap(true, Ordering::SeqCst) {
+        if self.held.swap(true, Ordering::SeqCst) {
             return f();
         }
         let result = (|| {
-            let file = lock_file()?;
+            let file = lock_file(&self.dir)?;
             file.lock().map_err(|e| format!("locking: {e}"))?;
-            ITEMS.lock().unwrap().clear();
-            *self.copy() = load(&self.sealer)?.0;
+            self.items().clear();
+            *self.copy() = load(&self.sealer, &self.dir)?.0;
             f()
             // Dropping `file` unlocks it.
         })();
-        HELD.store(false, Ordering::SeqCst);
+        self.held.store(false, Ordering::SeqCst);
         result
+    }
+
+    fn items(&self) -> MutexGuard<'_, BTreeMap<String, Option<Item>>> {
+        self.items.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Changes what sesame keeps in the item `title` with `change`, and writes
@@ -459,20 +414,17 @@ impl Vault {
                     "tags": [TAG],
                     "fields": fields(&want),
                 });
-                let args = ["item", "create", "--vault", &self.name, "--format", "json"];
-                Some(self.write(&what, &args, &template)?)
+                Some(
+                    self.op
+                        .create(&template)
+                        .map_err(|e| self.failed(&what, e))?,
+                )
             }
             Some(item) if want.is_empty() && kept(&item.json, |l| !ours(l)).is_empty() => {
                 // Archived, not deleted: it can be restored in 1Password.
-                let args = [
-                    "item",
-                    "delete",
-                    &item.id,
-                    "--vault",
-                    &self.name,
-                    "--archive",
-                ];
-                self.op(&args, None).map_err(|e| self.failed(&what, e))?;
+                self.op
+                    .archive(&item.id)
+                    .map_err(|e| self.failed(&what, e))?;
                 None
             }
             Some(item) => {
@@ -493,11 +445,11 @@ impl Vault {
                 if let Some(sections) = item.json.get("sections") {
                     template["sections"] = sections.clone();
                 }
-                // Without `tags` an edit wipes them; without a category it keeps its own.
-                let args = [
-                    "item", "edit", &item.id, "--vault", &self.name, "--format", "json",
-                ];
-                Some(self.write(&what, &args, &template)?)
+                Some(
+                    self.op
+                        .edit(&item.id, &template)
+                        .map_err(|e| self.failed(&what, e))?,
+                )
             }
         };
 
@@ -505,24 +457,15 @@ impl Vault {
             Some(Some(item)) => Some(item),
             // What op printed was not the item: read it again.
             Some(None) => {
-                ITEMS.lock().unwrap().remove(title);
+                self.items().remove(title);
                 self.get(title, id.as_deref())?
             }
             None => None,
         };
-        ITEMS.lock().unwrap().insert(title.into(), written.clone());
+        self.items().insert(title.into(), written.clone());
         self.apply(title, written.as_ref())?;
         self.save()?;
         Ok(have)
-    }
-
-    /// A create or edit, the item's template on stdin; the item written, if
-    /// op printed it.
-    fn write(&self, what: &str, args: &[&str], template: &Value) -> Result<Option<Item>, String> {
-        let out = self
-            .op(args, Some(template.to_string().as_bytes()))
-            .map_err(|e| self.failed(what, e))?;
-        Ok(parse_item(&out).ok())
     }
 
     pub fn client(&self, provider: &str) -> Result<Option<Client>, String> {
@@ -609,6 +552,24 @@ impl Vault {
         .map(drop)
     }
 
+    /// `c` as the vault keeps it, what `client` reads back after
+    /// `save_client(c)`: an empty value is no value, so none without an id.
+    pub fn as_kept_client(&self, c: &Client) -> Option<Client> {
+        let mut k = Kept::new();
+        put_client(&mut k, c);
+        client_of(&k)
+    }
+
+    /// `t` as the vault keeps it, what `token` reads back after
+    /// `save_token(t)`: an empty value is no value, so none without an
+    /// access token.
+    pub fn as_kept_token(&self, t: &Token) -> Option<Token> {
+        let mut k = Kept::new();
+        put_token(&mut k, t);
+        // What `put_token` wrote reads back: its expiry is a number.
+        self.token_of("", &k).ok().flatten()
+    }
+
     /// The token kept in a provider's item, if it holds one.
     fn token_of(&self, provider: &str, k: &Kept) -> Result<Option<Token>, String> {
         let Some(access_token) = value(k, ACCESS_TOKEN) else {
@@ -656,8 +617,8 @@ impl Vault {
 /// The copy on disk if it opens under this token and vault (and whether it
 /// did), else an empty one: one sealed under another token, or damaged, is
 /// dropped, and the next sync fills its successor from the vault.
-fn load(sealer: &Sealer) -> Result<(Sqlite, bool), String> {
-    let image = std::fs::read(copy_path())
+fn load(sealer: &Sealer, dir: &Path) -> Result<(Sqlite, bool), String> {
+    let image = std::fs::read(copy_path(dir))
         .ok()
         .and_then(|b| sealer.open(&b));
     if let Some(copy) = image.and_then(|i| open_copy(Some(&i)).ok()) {
@@ -675,8 +636,8 @@ fn open_copy(image: Option<&[u8]>) -> Result<Sqlite, String> {
 }
 
 /// `<config_dir>/1password-copy`: the copy, sealed.
-fn copy_path() -> PathBuf {
-    super::config_dir().join("1password-copy")
+fn copy_path(dir: &Path) -> PathBuf {
+    dir.join("1password-copy")
 }
 
 /// Whether an item with this title is sesame's to copy.
@@ -718,8 +679,9 @@ fn put_token(k: &mut Kept, t: &Token) {
     put(k, PASTED, false, t.pasted.then(|| "true".into()));
 }
 
+/// Keeps `value` under `label`: an empty value is no value.
 fn put(k: &mut Kept, label: &str, concealed: bool, value: Option<String>) {
-    if let Some(v) = value {
+    if let Some(v) = value.filter(|v| !v.is_empty()) {
         k.insert(label.into(), (concealed, v));
     }
 }
@@ -737,17 +699,15 @@ fn is_ours(f: &Value, ours: impl Fn(&str) -> bool) -> bool {
 }
 
 fn kept(item: &Value, ours: impl Fn(&str) -> bool) -> Kept {
-    item["fields"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|f| is_ours(f, &ours))
-        .filter_map(|f| {
-            let v = f["value"].as_str().filter(|v| !v.is_empty())?;
-            let concealed = f["type"] == "CONCEALED";
-            Some((f["label"].as_str()?.to_string(), (concealed, v.to_string())))
-        })
-        .collect()
+    let mut k = Kept::new();
+    for f in item["fields"].as_array().into_iter().flatten() {
+        if is_ours(f, &ours) {
+            let label = f["label"].as_str().unwrap_or_default();
+            let value = f["value"].as_str().map(String::from);
+            put(&mut k, label, f["type"] == "CONCEALED", value);
+        }
+    }
+    k
 }
 
 /// The item template's fields for `k`; each field's id is its label, so
@@ -761,24 +721,6 @@ fn fields(k: &Kept) -> Vec<Value> {
         .collect()
 }
 
-fn parse_item(out: &str) -> Result<Item, String> {
-    let json: Value = serde_json::from_str(out).map_err(|e| format!("op printed no item: {e}"))?;
-    let id = json["id"]
-        .as_str()
-        .ok_or("op printed an item without an id")?
-        .to_string();
-    Ok(Item { id, json })
-}
-
-/// op's error without its `[ERROR] <date> <time> ` prefix.
-fn op_message(stderr: &str) -> String {
-    let s = stderr.trim();
-    match s.strip_prefix("[ERROR] ") {
-        Some(rest) => rest.splitn(3, ' ').nth(2).unwrap_or(rest).to_string(),
-        None => s.to_string(),
-    }
-}
-
 fn on_path(cmd: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
         std::env::split_paths(&path).any(|d| {
@@ -789,12 +731,11 @@ fn on_path(cmd: &str) -> bool {
 }
 
 /// `<config_dir>/sesame.lock`, made 0600 in a 0700 directory. It holds nothing.
-fn lock_file() -> Result<std::fs::File, String> {
-    let dir = super::config_dir();
+fn lock_file(dir: &Path) -> Result<std::fs::File, String> {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&dir)
+        .create(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join("sesame.lock");
     std::fs::OpenOptions::new()
@@ -808,17 +749,319 @@ fn lock_file() -> Result<std::fs::File, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::op::Memory;
     use super::*;
 
+    /// A machine's vault: `mem` through the `Op` seam, its copy in a dir of
+    /// its own, removed when it drops.
+    struct Machine {
+        vault: Vault,
+    }
+
+    impl Drop for Machine {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.vault.dir);
+        }
+    }
+
+    impl std::ops::Deref for Machine {
+        type Target = Vault;
+        fn deref(&self) -> &Vault {
+            &self.vault
+        }
+    }
+
+    fn machine(mem: &Memory) -> Machine {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("sesame-vault-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (vault, opened) =
+            Vault::new("v".into(), "sa-token", dir, Box::new(mem.clone())).unwrap();
+        assert!(!opened);
+        Machine { vault }
+    }
+
+    fn client(id: &str) -> Client {
+        Client {
+            client_id: id.into(),
+            client_secret: Some(format!("{id}-secret")),
+        }
+    }
+
+    fn token(access: &str) -> Token {
+        Token {
+            access_token: access.into(),
+            refresh_token: Some("refresh".into()),
+            expires_at: Some(1_800_000_000),
+            scope: Some("repo".into()),
+            resource_id: None,
+            resource_name: None,
+            pasted: false,
+            account: Some("octo".into()),
+        }
+    }
+
+    fn id(mem: &Memory, title: &str) -> String {
+        mem.item(title).unwrap()["id"].as_str().unwrap().into()
+    }
+
+    fn calls(mem: &Memory) -> Vec<String> {
+        mem.take_calls()
+    }
+
     #[test]
-    fn op_message_drops_the_prefix() {
+    fn sync_rereads_only_items_whose_version_moved_plus_the_forced_one() {
+        let mem = Memory::default();
+        let a = machine(&mem);
+        a.save_client("x", &client("x-1")).unwrap();
+        a.save_client("y", &client("y-1")).unwrap();
+        a.save_provider_fields("x", &json!({"about": "first"}).as_object().unwrap().clone())
+            .unwrap();
         assert_eq!(
-            op_message(
-                "[ERROR] 2026/11/20 10:00:00 \"sesame.x\" isn't an item in the \"v\" vault.\n"
-            ),
-            "\"sesame.x\" isn't an item in the \"v\" vault."
+            calls(&mem),
+            [
+                "get sesame.x",
+                "create sesame.x",
+                "get sesame.y",
+                "create sesame.y",
+                "get sesame-providers",
+                "create sesame-providers",
+            ]
         );
-        assert_eq!(op_message("plain\n"), "plain");
+        let (x, y, defs) = (
+            id(&mem, "sesame.x"),
+            id(&mem, "sesame.y"),
+            id(&mem, "sesame-providers"),
+        );
+
+        // B has no copy: it reads every item.
+        let b = machine(&mem);
+        b.locked(|| b.sync(None)).unwrap();
+        let mut c = calls(&mem);
+        c[1..].sort();
+        let mut want = vec![
+            format!("get {x}"),
+            format!("get {y}"),
+            format!("get {defs}"),
+        ];
+        want.sort();
+        want.insert(0, "list sesame".into());
+        assert_eq!(c, want);
+        assert_eq!(b.client("y").unwrap(), Some(client("y-1")));
+        assert_eq!(b.provider_fields().unwrap()["x"]["about"], "first");
+
+        // A writes x: B reads x (moved) and y (forced), not the definitions.
+        a.save_client("x", &client("x-2")).unwrap();
+        calls(&mem);
+        b.locked(|| b.sync(Some("y"))).unwrap();
+        assert_eq!(
+            calls(&mem),
+            ["list sesame".into(), format!("get {x}"), format!("get {y}")]
+        );
+        assert_eq!(b.client("x").unwrap(), Some(client("x-2")));
+
+        // Nothing moved, nothing forced: the list alone.
+        b.locked(|| b.sync(None)).unwrap();
+        assert_eq!(calls(&mem), ["list sesame"]);
+    }
+
+    #[test]
+    fn an_item_the_list_lacks_is_asked_for_by_id_before_its_rows_go() {
+        let mem = Memory::default();
+        let a = machine(&mem);
+        a.save_client("x", &client("x-1")).unwrap();
+        let x = id(&mem, "sesame.x");
+        calls(&mem);
+
+        // Listed late: still there when asked for, so its rows stay.
+        mem.state().unlisted.push(x.clone());
+        a.locked(|| a.sync(None)).unwrap();
+        assert_eq!(calls(&mem), ["list sesame".into(), format!("get {x}")]);
+        assert_eq!(a.client("x").unwrap(), Some(client("x-1")));
+
+        // Gone: its rows go, and it is not asked for again.
+        mem.state().items.clear();
+        a.locked(|| a.sync(None)).unwrap();
+        assert_eq!(calls(&mem), ["list sesame".into(), format!("get {x}")]);
+        assert_eq!(a.client("x").unwrap(), None);
+        a.locked(|| a.sync(None)).unwrap();
+        assert_eq!(calls(&mem), ["list sesame"]);
+    }
+
+    #[test]
+    fn an_unchanged_update_writes_nothing() {
+        let mem = Memory::default();
+        let a = machine(&mem);
+        a.save_login("x", Some(&client("x-1")), Some(&token("t-1")))
+            .unwrap();
+        let x = id(&mem, "sesame.x");
+        calls(&mem);
+
+        // The same login again: the item is read, not written.
+        a.save_login("x", Some(&client("x-1")), Some(&token("t-1")))
+            .unwrap();
+        assert_eq!(calls(&mem), [format!("get {x}")]);
+        // An empty secret is no secret, so no change either.
+        let no_secret = Client {
+            client_id: "y-1".into(),
+            client_secret: None,
+        };
+        a.save_client("y", &no_secret).unwrap();
+        let y = id(&mem, "sesame.y");
+        calls(&mem);
+        let empty_secret = Client {
+            client_secret: Some(String::new()),
+            ..no_secret
+        };
+        a.save_client("y", &empty_secret).unwrap();
+        assert_eq!(calls(&mem), [format!("get {y}")]);
+        // Removing what is not there writes nothing.
+        assert!(!a.delete_client("z").unwrap());
+        assert_eq!(calls(&mem), ["get sesame.z"]);
+        assert!(mem.item("sesame.z").is_none());
+    }
+
+    #[test]
+    fn an_edit_keeps_other_peoples_fields_sections_and_tags() {
+        let mem = Memory::default();
+        let theirs = json!([
+            {"id": "url", "label": "url", "type": "STRING", "value": "https://x"},
+            {"id": "n", "label": "client_id", "type": "STRING", "value": "theirs", "section": {"id": "s"}},
+            {"id": "notesPlain", "label": "notesPlain", "purpose": "NOTES", "type": "STRING", "value": "hello"},
+        ]);
+        let x = mem.add(json!({
+            "title": "sesame.x",
+            "category": "LOGIN",
+            "tags": ["mine"],
+            "sections": [{"id": "s", "label": "Theirs"}],
+            "fields": theirs,
+        }));
+        let a = machine(&mem);
+        a.save_client("x", &client("x-1")).unwrap();
+        assert_eq!(
+            calls(&mem),
+            ["get sesame.x".to_string(), format!("edit {x}")]
+        );
+
+        let item = mem.item("sesame.x").unwrap();
+        assert_eq!(item["tags"], json!(["mine", "sesame"]));
+        assert_eq!(item["sections"], json!([{"id": "s", "label": "Theirs"}]));
+        assert_eq!(item["category"], "LOGIN");
+        let fields = item["fields"].as_array().unwrap();
+        for f in theirs.as_array().unwrap() {
+            assert!(fields.contains(f), "{f} kept");
+        }
+        assert_eq!(fields.len(), 5, "{fields:?}");
+        assert_eq!(a.client("x").unwrap(), Some(client("x-1")));
+    }
+
+    #[test]
+    fn an_item_left_empty_is_archived() {
+        let mem = Memory::default();
+        let a = machine(&mem);
+        a.save_login("x", Some(&client("x-1")), Some(&token("t-1")))
+            .unwrap();
+        let x = id(&mem, "sesame.x");
+        calls(&mem);
+
+        // A token left: edited.
+        assert!(a.delete_client("x").unwrap());
+        assert_eq!(calls(&mem), [format!("get {x}"), format!("edit {x}")]);
+        // Nothing left: archived.
+        a.delete_token("x").unwrap();
+        assert_eq!(calls(&mem), [format!("get {x}"), format!("archive {x}")]);
+        assert!(mem.item("sesame.x").is_none());
+        assert_eq!(
+            (a.client("x").unwrap(), a.token("x").unwrap()),
+            (None, None)
+        );
+
+        // Another's field left: edited, not archived.
+        let y = mem.add(json!({
+            "title": "sesame.y",
+            "tags": ["sesame"],
+            "fields": [{"id": "url", "label": "url", "type": "STRING", "value": "https://y"}],
+        }));
+        a.save_client("y", &client("y-1")).unwrap();
+        calls(&mem);
+        a.delete_client("y").unwrap();
+        assert_eq!(calls(&mem), [format!("get {y}"), format!("edit {y}")]);
+        assert_eq!(
+            mem.item("sesame.y").unwrap()["fields"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_read_is_cached_once_per_lock_and_forgotten_when_the_lock_is_taken_again() {
+        let mem = Memory::default();
+        let a = machine(&mem);
+        a.save_client("x", &client("x-1")).unwrap();
+        let x = id(&mem, "sesame.x");
+        calls(&mem);
+
+        a.locked(|| {
+            a.save_token("x", &token("t-1"))?;
+            a.save_token("x", &token("t-2"))?;
+            a.latest_token("x")
+        })
+        .unwrap();
+        // One read of the item, then the writes and the sync's list.
+        assert_eq!(
+            calls(&mem),
+            [
+                format!("get {x}"),
+                format!("edit {x}"),
+                format!("edit {x}"),
+                "list sesame".into(),
+            ]
+        );
+
+        // Another machine writes; the next lock reads the item afresh.
+        mem.change("sesame.x", |i| {
+            i["fields"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|f| f["label"] != "access_token");
+        });
+        a.save_token("x", &token("t-2")).unwrap();
+        assert_eq!(calls(&mem), [format!("get {x}"), format!("edit {x}")]);
+        assert_eq!(a.token("x").unwrap(), Some(token("t-2")));
+    }
+
+    #[test]
+    fn the_normal_form_is_what_reads_back() {
+        let mem = Memory::default();
+        let a = machine(&mem);
+        let c = Client {
+            client_id: "id".into(),
+            client_secret: Some(String::new()),
+        };
+        let t = Token {
+            scope: Some(String::new()),
+            pasted: true,
+            ..token("t")
+        };
+        a.save_login("x", Some(&c), Some(&t)).unwrap();
+        let kept_c = a.as_kept_client(&c).unwrap();
+        assert_eq!(kept_c.client_secret, None);
+        assert_eq!(a.client("x").unwrap(), Some(kept_c));
+        let kept_t = a.as_kept_token(&t).unwrap();
+        assert_eq!(kept_t.scope, None);
+        assert_eq!(a.token("x").unwrap(), Some(kept_t));
+        // No id, no access token: nothing kept.
+        assert!(
+            a.as_kept_client(&Client {
+                client_id: String::new(),
+                client_secret: None
+            })
+            .is_none()
+        );
+        assert!(a.as_kept_token(&token("")).is_none());
     }
 
     #[test]

@@ -1,0 +1,15 @@
+{
+  "tree": "106f7566fe44f2ac353c163495def2e734766678+d1fba762150c532c",
+  "picker": "codex:01a1f80e-1ae7-71f3-8781-4f1b46fc57f1:default",
+  "author": "claude-code:2e6476cb-cf97-5d43-a176-5ca6c6b0c1a7:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store/vault/op.rs:159:9: replace <impl Op for OpCli>::archive -> Result<(), OpError> with Ok(())",
+        "why": "The archive unit test uses the in-memory backend, and the visible end-to-end assertion that the CLI actually archives an empty item was removed.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  }
+}
