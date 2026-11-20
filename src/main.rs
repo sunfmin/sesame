@@ -186,15 +186,13 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 let st = standing::standing(&store, &name, &p)?;
                 let state = st.state.label();
                 let source = st.source().map(|s| s.label()).unwrap_or_default();
-                let next = st.next().map(|n| format!("next: {n}")).unwrap_or_default();
+                let next_col =
+                    |n: Option<&String>| n.map(|n| format!("next: {n}")).unwrap_or_default();
+                let next = next_col(st.next().as_ref());
                 println!("{name:<12} {state:<24} {source:<16} {next:<28} {}", p.about);
                 for (s, svc) in st.services.iter().zip(p.services.values()) {
                     let (service, state) = (&s.name, s.label());
-                    let next = s
-                        .next
-                        .as_ref()
-                        .map(|n| format!("next: {n}"))
-                        .unwrap_or_default();
+                    let next = next_col(s.next.as_ref());
                     println!(
                         "  {service:<10} {state:<24} {:<16} {next:<28} {}",
                         "", svc.about
