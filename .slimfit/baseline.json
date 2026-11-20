@@ -5,7 +5,7 @@
       "test_lines": 4354,
       "tests": 89,
       "failures": 0,
-      "test_seconds": 3.771,
+      "test_seconds": 3.149,
       "covered_lines": 3621,
       "uncovered_lines": 186
     }
