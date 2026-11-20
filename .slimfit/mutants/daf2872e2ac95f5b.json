@@ -1,0 +1,17 @@
+{
+  "tree": "29a9b8bd4e6b92fa5701bb8e05045513925ae964+d1fba762150c532c",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/wire.rs:380:5: replace api_body -> Result<Option<Vec<u8>>, String> with Ok(None)",
+        "why": "the body's absence vs presence decides GET vs POST",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/wire.rs:380:5: replace api_body -> Result<Option<Vec<u8>>, String> with Ok(Some(vec![]))",
+        "why": "an empty body would silently drop the user's data",
+        "outcome": "killed"
+      }
+    ]
+  }
+}
