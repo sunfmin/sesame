@@ -1,0 +1,17 @@
+{
+  "tree": "dd7f09aa05d148ad9e1f84c5c35bec29df5b0dda+d1fba762150c532c",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store.rs:41:5: replace config_dir -> PathBuf with Default::default()",
+        "why": "the moved config_dir decides where every store file goes",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/source.rs:131:5: replace handed -> Result<Option<(Target, Handed)>, String> with Ok(None)",
+        "why": "find_handed is how a handed token's target is found",
+        "outcome": "killed"
+      }
+    ]
+  }
+}
