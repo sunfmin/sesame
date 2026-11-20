@@ -2,7 +2,7 @@
 //! requests sesame sends and the answers it reads. The authorization URL; a
 //! request to the token or device endpoint and the token in its answer (or
 //! why it refused); who signed in and which site a login reached; and the
-//! URL, headers and failure signs of an API call. Nothing here sends: oauth.rs
+//! URL, body, headers and failure signs of an API call. Nothing here sends: oauth.rs
 //! and api.rs send what this builds and hand back what came, so each
 //! provider's quirks are rows of this module's tests.
 use crate::providers::{ClientAuth, Provider, TokenBody};
@@ -371,6 +371,24 @@ pub fn allows_host(p: &Provider, host: &str) -> bool {
     })
 }
 
+/// The body of an API call from `-d`: none without it, stdin's bytes for
+/// `@-`, the file's for `@file`, and the text itself otherwise.
+pub fn api_body(
+    data: Option<&str>,
+    mut stdin: impl std::io::Read,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(d) = data else { return Ok(None) };
+    Ok(Some(match d.strip_prefix('@') {
+        Some("-") => {
+            let mut b = Vec::new();
+            stdin.read_to_end(&mut b).map_err(|e| e.to_string())?;
+            b
+        }
+        Some(f) => std::fs::read(f).map_err(|e| format!("{f}: {e}"))?,
+        None => d.as_bytes().to_vec(),
+    }))
+}
+
 /// The headers of an API call, besides its token: the `-H Name: value`
 /// given, then each of `api_headers` not given (any case), then, with a body
 /// and no Content-Type given, JSON's.
@@ -499,6 +517,26 @@ mod tests {
             "ver",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn api_body_from_text_stdin_or_file() {
+        let none: &[u8] = b"";
+        assert_eq!(api_body(None, none), Ok(None));
+        assert_eq!(api_body(Some("{}"), none), Ok(Some(b"{}".to_vec())));
+        assert_eq!(
+            api_body(Some("@-"), &b"piped"[..]),
+            Ok(Some(b"piped".to_vec()))
+        );
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let at = format!("@{file}");
+        assert_eq!(
+            api_body(Some(&at), none),
+            Ok(Some(std::fs::read(file).unwrap()))
+        );
+        let missing = concat!(env!("CARGO_MANIFEST_DIR"), "/no-such-body");
+        let err = api_body(Some(&format!("@{missing}")), none).unwrap_err();
+        assert!(err.starts_with(&format!("{missing}: ")), "{err}");
     }
 
     #[test]
