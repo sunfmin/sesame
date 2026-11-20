@@ -1,0 +1,33 @@
+{
+  "tip": "2d5b9cae1c564b243e933cabc656cafe8f72ce34",
+  "from": "2752858ba7ec04be990fbbce287b4ff6790fa223",
+  "pool": 487,
+  "drawn": {
+    "rust": [
+      {
+        "name": "src/store/sealed.rs:51:9: replace Sealer::open -> Option<Vec<u8>> with Some(vec![])",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:529:9: replace Vault::client -> Result<Option<Client>, String> with Ok(Some(Default::default()))",
+        "outcome": "unviable"
+      },
+      {
+        "name": "src/wire.rs:369:30: replace == with != in allows_host",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/wire.rs:398:20: delete ! in api_headers",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/wire.rs:313:60: replace || with && in pick_site",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:465:27: replace match guard want.is_empty() && kept(&item.json, |l| !ours(l)).is_empty() with false in Vault::update_locked",
+        "outcome": "killed"
+      }
+    ]
+  }
+}
