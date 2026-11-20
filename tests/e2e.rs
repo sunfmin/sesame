@@ -1359,6 +1359,13 @@ fn one_password_vault_store() {
             assert!(!argv.iter().any(|a| a.contains(s)), "{s} in {argv:?}");
         }
     }
+
+    // Nothing of sesame's left in the item: `op` archives it.
+    for args in [&["client", "hub", "--reset"][..], &["logout", "hub"]] {
+        let out = m.run(args);
+        assert!(out.ok, "{out}");
+    }
+    assert!(vault.item("sesame.hub").is_none());
 }
 
 /// A vault named but unusable is one clear error, never sesame.db instead.
