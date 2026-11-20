@@ -1,59 +1,24 @@
 //! Connecting a platform sesame does not know: `provider discover` against
 //! fake metadata servers, `provider export` rebuilding a definition in an
 //! empty database, `provider guide`, and fixed ports kept one provider's own.
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+#[path = "support/harness.rs"]
+mod harness;
 
-/// Serves `pages` (path, JSON body) on 127.0.0.1; every other path is a 404.
+use harness::{FakeProvider, Machine};
+
+/// Serves `pages` (path, JSON body); every other path is a 404. Returns its base.
 fn serve(pages: Vec<(&'static str, String)>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let mut line = String::new();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            reader.read_line(&mut line).unwrap();
-            loop {
-                let mut h = String::new();
-                if reader.read_line(&mut h).unwrap() == 0 || h.trim().is_empty() {
-                    break;
-                }
-            }
-            let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
-            let (status, body) = match pages.iter().find(|(p, _)| *p == target) {
-                Some((_, b)) => ("200 OK", b.clone()),
-                None => ("404 Not Found", String::new()),
-            };
-            let mut s = stream;
-            let _ = write!(
-                s,
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-        }
-    });
-    format!("http://127.0.0.1:{port}")
+    FakeProvider::serve(move |r| match pages.iter().find(|(p, _)| *p == r.target) {
+        Some((_, b)) => ("200 OK", b.clone()),
+        None => ("404 Not Found", String::new()),
+    })
+    .base()
 }
 
-fn config(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("sesame-connect-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
-}
-
-fn sesame(config: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_sesame"))
-        .args(args)
-        .env("SESAME_CONFIG_DIR", config)
-        .output()
-        .unwrap();
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into(),
-        String::from_utf8_lossy(&out.stderr).into(),
-    )
+/// `sesame <args>` on `m`: (ok, stdout, stderr).
+fn sesame(m: &Machine, args: &[&str]) -> (bool, String, String) {
+    let out = m.run(args);
+    (out.ok, out.stdout, out.stderr)
 }
 
 #[test]
@@ -71,7 +36,10 @@ fn discover_reads_rfc_8414_metadata() {
         "/.well-known/oauth-authorization-server",
         meta.to_string(),
     )]);
-    let (ok, out, err) = sesame(&config("rfc8414"), &["provider", "discover", &base]);
+    let (ok, out, err) = sesame(
+        &Machine::new("connect-rfc8414"),
+        &["provider", "discover", &base],
+    );
     assert!(ok, "{err}");
     for want in [
         "--auth-url https://acme.example/oauth/authorize",
@@ -108,7 +76,7 @@ fn discover_falls_back_to_openid_configuration() {
         meta.to_string(),
     )]);
     let (ok, out, err) = sesame(
-        &config("oidc"),
+        &Machine::new("connect-oidc"),
         &["provider", "discover", &format!("{base}/tenant")],
     );
     assert!(ok, "{err}");
@@ -126,7 +94,7 @@ fn discover_falls_back_to_openid_configuration() {
 
     // A metadata URL is read as given.
     let (ok, out, err) = sesame(
-        &config("oidc-url"),
+        &Machine::new("connect-oidc-url"),
         &[
             "provider",
             "discover",
@@ -139,7 +107,10 @@ fn discover_falls_back_to_openid_configuration() {
 #[test]
 fn discover_without_metadata_points_to_the_guide() {
     let base = serve(vec![("/", "{}".into())]);
-    let (ok, out, err) = sesame(&config("none"), &["provider", "discover", &base]);
+    let (ok, out, err) = sesame(
+        &Machine::new("connect-none"),
+        &["provider", "discover", &base],
+    );
     assert!(!ok, "{out}");
     assert!(err.contains("no OAuth metadata found"), "{err}");
     assert!(err.contains("oauth-authorization-server: 404"), "{err}");
@@ -149,7 +120,7 @@ fn discover_without_metadata_points_to_the_guide() {
 
 #[test]
 fn guide_lists_every_flag_and_help_points_to_it() {
-    let dir = config("guide");
+    let dir = Machine::new("connect-guide");
     let (ok, guide, err) = sesame(&dir, &["provider", "guide"]);
     assert!(ok, "{err}");
     let (ok, help, _) = sesame(&dir, &["provider", "add", "--help"]);
@@ -169,7 +140,7 @@ fn guide_lists_every_flag_and_help_points_to_it() {
 
 #[test]
 fn export_rebuilds_the_definition_in_an_empty_database() {
-    let from = config("export-from");
+    let from = Machine::new("connect-export-from");
     let (ok, _, err) = sesame(
         &from,
         &[
@@ -258,21 +229,9 @@ fn export_rebuilds_the_definition_in_an_empty_database() {
     );
 
     // Run the command as printed, in a shell, against an empty database.
-    let to = config("export-to");
-    let bin = Path::new(env!("CARGO_BIN_EXE_sesame")).parent().unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(&exported)
-        .env("PATH", path)
-        .env("SESAME_CONFIG_DIR", &to)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}\n{exported}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let to = Machine::new("connect-export-to");
+    let out = to.sh(&exported);
+    assert!(out.ok, "{}\n{exported}", out.stderr);
     let (ok, again, err) = sesame(&to, &["provider", "show", "acme"]);
     assert!(ok, "{err}");
     let again: serde_json::Value = serde_json::from_str(&again).unwrap();
@@ -290,7 +249,7 @@ fn export_rebuilds_the_definition_in_an_empty_database() {
 
 #[test]
 fn a_fixed_port_is_one_providers_only() {
-    let dir = config("ports");
+    let dir = Machine::new("connect-ports");
     let add = |name: &str, port: &str| {
         sesame(
             &dir,
