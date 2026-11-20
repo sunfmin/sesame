@@ -9,7 +9,6 @@ use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 pub use fields::FieldFlags;
 use fields::{FIELDS, SERVICE_FIELD, check_url};
@@ -203,16 +202,6 @@ pub enum ClientAuth {
 
 /// Fields of a provider definition, by name, as `sesame.db` stores them.
 pub type Fields = Map<String, Value>;
-
-pub fn config_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("SESAME_CONFIG_DIR") {
-        return PathBuf::from(d);
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    home.join(".config").join("sesame")
-}
 
 /// The definition in force: `built_in` (if the name has one) with `user`'s
 /// fields over it; a `services.<name>` field replaces that one service, or,

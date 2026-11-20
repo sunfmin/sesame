@@ -55,7 +55,7 @@ pub struct Sqlite {
 }
 
 pub fn path() -> PathBuf {
-    crate::providers::config_dir().join("sesame.db")
+    super::config_dir().join("sesame.db")
 }
 
 /// Makes the directory 0700 if missing and the file 0600, tightening a wider one.

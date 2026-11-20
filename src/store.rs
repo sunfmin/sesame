@@ -10,6 +10,7 @@ mod vault;
 
 use crate::providers::Fields;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 pub use migrate::migrate;
 pub use vault::take_token;
@@ -33,6 +34,17 @@ pub struct Token {
     pub pasted: bool,
     /// Who signed in, from the provider's `identity_url`.
     pub account: Option<String>,
+}
+
+/// Where the store keeps its files: `$SESAME_CONFIG_DIR`, else `~/.config/sesame`.
+fn config_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("SESAME_CONFIG_DIR") {
+        return PathBuf::from(d);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join(".config").join("sesame")
 }
 
 pub enum Store {
