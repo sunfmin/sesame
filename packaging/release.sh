@@ -19,7 +19,8 @@
 #                             says the development form
 #                             X.Y.Z+<commits>.g<commit>[.dirty], package it at
 #                             that version for both arches (the Intel archive
-#                             holds the same binary: only cut builds both),
+#                             holds the same binary, the arm64 archive
+#                             copied: only cut builds both),
 #                             check the formula, publish nothing
 #
 # The archives are downloaded from the tap (sunfmin/homebrew-tap), as every
@@ -37,6 +38,9 @@ REPO=https://github.com/sunfmin/sesame
 TAP=sunfmin/homebrew-tap
 ARCHES="arm64 x86_64"
 DIST=${DIST:-dist}
+# gzip's level for the archives: its default for cut; dry publishes nothing,
+# so it packs fast.
+LEVEL=6
 
 usage() {
     echo "usage: release.sh cut <vX.Y.Z> | dry | check-tag <vX.Y.Z>" >&2
@@ -82,7 +86,8 @@ pack() {
     mkdir -p "$DIST"
     staged=$(mktemp -d)
     cp "$1" "$staged/sesame"
-    tar -czf "$DIST/$(archive "$3" "$2")" -C "$staged" sesame
+    tar -czf "$DIST/$(archive "$3" "$2")" --options "gzip:compression-level=$LEVEL" \
+        -C "$staged" sesame
     rm -rf "$staged"
     echo "$DIST/$(archive "$3" "$2")"
 }
@@ -187,8 +192,16 @@ dry)
     }
     host=$(uname -m)
     check_binary "$built" "$host" "$version"
+    LEVEL=1
+    # One archive, copied for the other arches: they hold the same binary,
+    # and compressing it again is most of what dry costs.
+    first=
     for arch in $ARCHES; do
-        pack "$built" "$arch" "$version" >/dev/null
+        if [ -z "$first" ]; then
+            first=$(pack "$built" "$arch" "$version")
+        else
+            cp "$first" "$DIST/$(archive "$version" "$arch")"
+        fi
     done
     formula "$version"
     echo "release: dry ok (sesame $version, $DIST/sesame.rb)"
