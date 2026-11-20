@@ -374,16 +374,14 @@ pub fn find(store: &Store, name: &str) -> Result<Target, String> {
     find_in(all(store)?, name)
 }
 
-/// Every provider in force from definitions handed in, not from `sesame.db`:
-/// the built-ins, with `handed`'s fields over them as if stored.
-pub fn without_store(
-    handed: BTreeMap<String, Fields>,
-) -> Result<BTreeMap<String, Provider>, String> {
-    resolve(own(handed))
+/// What `name` means among the handed definitions, not `sesame.db`'s: the
+/// built-ins, with `handed`'s fields over them as if stored.
+pub fn find_handed(handed: BTreeMap<String, Fields>, name: &str) -> Result<Target, String> {
+    find_in(resolve(own(handed))?, name)
 }
 
 /// What `name` means among `all`.
-pub fn find_in(mut all: BTreeMap<String, Provider>, name: &str) -> Result<Target, String> {
+fn find_in(mut all: BTreeMap<String, Provider>, name: &str) -> Result<Target, String> {
     if let Some(p) = all.remove(name) {
         return Ok(Target {
             provider: name.into(),

@@ -131,8 +131,7 @@ fn handed(name: &str) -> Result<Option<(Target, Handed)>, String> {
     if !std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with(token_prefix!())) {
         return Ok(None);
     }
-    let all = providers::without_store(definitions()?)?;
-    let t = match providers::find_in(all, name) {
+    let t = match providers::find_handed(definitions()?, name) {
         Ok(t) => t,
         Err(e) if std::env::var_os(var(name)).is_some() => return Err(e),
         // Perhaps a provider of the db's, not handed.
