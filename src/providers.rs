@@ -9,7 +9,6 @@ use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 pub use fields::FieldFlags;
 use fields::{FIELDS, SERVICE_FIELD, check_url};
@@ -204,16 +203,6 @@ pub enum ClientAuth {
 /// Fields of a provider definition, by name, as `sesame.db` stores them.
 pub type Fields = Map<String, Value>;
 
-pub fn config_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("SESAME_CONFIG_DIR") {
-        return PathBuf::from(d);
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    home.join(".config").join("sesame")
-}
-
 /// The definition in force: `built_in` (if the name has one) with `user`'s
 /// fields over it; a `services.<name>` field replaces that one service, or,
 /// when null, drops it. The one place a definition is validated: every value
@@ -385,16 +374,14 @@ pub fn find(store: &Store, name: &str) -> Result<Target, String> {
     find_in(all(store)?, name)
 }
 
-/// Every provider in force from definitions handed in, not from `sesame.db`:
-/// the built-ins, with `handed`'s fields over them as if stored.
-pub fn without_store(
-    handed: BTreeMap<String, Fields>,
-) -> Result<BTreeMap<String, Provider>, String> {
-    resolve(own(handed))
+/// What `name` means among the handed definitions, not `sesame.db`'s: the
+/// built-ins, with `handed`'s fields over them as if stored.
+pub fn find_handed(handed: BTreeMap<String, Fields>, name: &str) -> Result<Target, String> {
+    find_in(resolve(own(handed))?, name)
 }
 
 /// What `name` means among `all`.
-pub fn find_in(mut all: BTreeMap<String, Provider>, name: &str) -> Result<Target, String> {
+fn find_in(mut all: BTreeMap<String, Provider>, name: &str) -> Result<Target, String> {
     if let Some(p) = all.remove(name) {
         return Ok(Target {
             provider: name.into(),

@@ -676,7 +676,7 @@ fn open_copy(image: Option<&[u8]>) -> Result<Sqlite, String> {
 
 /// `<config_dir>/1password-copy`: the copy, sealed.
 fn copy_path() -> PathBuf {
-    crate::providers::config_dir().join("1password-copy")
+    super::config_dir().join("1password-copy")
 }
 
 /// Whether an item with this title is sesame's to copy.
@@ -790,7 +790,7 @@ fn on_path(cmd: &str) -> bool {
 
 /// `<config_dir>/sesame.lock`, made 0600 in a 0700 directory. It holds nothing.
 fn lock_file() -> Result<std::fs::File, String> {
-    let dir = crate::providers::config_dir();
+    let dir = super::config_dir();
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
