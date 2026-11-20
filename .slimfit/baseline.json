@@ -1,12 +1,12 @@
 {
   "suites": {
     "rust": {
-      "prod_lines": 5362,
-      "test_lines": 4373,
-      "tests": 90,
+      "prod_lines": 5443,
+      "test_lines": 4498,
+      "tests": 93,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3632,
+      "covered_lines": 3683,
       "uncovered_lines": 179
     }
   },
@@ -18,5 +18,11 @@
       "hash": "a3c8db4b7ef6a239",
       "reason": "No assertion maps: this test checks packaging/release.sh's dry output (both arch archives hold only sesame, formula version/urls/sha256s/test block, gh and git never run); the 76 shared lines are only the binary's startup for --version, which the guide test runs for help text. Nothing in the setups to share, so no merge."
     }
-  ]
+  ],
+  "measured": {
+    "rust": {
+      "uncovered_lines": 180,
+      "test_seconds": 3.203
+    }
+  }
 }
