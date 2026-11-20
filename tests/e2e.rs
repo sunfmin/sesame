@@ -1,198 +1,72 @@
 //! The whole flow against a fake provider on 127.0.0.1: client, login (the
 //! test plays the browser), api, refresh after a 401, token, logout.
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
-use std::process::{Command, Stdio};
+#[path = "support/harness.rs"]
+mod harness;
+
+use harness::{FakeProvider, FakeVault, Machine, SA_TOKEN, VAULT, field, param};
+use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-
-/// One request: its target, its headers (names lowercased) and its body.
-fn read_request(stream: &std::net::TcpStream) -> (String, Vec<(String, String)>, String) {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
-    let mut headers = Vec::new();
-    loop {
-        let mut h = String::new();
-        reader.read_line(&mut h).unwrap();
-        if h.trim().is_empty() {
-            break;
-        }
-        if let Some((k, v)) = h.split_once(':') {
-            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
-        }
-    }
-    let len = header(&headers, "content-length").map_or(0, |v| v.parse().unwrap());
-    let mut body = vec![0; len];
-    reader.read_exact(&mut body).unwrap();
-    (target, headers, String::from_utf8(body).unwrap())
-}
-
-fn header(headers: &[(String, String)], name: &str) -> Option<String> {
-    headers
-        .iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.clone())
-}
-
-fn reply(s: &mut std::net::TcpStream, status: &str, extra: &str, b: &str) {
-    write!(
-        s,
-        "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{b}",
-        b.len()
-    )
-    .unwrap();
-}
-
-fn fake_provider() -> (u16, Arc<Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let log2 = log.clone();
-    std::thread::spawn(move || {
-        let mut access = "access-1".to_string();
-        for stream in listener.incoming().flatten() {
-            let (target, headers, body) = read_request(&stream);
-            let auth = header(&headers, "authorization").unwrap_or_default();
-            log2.lock().unwrap().push(format!("{target} {body}"));
-            let mut s = stream;
-            if target.starts_with("/authorize") {
-                let u = url::Url::parse(&format!("http://x{target}")).unwrap();
-                let q = |k: &str| {
-                    u.query_pairs()
-                        .find(|(n, _)| n == k)
-                        .unwrap()
-                        .1
-                        .into_owned()
-                };
-                let loc = format!("{}?code=the-code&state={}", q("redirect_uri"), q("state"));
-                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
-            } else if target == "/token" {
-                if body.contains("grant_type=authorization_code") {
-                    assert!(body.contains("code=the-code") && body.contains("code_verifier="));
-                    reply(
-                        &mut s,
-                        "200 OK",
-                        "",
-                        r#"{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600}"#,
-                    );
-                } else {
-                    assert!(body.contains("refresh_token=refresh-1"));
-                    access = "access-2".into();
-                    reply(
-                        &mut s,
-                        "200 OK",
-                        "",
-                        r#"{"access_token":"access-2","expires_in":3600}"#,
-                    );
-                }
-            } else if target == "/sites" {
-                reply(
-                    &mut s,
-                    "200 OK",
-                    "",
-                    r#"[{"id":"site-9","name":"acme","url":"https://acme.example"}]"#,
-                );
-            } else if target.starts_with("/ex/site-9/me") {
-                if auth == format!("Bearer {access}") && access == "access-2" {
-                    reply(&mut s, "200 OK", "", r#"{"me":"felix"}"#);
-                } else {
-                    // The first call is refused, to make the CLI refresh.
-                    access = "access-1-revoked".into();
-                    reply(&mut s, "401 Unauthorized", "", "{}");
-                }
-            } else {
-                reply(&mut s, "404 Not Found", "", "");
-            }
-        }
-    });
-    (port, log)
-}
 
 #[test]
 fn login_call_refresh_logout() {
-    let (port, log) = fake_provider();
-    let tmp = std::env::temp_dir().join(format!("sesame-e2e-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    std::fs::create_dir_all(&config).unwrap();
-    let sesame = |args: &[&str]| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        c.args(args).env("SESAME_CONFIG_DIR", &config);
-        c
-    };
-
-    let base = format!("http://127.0.0.1:{port}");
-    let out = sesame(&[
-        "provider",
-        "add",
-        "fake",
-        "--auth-url",
-        &format!("{base}/authorize"),
-        "--token-url",
-        &format!("{base}/token"),
-        "--api-base",
-        &format!("{base}/ex/{{resource_id}}"),
-        "--host",
-        "127.0.0.1",
-        "--scope",
-        "read",
-        "--resources-url",
-        &format!("{base}/sites"),
-    ])
-    .output()
-    .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let st = sesame(&["client", "fake", "--client-id", "cid", "--no-secret"])
-        .status()
-        .unwrap();
-    assert!(st.success());
-
-    let mut login = sesame(&["login", "fake", "--no-browser"])
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut err = BufReader::new(login.stderr.take().unwrap());
-    let auth_url = loop {
-        let mut l = String::new();
-        assert!(
-            err.read_line(&mut l).unwrap() > 0,
-            "login ended before printing a URL"
-        );
-        if let Some(u) = l.trim().strip_prefix("http") {
-            break format!("http{u}");
+    let mut access = "access-1".to_string();
+    let fake = FakeProvider::serve(move |r| match r.target.as_str() {
+        "/token" if r.body.contains("grant_type=authorization_code") => {
+            assert!(r.body.contains("code=the-code") && r.body.contains("code_verifier="));
+            (
+                "200 OK",
+                r#"{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600}"#
+                    .into(),
+            )
         }
-    };
-    // Play the browser: follow the provider's redirect to the CLI's loopback.
-    let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
-    assert!(page.contains("Signed in"));
-    let status = login.wait().unwrap();
-    let mut rest = String::new();
-    err.read_to_string(&mut rest).unwrap();
-    assert!(status.success(), "login failed: {rest}");
-
-    let out = sesame(&["api", "fake", "/me"]).output().unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+        "/token" => {
+            assert!(r.body.contains("refresh_token=refresh-1"));
+            access = "access-2".into();
+            (
+                "200 OK",
+                r#"{"access_token":"access-2","expires_in":3600}"#.into(),
+            )
+        }
+        "/sites" => (
+            "200 OK",
+            r#"[{"id":"site-9","name":"acme","url":"https://acme.example"}]"#.into(),
+        ),
+        t if t.starts_with("/ex/site-9/me") => {
+            if r.header("authorization") == format!("Bearer {access}") && access == "access-2" {
+                ("200 OK", r#"{"me":"felix"}"#.into())
+            } else {
+                // The first call is refused, to make the CLI refresh.
+                access = "access-1-revoked".into();
+                ("401 Unauthorized", "{}".into())
+            }
+        }
+        _ => ("404 Not Found", String::new()),
+    });
+    let m = Machine::new("e2e");
+    let sites = format!("{}/sites", fake.base());
+    fake.add(
+        &m,
+        "fake",
+        "/ex/{resource_id}",
+        &["--scope", "read", "--resources-url", &sites],
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout), r#"{"me":"felix"}"#);
+    assert!(
+        m.run(&["client", "fake", "--client-id", "cid", "--no-secret"])
+            .ok
+    );
+    m.login_in_browser(&["login", "fake", "--no-browser"]);
 
-    let out = sesame(&["token", "fake"]).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "access-2");
+    let out = m.run(&["api", "fake", "/me"]);
+    assert!(out.ok, "{}", out.stderr);
+    assert_eq!(out.stdout, r#"{"me":"felix"}"#);
+
+    assert_eq!(m.run(&["token", "fake"]).stdout.trim(), "access-2");
 
     // `--json`: the token with its expiry, one line; the refresh gave 3600 seconds.
-    let out = sesame(&["token", "fake", "--json"]).output().unwrap();
-    assert!(out.status.success());
-    let line = String::from_utf8_lossy(&out.stdout);
+    let out = m.run(&["token", "fake", "--json"]);
+    assert!(out.ok);
+    let line = out.stdout;
     assert_eq!(line.lines().count(), 1, "{line}");
     let v: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(v["access_token"], "access-2");
@@ -208,50 +82,29 @@ fn login_call_refresh_logout() {
         "{expires_at} vs {now}"
     );
 
-    let out = sesame(&["api", "fake", "https://evil.example/steal"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to send the token"));
+    let out = m.run(&["api", "fake", "https://evil.example/steal"]);
+    assert!(!out.ok);
+    assert!(out.stderr.contains("refusing to send the token"));
 
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(config.join("sesame.db"))
+    let mode = std::fs::metadata(m.config().join("sesame.db"))
         .unwrap()
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
 
-    assert!(sesame(&["logout", "fake"]).status().unwrap().success());
-    assert!(!sesame(&["token", "fake"]).status().unwrap().success());
+    assert!(m.run(&["logout", "fake"]).ok);
+    assert!(!m.run(&["token", "fake"]).ok);
 
-    let log = log.lock().unwrap();
-    assert!(
-        log.iter().any(|l| l.contains("grant_type=refresh_token")),
-        "{log:?}"
-    );
-    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(!fake.refreshes().is_empty(), "{:?}", fake.requests());
 }
 
 /// First use: no client yet. Every command names the next one to run, and a
 /// provider added with `sesame provider add` prints its own setup steps.
 #[test]
 fn first_use_points_to_setup() {
-    let tmp = std::env::temp_dir().join(format!("sesame-setup-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    std::fs::create_dir_all(&config).unwrap();
-    let sesame = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_sesame"))
-            .args(args)
-            .env("SESAME_CONFIG_DIR", &config)
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        (out.status.success(), text)
-    };
-
-    let (ok, out) = sesame(&[
+    let m = Machine::new("setup");
+    let out = m.run(&[
         "provider",
         "add",
         "acme",
@@ -273,86 +126,80 @@ fn first_use_points_to_setup() {
         r#"{"title": "Register the app", "page": "https://acme.example/apps",
             "details": "Callback: {callback}; scopes: {scopes}"}"#,
     ]);
-    assert!(ok, "{out}");
+    assert!(out.ok, "{out}");
 
-    let (ok, out) = sesame(&["setup", "acme"]);
-    assert!(ok, "{out}");
-    assert!(out.contains("1. Register the app"), "{out}");
-    assert!(out.contains("Open: https://acme.example/apps"), "{out}");
+    let out = m.run(&["setup", "acme"]);
+    let text = out.text();
+    assert!(out.ok, "{out}");
+    assert!(text.contains("1. Register the app"), "{out}");
+    assert!(text.contains("Open: https://acme.example/apps"), "{out}");
     assert!(
-        out.contains("Callback: http://localhost:9321/callback; scopes: read, write"),
+        text.contains("Callback: http://localhost:9321/callback; scopes: read, write"),
         "{out}"
     );
     assert!(
-        out.contains("sesame client acme --client-id <client id>"),
+        text.contains("sesame client acme --client-id <client id>"),
         "{out}"
     );
 
-    let (ok, out) = sesame(&["setup", "jira"]);
+    let out = m.run(&["setup", "jira"]);
     assert!(
-        ok && out.contains("http://localhost:8749/callback"),
+        out.ok && out.text().contains("http://localhost:8749/callback"),
         "{out}"
     );
 
-    let (ok, out) = sesame(&["setup", "nope"]);
-    assert!(!ok);
-    assert!(out.contains("unknown provider `nope`"), "{out}");
+    let out = m.run(&["setup", "nope"]);
+    assert!(!out.ok);
+    assert!(out.text().contains("unknown provider `nope`"), "{out}");
     assert!(
-        out.contains("acme, figma, github, google, hubspot, jira, linear, notion"),
+        out.text()
+            .contains("acme, figma, github, google, hubspot, jira, linear, notion"),
         "{out}"
     );
 
-    let (_, out) = sesame(&["providers"]);
-    assert!(out.contains("next: sesame setup acme"), "{out}");
+    let out = m.run(&["providers"]);
+    assert!(out.text().contains("next: sesame setup acme"), "{out}");
 
     for cmd in [
         &["login", "acme", "--no-browser"][..],
         &["api", "acme", "/x"],
     ] {
-        let (ok, out) = sesame(cmd);
-        assert!(!ok);
-        assert!(out.contains("run `sesame setup acme`"), "{cmd:?}: {out}");
+        let out = m.run(cmd);
+        assert!(!out.ok);
+        assert!(
+            out.text().contains("run `sesame setup acme`"),
+            "{cmd:?}: {out}"
+        );
     }
 
-    let (ok, _) = sesame(&["client", "acme", "--client-id", "cid", "--no-secret"]);
-    assert!(ok);
-    let (ok, out) = sesame(&["api", "acme", "/x"]);
-    assert!(!ok && out.contains("run `sesame login acme`"), "{out}");
+    assert!(
+        m.run(&["client", "acme", "--client-id", "cid", "--no-secret"])
+            .ok
+    );
+    let out = m.run(&["api", "acme", "/x"]);
+    assert!(
+        !out.ok && out.text().contains("run `sesame login acme`"),
+        "{out}"
+    );
 
-    let (_, out) = sesame(&["--help"]);
+    let out = m.run(&["--help"]).text();
     assert!(out.starts_with("If you are an AI"), "{out}");
     assert!(out.contains("sesame setup <provider>"), "{out}");
     assert!(!out.contains("providers.toml"), "{out}");
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// `provider set` on a built-in stores only the changed field, `rm` brings the
 /// built-in back, and an invalid value writes nothing.
 #[test]
 fn provider_set_show_rm() {
-    let tmp = std::env::temp_dir().join(format!("sesame-provider-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    let sesame = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_sesame"))
-            .args(args)
-            .env("SESAME_CONFIG_DIR", &config)
-            .output()
-            .unwrap();
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        (
-            out.status.success(),
-            String::from_utf8_lossy(&out.stdout).to_string(),
-            err,
-        )
-    };
+    let m = Machine::new("provider");
     let show = |name: &str| -> serde_json::Value {
-        let (ok, out, err) = sesame(&["provider", "show", name]);
-        assert!(ok, "{err}");
-        serde_json::from_str(&out).unwrap()
+        let out = m.run(&["provider", "show", name]);
+        assert!(out.ok, "{}", out.stderr);
+        serde_json::from_str(&out.stdout).unwrap()
     };
     let field_db_rows = || {
-        let db = rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+        let db = rusqlite::Connection::open(m.config().join("sesame.db")).unwrap();
         db.query_row("SELECT count(*) FROM provider_fields", [], |r| {
             r.get::<_, i64>(0)
         })
@@ -368,10 +215,10 @@ fn provider_set_show_rm() {
             .all(|f| f["from"] == "built-in")
     );
 
-    let (ok, _, err) = sesame(&[
+    let out = m.run(&[
         "provider", "set", "google", "--scope", "email", "--scope", "openid",
     ]);
-    assert!(ok, "{err}");
+    assert!(out.ok, "{}", out.stderr);
     let after = show("google");
     assert_eq!(
         after["scopes"]["value"],
@@ -384,7 +231,7 @@ fn provider_set_show_rm() {
         }
     }
     assert_eq!(field_db_rows(), 1);
-    let (_, out, _) = sesame(&["setup", "google"]);
+    let out = m.run(&["setup", "google"]).stdout;
     assert!(
         out.contains("`sesame login google` asks only for: email, openid"),
         "{out}"
@@ -421,61 +268,38 @@ fn provider_set_show_rm() {
             "xml",
         ],
     ] {
-        let (ok, _, err) = sesame(bad);
-        assert!(!ok, "{bad:?} was accepted");
-        assert!(err.starts_with("sesame: "), "{bad:?}: {err}");
+        let out = m.run(bad);
+        assert!(!out.ok, "{bad:?} was accepted");
+        assert!(
+            out.stderr.starts_with("sesame: "),
+            "{bad:?}: {}",
+            out.stderr
+        );
     }
     assert_eq!(field_db_rows(), 1);
     assert_eq!(show("google"), after);
-    let (ok, _, err) = sesame(&["provider", "show", "bad"]);
-    assert!(!ok && err.contains("unknown provider `bad`"), "{err}");
+    let out = m.run(&["provider", "show", "bad"]);
+    assert!(
+        !out.ok && out.stderr.contains("unknown provider `bad`"),
+        "{out}"
+    );
 
-    let (ok, _, err) = sesame(&["provider", "add", "jira", "--host", "x.example"]);
-    assert!(!ok && err.contains("sesame provider set jira"), "{err}");
+    let out = m.run(&["provider", "add", "jira", "--host", "x.example"]);
+    assert!(
+        !out.ok && out.stderr.contains("sesame provider set jira"),
+        "{out}"
+    );
 
-    let (ok, _, err) = sesame(&["provider", "rm", "google"]);
-    assert!(ok && err.contains("built-in"), "{err}");
+    let out = m.run(&["provider", "rm", "google"]);
+    assert!(out.ok && out.stderr.contains("built-in"), "{out}");
     assert_eq!(show("google"), before);
     assert_eq!(field_db_rows(), 0);
 
-    let (ok, _, err) = sesame(&["provider", "set", "nope", "--scope", "x"]);
-    assert!(!ok && err.contains("sesame provider add nope"), "{err}");
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-/// A fake OAuth server: `answer(target, body)` gives the status line and the
-/// JSON body for each request; every `target body` is logged.
-fn serve(
-    mut answer: impl FnMut(&str, &str) -> (&'static str, String) + Send + 'static,
-) -> (u16, Arc<Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let log2 = log.clone();
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let (target, _, body) = read_request(&stream);
-            log2.lock().unwrap().push(format!("{target} {body}"));
-            let mut s = stream;
-            if target.starts_with("/authorize") {
-                // Play the provider's consent page: straight back to the redirect.
-                let u = url::Url::parse(&format!("http://x{target}")).unwrap();
-                let q = |k: &str| {
-                    u.query_pairs()
-                        .find(|(n, _)| n == k)
-                        .unwrap()
-                        .1
-                        .into_owned()
-                };
-                let loc = format!("{}?code=the-code&state={}", q("redirect_uri"), q("state"));
-                write!(s, "HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                continue;
-            }
-            let (status, b) = answer(&target, &body);
-            write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len()).unwrap();
-        }
-    });
-    (port, log)
+    let out = m.run(&["provider", "set", "nope", "--scope", "x"]);
+    assert!(
+        !out.ok && out.stderr.contains("sesame provider add nope"),
+        "{out}"
+    );
 }
 
 /// The device flow end to end with a client that has no secret: pending, then
@@ -485,7 +309,7 @@ fn serve(
 fn device_flow_and_browser_fallback() {
     let mut devices = 0;
     let mut polls = 0;
-    let (port, log) = serve(move |target, body| match target {
+    let fake = FakeProvider::serve(move |r| match r.target.as_str() {
         "/device" => {
             devices += 1;
             let code = if devices == 1 {
@@ -498,10 +322,10 @@ fn device_flow_and_browser_fallback() {
             );
             ("200 OK", b)
         }
-        "/token" if body.contains("device_code=dev-expired") => {
+        "/token" if r.body.contains("device_code=dev-expired") => {
             ("400 Bad Request", r#"{"error":"expired_token"}"#.into())
         }
-        "/token" if body.contains("grant_type=urn") => {
+        "/token" if r.body.contains("grant_type=urn") => {
             polls += 1;
             match polls {
                 // RFC 8628 answers 400; GitHub answers 200 with the error.
@@ -520,135 +344,80 @@ fn device_flow_and_browser_fallback() {
         "/user" => ("200 OK", r#"{"login":"octo","id":1}"#.into()),
         _ => ("404 Not Found", "{}".into()),
     });
-    let tmp = std::env::temp_dir().join(format!("sesame-device-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    let sesame = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_sesame"))
-            .args(args)
-            .env("SESAME_CONFIG_DIR", &config)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        (out.status.success(), text)
-    };
-
-    let base = format!("http://127.0.0.1:{port}");
-    let (ok, out) = sesame(&[
-        "provider",
-        "add",
+    let m = Machine::new("device");
+    let base = fake.base();
+    fake.add(
+        &m,
         "hub",
-        "--auth-url",
-        &format!("{base}/authorize"),
-        "--token-url",
-        &format!("{base}/token"),
-        "--api-base",
-        &base,
-        "--host",
-        "127.0.0.1",
-        "--scope",
-        "repo",
-        "--device-url",
-        &format!("{base}/device"),
-        "--redirect-host",
-        "127.0.0.1",
-        "--identity-url",
-        &format!("{base}/user"),
-        "--identity-field",
-        "login",
-    ]);
-    assert!(ok, "{out}");
-    let (ok, out) = sesame(&["provider", "show", "hub"]);
-    assert!(ok, "{out}");
-    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+        "",
+        &[
+            "--scope",
+            "repo",
+            "--device-url",
+            &format!("{base}/device"),
+            "--redirect-host",
+            "127.0.0.1",
+            "--identity-url",
+            &format!("{base}/user"),
+            "--identity-field",
+            "login",
+        ],
+    );
+    let out = m.run(&["provider", "show", "hub"]);
+    assert!(out.ok, "{out}");
+    let shown: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(shown["redirect_host"]["value"], "127.0.0.1");
     assert_eq!(shown["device_url"]["from"], "user");
     assert_eq!(shown["identity_field"]["value"], "login");
-    let (ok, out) = sesame(&["setup", "hub"]);
+    let out = m.run(&["setup", "hub"]);
     assert!(
-        ok && out.contains("--no-secret") && out.contains("enters the code"),
+        out.ok && out.text().contains("--no-secret") && out.text().contains("enters the code"),
         "{out}"
     );
 
-    let (ok, out) = sesame(&["client", "hub", "--client-id", "cid", "--no-secret"]);
-    assert!(ok, "{out}");
+    let out = m.run(&["client", "hub", "--client-id", "cid", "--no-secret"]);
+    assert!(out.ok, "{out}");
 
     let started = std::time::Instant::now();
-    let (ok, out) = sesame(&["login", "hub", "--no-browser"]);
-    assert!(ok, "{out}");
+    let out = m.run(&["login", "hub", "--no-browser"]);
+    let text = out.text();
+    assert!(out.ok, "{out}");
     assert!(
-        out.contains("https://example.com/device") && out.contains("WDJB-MJHT"),
+        text.contains("https://example.com/device") && text.contains("WDJB-MJHT"),
         "{out}"
     );
-    assert!(out.contains("Logged in to `hub` (octo)"), "{out}");
+    assert!(text.contains("Logged in to `hub` (octo)"), "{out}");
     // The slow_down's interval of 1s was kept to.
     assert!(started.elapsed() >= std::time::Duration::from_secs(1));
-    let (_, out) = sesame(&["providers"]);
-    assert!(out.contains("logged in (octo)"), "{out}");
-    let (ok, out) = sesame(&["token", "hub"]);
-    assert!(ok && out.trim() == "device-token", "{out}");
+    let out = m.run(&["providers"]);
+    assert!(out.text().contains("logged in (octo)"), "{out}");
+    let out = m.run(&["token", "hub"]);
+    assert!(out.ok && out.text().trim() == "device-token", "{out}");
 
-    let (ok, out) = sesame(&["login", "hub", "--no-browser"]);
-    assert!(!ok && out.contains("expired"), "{out}");
+    let out = m.run(&["login", "hub", "--no-browser"]);
+    assert!(!out.ok && out.text().contains("expired"), "{out}");
 
     // --browser: the loopback redirect, on 127.0.0.1 rather than localhost.
-    let mut login = Command::new(env!("CARGO_BIN_EXE_sesame"))
-        .args(["login", "hub", "--browser", "--no-browser"])
-        .env("SESAME_CONFIG_DIR", &config)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut err = BufReader::new(login.stderr.take().unwrap());
-    let auth_url = loop {
-        let mut l = String::new();
-        assert!(
-            err.read_line(&mut l).unwrap() > 0,
-            "login ended before printing a URL"
-        );
-        if let Some(u) = l.trim().strip_prefix("http") {
-            break format!("http{u}");
-        }
-    };
-    let redirect = url::Url::parse(&auth_url)
-        .unwrap()
-        .query_pairs()
-        .find(|(k, _)| k == "redirect_uri")
-        .unwrap()
-        .1
-        .into_owned();
+    let (auth_url, _) = m.login_in_browser(&["login", "hub", "--browser", "--no-browser"]);
+    let redirect = param(&auth_url, "redirect_uri").unwrap();
     assert!(redirect.starts_with("http://127.0.0.1:"), "{redirect}");
-    let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
-    assert!(page.contains("Signed in"));
-    let status = login.wait().unwrap();
-    let mut rest = String::new();
-    err.read_to_string(&mut rest).unwrap();
-    assert!(status.success(), "login --browser failed: {rest}");
-    let (_, out) = sesame(&["token", "hub"]);
-    assert_eq!(out.trim(), "browser-token");
+    assert_eq!(m.run(&["token", "hub"]).text().trim(), "browser-token");
 
-    let log = log.lock().unwrap();
-    assert!(log.iter().all(|l| !l.contains("client_secret")), "{log:?}");
-    let device = log.iter().find(|l| l.starts_with("/device ")).unwrap();
+    let log = fake.requests();
+    assert!(
+        log.iter().all(|r| !r.to_string().contains("client_secret")),
+        "{log:?}"
+    );
+    let device = &fake.to("/device")[0].body;
     assert!(
         device.contains("client_id=cid") && device.contains("scope=repo"),
         "{device}"
     );
     let polls = log
         .iter()
-        .filter(|l| l.contains("device_code=dev-ok"))
+        .filter(|r| r.body.contains("device_code=dev-ok"))
         .count();
     assert_eq!(polls, 3, "{log:?}");
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-fn query(target: &str, k: &str) -> Option<String> {
-    let u = url::Url::parse(&format!("http://x{target}")).unwrap();
-    u.query_pairs()
-        .find(|(n, _)| n == k)
-        .map(|(_, v)| v.into_owned())
 }
 
 /// The https-paste flow: nothing listens on the https callback, the person
@@ -656,147 +425,71 @@ fn query(target: &str, k: &str) -> Option<String> {
 /// then a token pasted on stdin, with no OAuth login.
 #[test]
 fn https_paste_login_and_pasted_token() {
-    let (port, _) = serve(|target, _| match target {
+    let fake = FakeProvider::serve(|r| match r.target.as_str() {
         "/token" => ("200 OK", r#"{"access_token":"tok-1"}"#.into()),
         "/api/auth.test" => ("200 OK", r#"{"user":"felix"}"#.into()),
         _ => ("404 Not Found", "{}".into()),
     });
-    let tmp = std::env::temp_dir().join(format!("sesame-paste-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    let sesame = |args: &[&str]| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        c.args(args).env("SESAME_CONFIG_DIR", &config);
-        c
-    };
-    let run = |args: &[&str]| {
-        let out = sesame(args).output().unwrap();
-        (
-            out.status.success(),
-            String::from_utf8_lossy(&out.stdout).to_string(),
-            String::from_utf8_lossy(&out.stderr).to_string(),
-        )
-    };
-
-    let base = format!("http://127.0.0.1:{port}");
-    let (ok_, _, err) = run(&[
-        "provider",
-        "add",
+    let m = Machine::new("paste");
+    fake.add(
+        &m,
         "chat",
-        "--auth-url",
-        &format!("{base}/authorize"),
-        "--token-url",
-        &format!("{base}/token"),
-        "--api-base",
-        &format!("{base}/api"),
-        "--host",
-        "127.0.0.1",
-        "--redirect",
-        "https-paste",
-        "--redirect-port",
+        "/api",
         // Not slack's 8751: a fixed port is one provider's only.
-        "8761",
-    ]);
-    assert!(ok_, "{err}");
-    let (_, out, _) = run(&["setup", "chat"]);
+        &["--redirect", "https-paste", "--redirect-port", "8761"],
+    );
+    let out = m.run(&["setup", "chat"]).stdout;
     assert!(out.contains("https://localhost:8761/callback"), "{out}");
-    assert!(run(&["client", "chat", "--client-id", "cid", "--no-secret"]).0);
+    assert!(
+        m.run(&["client", "chat", "--client-id", "cid", "--no-secret"])
+            .ok
+    );
 
     // Login: play the browser up to the https redirect, which nothing answers,
     // and paste the address it would end on. `tamper` edits that address.
     let login = |tamper: &dyn Fn(String) -> String| {
-        let mut login = sesame(&["login", "chat", "--no-browser"])
-            .stdin(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut err = BufReader::new(login.stderr.take().unwrap());
-        let auth_url = loop {
-            let mut l = String::new();
-            assert!(err.read_line(&mut l).unwrap() > 0, "no URL printed");
-            if let Some(u) = l.trim().strip_prefix("http") {
-                break format!("http{u}");
-            }
-        };
-        let no_follow = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap();
-        let resp = no_follow.get(&auth_url).send().unwrap();
-        let landed = resp.headers()["location"].to_str().unwrap().to_string();
-        assert!(
-            landed.starts_with("https://localhost:8761/callback?code="),
-            "{landed}"
-        );
-        let mut stdin = login.stdin.take().unwrap();
-        writeln!(stdin, "{}", tamper(landed)).unwrap();
-        drop(stdin);
-        let status = login.wait().unwrap();
-        let mut rest = String::new();
-        err.read_to_string(&mut rest).unwrap();
-        (status.success(), rest)
+        m.login_pasting(&["login", "chat", "--no-browser"], |landed| {
+            assert!(
+                landed.starts_with("https://localhost:8761/callback?code="),
+                "{landed}"
+            );
+            tamper(landed)
+        })
     };
 
-    let (ok_, err) = login(&|u| {
+    let out = login(&|u| {
         let (head, _) = u.split_once("state=").unwrap();
         format!("{head}state=forged")
     });
-    assert!(!ok_ && err.contains("state mismatch"), "{err}");
-    assert!(!run(&["token", "chat"]).0, "a forged state stored a token");
+    assert!(!out.ok && out.stderr.contains("state mismatch"), "{out}");
+    assert!(
+        !m.run(&["token", "chat"]).ok,
+        "a forged state stored a token"
+    );
 
-    let (ok_, err) = login(&|u| u);
-    assert!(ok_, "{err}");
-    assert_eq!(run(&["token", "chat"]).1.trim(), "tok-1");
-    let (ok_, out, err) = run(&["api", "chat", "/auth.test"]);
-    assert!(ok_ && out.contains(r#""user":"felix""#), "{out}{err}");
+    let out = login(&|u| u);
+    assert!(out.ok, "{out}");
+    assert_eq!(m.run(&["token", "chat"]).stdout.trim(), "tok-1");
+    let out = m.run(&["api", "chat", "/auth.test"]);
+    assert!(out.ok && out.stdout.contains(r#""user":"felix""#), "{out}");
 
     // The fallback: a token pasted on stdin, no OAuth login.
-    assert!(run(&["logout", "chat"]).0);
-    let mut paste = sesame(&["login", "chat", "--token-stdin"])
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
-    writeln!(paste.stdin.take().unwrap(), "xoxp-pasted").unwrap();
-    assert!(paste.wait().unwrap().success());
-    let (ok_, out, err) = run(&["api", "chat", "/auth.test"]);
-    assert!(ok_ && out.contains("felix"), "{out}{err}");
-    let (_, out, _) = run(&["providers"]);
+    assert!(m.run(&["logout", "chat"]).ok);
+    assert!(
+        m.run_with_stdin(&["login", "chat", "--token-stdin"], "xoxp-pasted\n")
+            .ok
+    );
+    let out = m.run(&["api", "chat", "/auth.test"]);
+    assert!(out.ok && out.stdout.contains("felix"), "{out}");
+    let out = m.run(&["providers"]).stdout;
     assert!(out.contains("logged in (pasted token)"), "{out}");
     // A pasted token has no known expiry.
-    let (ok_, out, err) = run(&["token", "chat", "--json"]);
-    assert!(ok_, "{err}");
+    let out = m.run(&["token", "chat", "--json"]);
+    assert!(out.ok, "{}", out.stderr);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&out.stdout).unwrap(),
         serde_json::json!({"access_token": "xoxp-pasted", "expires_at": null})
     );
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-/// Signs in with `args` while playing the browser; returns the authorization URL.
-fn browser_login(sesame: &dyn Fn(&[&str]) -> Command, args: &[&str]) -> (url::Url, String) {
-    let mut login = sesame(args)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut err = BufReader::new(login.stderr.take().unwrap());
-    let auth_url = loop {
-        let mut l = String::new();
-        assert!(
-            err.read_line(&mut l).unwrap() > 0,
-            "login ended before printing a URL"
-        );
-        if let Some(u) = l.trim().strip_prefix("http") {
-            break format!("http{u}");
-        }
-    };
-    let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
-    assert!(page.contains("Signed in"));
-    let status = login.wait().unwrap();
-    let mut rest = String::new();
-    err.read_to_string(&mut rest).unwrap();
-    assert!(status.success(), "login failed: {rest}");
-    (url::Url::parse(&auth_url).unwrap(), rest)
 }
 
 /// Two services of one provider: each login adds the service's scopes to those
@@ -805,9 +498,9 @@ fn browser_login(sesame: &dyn Fn(&[&str]) -> Command, args: &[&str]) -> (url::Ur
 #[test]
 fn services_share_one_token() {
     let mut logins = 0;
-    let (port, log) = serve(move |target, body| {
-        match target {
-        "/token" if body.contains("grant_type=authorization_code") => {
+    let fake = FakeProvider::serve(move |r| {
+        match r.target.as_str() {
+        "/token" if r.body.contains("grant_type=authorization_code") => {
             logins += 1;
             let b = format!(r#"{{"access_token":"tok-{logins}","expires_in":3600}}"#);
             ("200 OK", b)
@@ -821,56 +514,35 @@ fn services_share_one_token() {
         _ => ("404 Not Found", "{}".into()),
     }
     });
-    let tmp = std::env::temp_dir().join(format!("sesame-services-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    let sesame = |args: &[&str]| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        c.args(args).env("SESAME_CONFIG_DIR", &config);
-        c
-    };
-    let run = |args: &[&str]| {
-        let out = sesame(args).output().unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        (out.status.success(), text)
-    };
-
-    let base = format!("http://127.0.0.1:{port}");
-    let (ok, out) = run(&[
-        "provider",
-        "add",
+    let m = Machine::new("services");
+    let base = fake.base();
+    fake.add(
+        &m,
         "fake",
-        "--auth-url",
-        &format!("{base}/authorize"),
-        "--token-url",
-        &format!("{base}/token"),
-        "--api-base",
-        &base,
-        "--host",
-        "127.0.0.1",
-        "--scope",
-        "openid",
-        "--auth-param",
-        "include_granted_scopes=true",
-        "--service",
-        &format!("name=alpha,api-base={base}/alpha/v1,scope=a.read,about=Alpha"),
-        "--service",
-        &format!(r#"{{"name": "beta", "api_base": "{base}/beta/v2", "scopes": ["b.read"]}}"#),
-    ]);
-    assert!(ok, "{out}");
+        "",
+        &[
+            "--scope",
+            "openid",
+            "--auth-param",
+            "include_granted_scopes=true",
+            "--service",
+            &format!("name=alpha,api-base={base}/alpha/v1,scope=a.read,about=Alpha"),
+            "--service",
+            &format!(r#"{{"name": "beta", "api_base": "{base}/beta/v2", "scopes": ["b.read"]}}"#),
+        ],
+    );
     // `set` changes only the keys given of a service.
-    let (ok, out) = run(&[
+    let out = m.run(&[
         "provider",
         "set",
         "fake",
         "--service",
         "name=beta,scope=b.read,scope=b.send",
     ]);
-    assert!(ok, "{out}");
-    let (ok, out) = run(&["provider", "show", "fake"]);
-    assert!(ok, "{out}");
-    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(out.ok, "{out}");
+    let out = m.run(&["provider", "show", "fake"]);
+    assert!(out.ok, "{out}");
+    let shown: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(
         shown["services.beta"]["value"]["api_base"],
         format!("{base}/beta/v2")
@@ -940,38 +612,43 @@ fn services_share_one_token() {
             "evil.example is not one",
         ),
     ] {
-        let (ok, out) = run(&args);
-        assert!(!ok && out.contains(want), "{args:?}: {out}");
+        let out = m.run(&args);
+        assert!(!out.ok && out.text().contains(want), "{args:?}: {out}");
     }
 
-    let (ok, out) = run(&["client", "alpha", "--client-id", "cid", "--no-secret"]);
-    assert!(ok, "{out}");
+    let out = m.run(&["client", "alpha", "--client-id", "cid", "--no-secret"]);
+    assert!(out.ok, "{out}");
 
     let scope_of = |u: &url::Url| {
-        let q = |k: &str| {
-            u.query_pairs()
-                .find(|(n, _)| n == k)
-                .map(|(_, v)| v.into_owned())
-        };
-        assert_eq!(q("include_granted_scopes").as_deref(), Some("true"), "{u}");
-        q("scope").unwrap()
+        assert_eq!(
+            param(u, "include_granted_scopes").as_deref(),
+            Some("true"),
+            "{u}"
+        );
+        param(u, "scope").unwrap()
     };
-    let (u, rest) = browser_login(&sesame, &["login", "alpha", "--no-browser"]);
+    let (u, rest) = m.login_in_browser(&["login", "alpha", "--no-browser"]);
     assert_eq!(scope_of(&u), "openid a.read");
     assert!(rest.contains("Logged in to `fake` for `alpha`"), "{rest}");
 
     // `api <service>` uses the service's base; beta's scope is not granted yet.
-    let (ok, out) = run(&["api", "alpha", "/things"]);
-    assert!(ok && out.contains(r#"{"alpha":true}"#), "{out}");
-    let (ok, out) = run(&["api", "beta", "/mail"]);
-    assert!(!ok && out.contains("run `sesame login beta`"), "{out}");
+    let out = m.run(&["api", "alpha", "/things"]);
+    assert!(out.ok && out.text().contains(r#"{"alpha":true}"#), "{out}");
+    let out = m.run(&["api", "beta", "/mail"]);
+    assert!(
+        !out.ok && out.text().contains("run `sesame login beta`"),
+        "{out}"
+    );
     // Through the provider with a full URL, the hint finds the service by its base.
-    let (ok, out) = run(&["api", "fake", &format!("{base}/beta/v2/mail")]);
-    assert!(!ok && out.contains("run `sesame login beta`"), "{out}");
+    let out = m.run(&["api", "fake", &format!("{base}/beta/v2/mail")]);
+    assert!(
+        !out.ok && out.text().contains("run `sesame login beta`"),
+        "{out}"
+    );
 
-    let (u, _) = browser_login(&sesame, &["login", "beta", "--no-browser"]);
+    let (u, _) = m.login_in_browser(&["login", "beta", "--no-browser"]);
     assert_eq!(scope_of(&u), "openid a.read b.read b.send");
-    let (_, out) = run(&["providers"]);
+    let out = m.run(&["providers"]).text();
     assert!(
         out.lines()
             .filter(|l| l.contains(" authorized") && !l.contains("not authorized"))
@@ -981,96 +658,34 @@ fn services_share_one_token() {
     );
     // One token, the newest, for the provider and both its services.
     for name in ["fake", "alpha", "beta"] {
-        let (ok, out) = run(&["token", name]);
-        assert!(ok && out.trim() == "tok-2", "{name}: {out}");
+        let out = m.run(&["token", name]);
+        assert!(out.ok && out.text().trim() == "tok-2", "{name}: {out}");
     }
-    let (ok, out) = run(&["api", "beta", "ok"]);
-    assert!(ok && out.contains(r#"{"beta":true}"#), "{out}");
-    let db = rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+    let out = m.run(&["api", "beta", "ok"]);
+    assert!(out.ok && out.text().contains(r#"{"beta":true}"#), "{out}");
+    let db = rusqlite::Connection::open(m.config().join("sesame.db")).unwrap();
     let rows: i64 = db
         .query_row("SELECT count(*) FROM tokens", [], |r| r.get(0))
         .unwrap();
     assert_eq!(rows, 1);
 
-    let (ok, out) = run(&["provider", "set", "fake", "--drop-service", "beta"]);
-    assert!(ok, "{out}");
-    let (ok, out) = run(&["api", "beta", "ok"]);
-    assert!(!ok && out.contains("unknown provider `beta`"), "{out}");
-    assert!(out.contains("or a service: alpha, calendar"), "{out}");
-
-    let log = log.lock().unwrap();
+    let out = m.run(&["provider", "set", "fake", "--drop-service", "beta"]);
+    assert!(out.ok, "{out}");
+    let out = m.run(&["api", "beta", "ok"]);
     assert!(
-        log.iter().any(|l| l.starts_with("/beta/v2/mail ")),
-        "{log:?}"
+        !out.ok && out.text().contains("unknown provider `beta`"),
+        "{out}"
     );
-    let _ = std::fs::remove_dir_all(&tmp);
-}
+    assert!(
+        out.text().contains("or a service: alpha, calendar"),
+        "{out}"
+    );
 
-/// A HubSpot-shaped fake: the code is exchanged and refreshed at
-/// `/oauth/v3/token` with the client credentials in the form body, access
-/// tokens last 30 minutes, and the account is the number `portalId`.
-/// The fake HubSpot, its request log, and the seconds the tokens it issues
-/// from now on last (1800 until the test changes it).
-fn fake_hubspot() -> (u16, Arc<Mutex<Vec<String>>>, Arc<AtomicU64>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let log2 = log.clone();
-    let lasts = Arc::new(AtomicU64::new(1800));
-    let lasts2 = lasts.clone();
-    std::thread::spawn(move || {
-        let mut n = 1;
-        for stream in listener.incoming().flatten() {
-            let (target, headers, body) = read_request(&stream);
-            let auth = header(&headers, "authorization").unwrap_or_default();
-            log2.lock().unwrap().push(format!("{target} {auth} {body}"));
-            let mut s = stream;
-            let token = |n: i32| {
-                let lasts = lasts2.load(Ordering::SeqCst);
-                format!(
-                    r#"{{"access_token":"access-{n}","refresh_token":"refresh-1","expires_in":{lasts},"hub_id":247935561,"token_type":"bearer"}}"#
-                )
-            };
-            if target.starts_with("/oauth/authorize") {
-                let loc = format!(
-                    "{}?code=the-code&state={}",
-                    query(&target, "redirect_uri").unwrap(),
-                    query(&target, "state").unwrap()
-                );
-                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
-            } else if target == "/oauth/v3/token" {
-                let body_creds = body.contains("client_id=cid")
-                    && body.contains("client_secret=the-secret")
-                    && !auth.starts_with("Basic");
-                if !body_creds {
-                    reply(&mut s, "401 Unauthorized", "", r#"{"status":"error"}"#);
-                } else if body.contains("grant_type=authorization_code") {
-                    reply(&mut s, "200 OK", "", &token(n));
-                } else if body.contains("grant_type=refresh_token")
-                    && body.contains("refresh_token=refresh-1")
-                {
-                    n += 1;
-                    reply(&mut s, "200 OK", "", &token(n));
-                } else {
-                    reply(&mut s, "400 Bad Request", "", r#"{"status":"BAD_GRANT"}"#);
-                }
-            } else if auth != format!("Bearer access-{n}") {
-                reply(&mut s, "401 Unauthorized", "", r#"{"status":"error"}"#);
-            } else if target == "/account-info/v3/details" {
-                reply(
-                    &mut s,
-                    "200 OK",
-                    "",
-                    r#"{"portalId":247935561,"uiDomain":"app-na2.hubspot.com"}"#,
-                );
-            } else if target.starts_with("/crm/v3/objects/contacts") {
-                reply(&mut s, "200 OK", "", r#"{"results":[{"id":"1"}]}"#);
-            } else {
-                reply(&mut s, "404 Not Found", "", "");
-            }
-        }
-    });
-    (port, log, lasts)
+    assert!(
+        !fake.to("/beta/v2/mail").is_empty(),
+        "{:?}",
+        fake.requests()
+    );
 }
 
 /// Someone who added `hubspot` themselves (`sesame provider add`, every field
@@ -1080,25 +695,49 @@ fn fake_hubspot() -> (u16, Arc<Mutex<Vec<String>>>, Arc<AtomicU64>) {
 /// endpoint with the credentials in the body. `setup` prints the built-in's steps.
 #[test]
 fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
-    let (port, log, lasts) = fake_hubspot();
-    let tmp = std::env::temp_dir().join(format!("sesame-hubspot-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    std::fs::create_dir_all(&config).unwrap();
-    let sesame = |args: &[&str]| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        c.args(args).env("SESAME_CONFIG_DIR", &config);
-        c
-    };
-    let run = |args: &[&str]| {
-        let out = sesame(args).output().unwrap();
-        (
-            out.status.success(),
-            String::from_utf8_lossy(&out.stdout).to_string(),
-            String::from_utf8_lossy(&out.stderr).to_string(),
-        )
-    };
-    let db = || rusqlite::Connection::open(config.join("sesame.db")).unwrap();
+    // A HubSpot-shaped fake: the code is exchanged and refreshed at
+    // `/oauth/v3/token` with the client credentials in the form body, the
+    // account is the number `portalId`, and its tokens last `lasts` seconds
+    // (1800 until the test changes it).
+    let lasts = Arc::new(AtomicU64::new(1800));
+    let lasts2 = lasts.clone();
+    let mut n = 1;
+    let fake = FakeProvider::serve(move |r| {
+        let auth = r.header("authorization");
+        let token = |n: i32| {
+            let lasts = lasts2.load(Ordering::SeqCst);
+            format!(
+                r#"{{"access_token":"access-{n}","refresh_token":"refresh-1","expires_in":{lasts},"hub_id":247935561,"token_type":"bearer"}}"#
+            )
+        };
+        if r.target == "/oauth/v3/token" {
+            let body_creds = r.body.contains("client_id=cid")
+                && r.body.contains("client_secret=the-secret")
+                && !auth.starts_with("Basic");
+            if !body_creds {
+                ("401 Unauthorized", r#"{"status":"error"}"#.into())
+            } else if r.body.contains("grant_type=authorization_code") {
+                ("200 OK", token(n))
+            } else if r.is_refresh() && r.body.contains("refresh_token=refresh-1") {
+                n += 1;
+                ("200 OK", token(n))
+            } else {
+                ("400 Bad Request", r#"{"status":"BAD_GRANT"}"#.into())
+            }
+        } else if auth != format!("Bearer access-{n}") {
+            ("401 Unauthorized", r#"{"status":"error"}"#.into())
+        } else if r.target == "/account-info/v3/details" {
+            (
+                "200 OK",
+                r#"{"portalId":247935561,"uiDomain":"app-na2.hubspot.com"}"#.into(),
+            )
+        } else if r.target.starts_with("/crm/v3/objects/contacts") {
+            ("200 OK", r#"{"results":[{"id":"1"}]}"#.into())
+        } else {
+            ("404 Not Found", String::new())
+        }
+    });
+    let m = Machine::new("hubspot");
     let now = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1107,8 +746,8 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
     };
 
     // The built-in's setup: its four steps, the fixed localhost callback, the scopes.
-    let (ok, out, err) = run(&["setup", "hubspot"]);
-    assert!(ok, "{err}");
+    let out = m.run(&["setup", "hubspot"]);
+    assert!(out.ok, "{}", out.stderr);
     for want in [
         "Install the HubSpot CLI and sign it in",
         "Create a private OAuth app project",
@@ -1119,16 +758,16 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
         "oauth, crm.objects.contacts.read, crm.objects.contacts.write",
         "crm.objects.owners.read, crm.objects.tickets.read, crm.objects.tickets.write",
     ] {
-        assert!(out.contains(want), "no `{want}` in:\n{out}");
+        assert!(out.stdout.contains(want), "no `{want}` in:\n{out}");
     }
 
     // Before the upgrade: every field of the definition stored as the person's,
     // as `sesame provider add hubspot` left it, but pointed at the fake.
-    let (ok, out, err) = run(&["provider", "show", "hubspot"]);
-    assert!(ok, "{err}");
-    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let base = format!("http://127.0.0.1:{port}");
-    let free = TcpListener::bind("127.0.0.1:0")
+    let out = m.run(&["provider", "show", "hubspot"]);
+    assert!(out.ok, "{}", out.stderr);
+    let shown: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let base = fake.base();
+    let free = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
@@ -1142,7 +781,7 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
         "identity_url": format!("{base}/account-info/v3/details"),
     });
     {
-        let db = db();
+        let db = rusqlite::Connection::open(m.config().join("sesame.db")).unwrap();
         for (field, entry) in shown.as_object().unwrap() {
             let value = changed.get(field).unwrap_or(&entry["value"]);
             db.execute(
@@ -1152,9 +791,9 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
             .unwrap();
         }
     }
-    let (ok, out, err) = run(&["provider", "show", "hubspot"]);
-    assert!(ok, "{err}");
-    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let out = m.run(&["provider", "show", "hubspot"]);
+    assert!(out.ok, "{}", out.stderr);
+    let shown: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     for (field, entry) in shown.as_object().unwrap() {
         let from = if changed.get(field).is_some() {
             "user"
@@ -1166,22 +805,11 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
     assert_eq!(shown["client_auth"]["value"], "body");
     assert_eq!(shown["redirect_host"]["value"], "localhost");
 
-    let mut c = sesame(&["client", "hubspot", "--client-id", "cid", "--secret-stdin"]);
-    let mut child = c.stdin(Stdio::piped()).spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"the-secret\n")
-        .unwrap();
-    assert!(child.wait().unwrap().success());
+    let client = ["client", "hubspot", "--client-id", "cid", "--secret-stdin"];
+    assert!(m.run_with_stdin(&client, "the-secret\n").ok);
 
-    let (auth, rest) = browser_login(&sesame, &["login", "hubspot", "--no-browser"]);
-    let q = |k: &str| {
-        auth.query_pairs()
-            .find(|(n, _)| n == k)
-            .map(|(_, v)| v.into_owned())
-    };
+    let (auth, rest) = m.login_in_browser(&["login", "hubspot", "--no-browser"]);
+    let q = |k: &str| param(&auth, k);
     assert_eq!(
         q("redirect_uri").unwrap(),
         format!("http://localhost:{free}/callback")
@@ -1196,21 +824,22 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
         rest.contains("Logged in to `hubspot` (247935561)"),
         "{rest}"
     );
-    let (_, out, _) = run(&["providers"]);
+    let out = m.run(&["providers"]).stdout;
     assert!(out.contains("logged in (247935561)"), "{out}");
 
     let token_json = |args: &[&str]| {
-        let (ok, out, err) = run(args);
-        assert!(ok, "{err}");
-        serde_json::from_str::<serde_json::Value>(&out).unwrap()
+        let out = m.run(args);
+        assert!(out.ok, "{}", out.stderr);
+        serde_json::from_str::<serde_json::Value>(&out.stdout).unwrap()
     };
     let expires = |t: &serde_json::Value| t["expires_at"].as_i64().unwrap();
     let t = token_json(&["token", "hubspot", "--json"]);
     assert!((expires(&t) - now() - 1800).abs() < 60, "{t}");
 
-    let (ok, out, err) = run(&["api", "hubspot", "/crm/v3/objects/contacts?limit=1"]);
-    assert!(ok, "{err}");
-    assert!(out.contains(r#""id":"1""#), "{out}");
+    let contacts = ["api", "hubspot", "/crm/v3/objects/contacts?limit=1"];
+    let out = m.run(&contacts);
+    assert!(out.ok, "{}", out.stderr);
+    assert!(out.stdout.contains(r#""id":"1""#), "{out}");
 
     // A token with 30 seconds left (what the fake gives for the next refresh,
     // which `--min-life` asks for) is refreshed before the call.
@@ -1219,37 +848,33 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
     assert_eq!(t["access_token"], "access-2");
     assert!((expires(&t) - now() - 30).abs() < 30, "{t}");
     lasts.store(1800, Ordering::SeqCst);
-    let (ok, out, err) = run(&["api", "hubspot", "/crm/v3/objects/contacts?limit=1"]);
-    assert!(ok, "{err}");
-    assert!(out.contains(r#""id":"1""#), "{out}");
+    let out = m.run(&contacts);
+    assert!(out.ok, "{}", out.stderr);
+    assert!(out.stdout.contains(r#""id":"1""#), "{out}");
     let t = token_json(&["token", "hubspot", "--json"]);
     assert_eq!(t["access_token"], "access-3");
     assert!(expires(&t) > now() + 1700, "{t}");
 
-    let logged = log.lock().unwrap();
-    let refreshes: Vec<_> = logged
-        .iter()
-        .filter(|l| l.contains("grant_type=refresh_token"))
-        .collect();
+    let logged = fake.requests();
+    let refreshes = fake.refreshes();
     assert_eq!(refreshes.len(), 2, "{logged:?}");
-    assert!(refreshes[1].starts_with("/oauth/v3/token "), "{logged:?}");
     assert!(
-        refreshes[1].contains("client_secret=the-secret"),
+        refreshes[1].target.starts_with("/oauth/v3/token"),
+        "{logged:?}"
+    );
+    assert!(
+        refreshes[1].body.contains("client_secret=the-secret"),
         "{logged:?}"
     );
     // Before the expiry, not after a 401: each API call went out once, the
     // second already with the refreshed token.
-    let calls: Vec<_> = logged.iter().filter(|l| l.starts_with("/crm")).collect();
+    let calls = fake.to("/crm");
     assert_eq!(calls.len(), 2, "{logged:?}");
-    assert!(calls[1].contains("Bearer access-3"), "{logged:?}");
-    drop(logged);
-    let refreshes = || {
-        log.lock()
-            .unwrap()
-            .iter()
-            .filter(|l| l.contains("grant_type=refresh_token"))
-            .count()
-    };
+    assert!(
+        calls[1].header("authorization").contains("Bearer access-3"),
+        "{logged:?}"
+    );
+    let refreshes = || fake.refreshes().len();
 
     // A holder that hands the token on: 1000 seconds left is enough for
     // `token` alone, not for `--min-life 1700`, which refreshes first.
@@ -1277,10 +902,9 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
     assert!((expires(&t) - now() - 1800).abs() < 30, "{t}");
     assert_eq!(refreshes(), 5);
 
-    let (ok, out, err) = run(&["token", "--help"]);
-    assert!(ok, "{err}");
-    assert!(out.contains("--min-life <SECONDS>"), "{out}");
-    let _ = std::fs::remove_dir_all(&tmp);
+    let out = m.run(&["token", "--help"]);
+    assert!(out.ok, "{}", out.stderr);
+    assert!(out.stdout.contains("--min-life <SECONDS>"), "{out}");
 }
 
 /// Guild's split: a Hub holds the login, `sesame token <service>` there
@@ -1289,201 +913,148 @@ fn hubspot_upgrade_v3_body_refresh_numeric_identity() {
 /// shows, never refreshing it.
 #[test]
 fn handed_token_without_db() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let log2 = log.clone();
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let (target, headers, body) = read_request(&stream);
-            let auth = header(&headers, "authorization").unwrap_or_default();
-            let ver = header(&headers, "x-fake-version").unwrap_or_default();
-            log2.lock()
-                .unwrap()
-                .push(format!("{target} auth={auth} ver={ver} {body}"));
-            let mut s = stream;
-            if target.starts_with("/authorize") {
-                let u = url::Url::parse(&format!("http://x{target}")).unwrap();
-                let q = |k: &str| query(&target, k).unwrap_or_else(|| panic!("{k} in {u}"));
-                let loc = format!("{}?code=the-code&state={}", q("redirect_uri"), q("state"));
-                reply(&mut s, "302 Found", &format!("Location: {loc}\r\n"), "");
-            } else if target == "/token" && body.contains("grant_type=authorization_code") {
+    let fake = FakeProvider::serve(|r| {
+        let auth = r.header("authorization");
+        match r.target.as_str() {
+            "/token" if r.body.contains("grant_type=authorization_code") => {
                 // Within a minute of expiring: the next use refreshes.
                 let b =
                     r#"{"access_token":"access-1","refresh_token":"refresh-1","expires_in":30}"#;
-                reply(&mut s, "200 OK", "", b);
-            } else if target == "/token" {
-                assert!(body.contains("refresh_token=refresh-1"), "{body}");
+                ("200 OK", b.into())
+            }
+            "/token" => {
+                assert!(r.body.contains("refresh_token=refresh-1"), "{}", r.body);
                 let b =
                     r#"{"access_token":"access-2","refresh_token":"refresh-1","expires_in":3600}"#;
-                reply(&mut s, "200 OK", "", b);
-            } else if target == "/alpha/v1/things" && auth == "Bearer access-2" {
-                reply(&mut s, "200 OK", "", r#"{"alpha":true}"#);
-            } else if target == "/alpha/v1/broken" && auth == "Bearer access-2" {
-                reply(&mut s, "200 OK", "", r#"{"errors":["no"]}"#);
-            } else {
-                reply(&mut s, "401 Unauthorized", "", "{}");
+                ("200 OK", b.into())
             }
+            "/alpha/v1/things" if auth == "Bearer access-2" => {
+                ("200 OK", r#"{"alpha":true}"#.into())
+            }
+            "/alpha/v1/broken" if auth == "Bearer access-2" => {
+                ("200 OK", r#"{"errors":["no"]}"#.into())
+            }
+            _ => ("401 Unauthorized", "{}".into()),
         }
     });
-    let tmp = std::env::temp_dir().join(format!("sesame-handed-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let hub = tmp.join("hub");
-    let remote = tmp.join("remote");
-    std::fs::create_dir_all(&remote).unwrap();
-    let at = |config: &std::path::Path, args: &[&str]| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        c.args(args).env("SESAME_CONFIG_DIR", config);
-        for (k, _) in std::env::vars() {
-            if k.starts_with("SESAME_TOKEN_") || k == "SESAME_PROVIDERS" {
-                c.env_remove(k);
-            }
-        }
-        c
-    };
-    let hub_cmd = |args: &[&str]| at(&hub, args);
-    let run = |mut c: Command| {
-        let out = c.output().unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        (out.status.success(), text)
-    };
+    let hub = Machine::new("handed-hub");
+    let remote = Machine::new("handed-remote");
 
     // The Hub: the provider, its client and the login.
-    let base = format!("http://127.0.0.1:{port}");
-    let (ok, out) = run(hub_cmd(&[
-        "provider",
-        "add",
+    let base = fake.base();
+    fake.add(
+        &hub,
         "fake",
-        "--auth-url",
-        &format!("{base}/authorize"),
-        "--token-url",
-        &format!("{base}/token"),
-        "--api-base",
-        &base,
-        "--host",
-        "127.0.0.1",
-        "--api-header",
-        "X-Fake-Version: 7",
-        "--error-field",
-        "errors",
-        "--service",
-        &format!("name=alpha,api-base={base}/alpha/v1,scope=a.read"),
-    ]));
-    assert!(ok, "{out}");
-    let (ok, out) = run(hub_cmd(&[
-        "client",
-        "fake",
-        "--client-id",
-        "cid",
-        "--no-secret",
-    ]));
-    assert!(ok, "{out}");
-    browser_login(&hub_cmd, &["login", "alpha", "--no-browser"]);
+        "",
+        &[
+            "--api-header",
+            "X-Fake-Version: 7",
+            "--error-field",
+            "errors",
+            "--service",
+            &format!("name=alpha,api-base={base}/alpha/v1,scope=a.read"),
+        ],
+    );
+    let out = hub.run(&["client", "fake", "--client-id", "cid", "--no-secret"]);
+    assert!(out.ok, "{out}");
+    hub.login_in_browser(&["login", "alpha", "--no-browser"]);
     // `sesame token <service>` on the Hub refreshes the expiring token.
-    let (ok, out) = run(hub_cmd(&["token", "alpha"]));
-    assert!(ok && out.trim() == "access-2", "{out}");
-    let refreshes = |log: &Arc<Mutex<Vec<String>>>| {
-        log.lock()
-            .unwrap()
-            .iter()
-            .filter(|l| l.starts_with("/token ") && l.contains("grant_type=refresh_token"))
-            .count()
-    };
-    assert_eq!(refreshes(&log), 1);
-    let (ok, shown) = run(hub_cmd(&["provider", "show", "fake"]));
-    assert!(ok, "{shown}");
-    let definitions = format!(r#"{{"fake": {shown}}}"#);
+    let out = hub.run(&["token", "alpha"]);
+    assert!(out.ok && out.text().trim() == "access-2", "{out}");
+    let refreshes = || fake.refreshes().len();
+    assert_eq!(refreshes(), 1);
+    let out = hub.run(&["provider", "show", "fake"]);
+    assert!(out.ok, "{out}");
+    let definitions = format!(r#"{{"fake": {}}}"#, out.text());
 
     // The other machine: an empty config dir, the token and the definition handed.
-    let remote_cmd = |var: &str, token: &str, args: &[&str]| {
-        let mut c = at(&remote, args);
+    let handed = |var: &str, token: &str, args: &[&str]| {
+        let mut c = remote.cmd(args);
         c.env(var, token).env("SESAME_PROVIDERS", &definitions);
-        c
+        let out = remote.output(c, "");
+        (out.ok, out.text())
     };
-    let (ok, out) = run(remote_cmd(
+    let (ok, out) = handed(
         "SESAME_TOKEN_ALPHA",
         "access-2",
         &["api", "alpha", "/things"],
-    ));
+    );
     assert!(ok && out.contains(r#"{"alpha":true}"#), "{out}");
     // The provider's variable serves its services too.
-    let (ok, out) = run(remote_cmd(
+    let (ok, out) = handed(
         "SESAME_TOKEN_FAKE",
         "access-2",
         &["api", "alpha", "/things"],
-    ));
+    );
     assert!(ok && out.contains(r#"{"alpha":true}"#), "{out}");
-    let (ok, out) = run(remote_cmd(
-        "SESAME_TOKEN_ALPHA",
-        "access-2",
-        &["token", "alpha"],
-    ));
+    let (ok, out) = handed("SESAME_TOKEN_ALPHA", "access-2", &["token", "alpha"]);
     assert!(ok && out.trim() == "access-2", "{out}");
     // A handed token's expiry is not told to sesame.
-    let (ok, out) = run(remote_cmd(
+    let (ok, out) = handed(
         "SESAME_TOKEN_ALPHA",
         "access-2",
         &["token", "alpha", "--json"],
-    ));
+    );
     assert!(ok, "{out}");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&out).unwrap(),
         serde_json::json!({"access_token": "access-2", "expires_at": null})
     );
     // `--min-life` refreshes nothing for a handed token: it is printed as it is.
-    let (ok, out) = run(remote_cmd(
+    let (ok, out) = handed(
         "SESAME_TOKEN_ALPHA",
         "access-2",
         &["token", "alpha", "--json", "--min-life", "1700"],
-    ));
+    );
     assert!(ok, "{out}");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&out).unwrap(),
         serde_json::json!({"access_token": "access-2", "expires_at": null})
     );
-    assert_eq!(refreshes(&log), 1, "a handed token was refreshed");
+    assert_eq!(refreshes(), 1, "a handed token was refreshed");
     // error_fields apply.
-    let (ok, out) = run(remote_cmd(
+    let (ok, out) = handed(
         "SESAME_TOKEN_ALPHA",
         "access-2",
         &["api", "alpha", "/broken"],
-    ));
+    );
     assert!(!ok && out.contains("carries `errors`"), "{out}");
     // The token goes only to the provider's hosts.
-    let (ok, out) = run(remote_cmd(
+    let (ok, out) = handed(
         "SESAME_TOKEN_ALPHA",
         "access-2",
         &["api", "alpha", "https://evil.example/x"],
-    ));
+    );
     assert!(!ok && out.contains("refusing to send the token"), "{out}");
     // A refused handed token is not refreshed: its holder hands a new one.
-    let (ok, out) = run(remote_cmd(
+    let (ok, out) = handed(
         "SESAME_TOKEN_ALPHA",
         "access-1",
         &["api", "alpha", "/things"],
-    ));
+    );
     assert!(!ok, "{out}");
     assert!(
         out.contains("the token handed in `SESAME_TOKEN_ALPHA` was refused or has expired"),
         "{out}"
     );
-    assert_eq!(refreshes(&log), 1, "a handed token was refreshed");
+    assert_eq!(refreshes(), 1, "a handed token was refreshed");
     assert_eq!(
-        std::fs::read_dir(&remote).unwrap().count(),
+        std::fs::read_dir(remote.config()).unwrap().count(),
         0,
         "the handed mode wrote to its config dir"
     );
 
-    let log = log.lock().unwrap();
-    let calls: Vec<&String> = log
-        .iter()
-        .filter(|l| l.starts_with("/alpha/v1/things "))
-        .collect();
+    let log = fake.requests();
+    let calls = fake.to("/alpha/v1/things");
     assert_eq!(calls.len(), 3, "{log:?}");
-    assert!(calls[0].contains("auth=Bearer access-2 ver=7"), "{log:?}");
-    assert!(calls[2].contains("auth=Bearer access-1 ver=7"), "{log:?}");
-    let _ = std::fs::remove_dir_all(&tmp);
+    let sent = |i: usize| {
+        (
+            calls[i].header("authorization"),
+            calls[i].header("x-fake-version"),
+        )
+    };
+    assert_eq!(sent(0), ("Bearer access-2".into(), "7".into()), "{log:?}");
+    assert_eq!(sent(2), ("Bearer access-1".into(), "7".into()), "{log:?}");
 }
 
 /// A provider's built-in public client: used while no client is stored, with
@@ -1491,9 +1062,10 @@ fn handed_token_without_db() {
 /// `client --reset` brings it back.
 #[test]
 fn built_in_public_client() {
-    let (port, log) = serve(move |target, body| match target {
+    let fake = FakeProvider::serve(move |r| match r.target.as_str() {
         "/device" => {
-            let id = body
+            let id = r
+                .body
                 .split('&')
                 .find_map(|kv| kv.strip_prefix("client_id="))
                 .unwrap_or_default()
@@ -1506,34 +1078,11 @@ fn built_in_public_client() {
         "/token" => ("200 OK", r#"{"access_token":"tok","scope":"repo"}"#.into()),
         _ => ("404 Not Found", "{}".into()),
     });
-    let tmp = std::env::temp_dir().join(format!("sesame-public-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    let sesame_in = |args: &[&str], input: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_sesame"))
-            .args(args)
-            .env("SESAME_CONFIG_DIR", &config)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        (out.status.success(), text)
-    };
-    let sesame = |args: &[&str]| sesame_in(args, "");
+    let m = Machine::new("public");
     let in_use = || {
-        let (ok, out) = sesame(&["provider", "show", "pub"]);
-        assert!(ok, "{out}");
-        let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let out = m.run(&["provider", "show", "pub"]);
+        assert!(out.ok, "{out}");
+        let shown: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
         assert_eq!(shown["public_client_id"]["value"], "builtin-id");
         shown["public_client_id"]["in_use"].as_bool().unwrap()
     };
@@ -1544,40 +1093,31 @@ fn built_in_public_client() {
             .to_string()
     };
     let token_calls = || {
-        log.lock()
-            .unwrap()
-            .iter()
-            .filter(|l| l.starts_with("/token "))
-            .cloned()
+        fake.to("/token")
+            .into_iter()
+            .map(|r| r.body)
             .collect::<Vec<_>>()
     };
 
-    let base = format!("http://127.0.0.1:{port}");
-    let (ok, out) = sesame(&[
-        "provider",
-        "add",
+    let base = fake.base();
+    fake.add(
+        &m,
         "pub",
-        "--auth-url",
-        &format!("{base}/authorize"),
-        "--token-url",
-        &format!("{base}/token"),
-        "--api-base",
-        &base,
-        "--host",
-        "127.0.0.1",
-        "--scope",
-        "repo",
-        "--device-url",
-        &format!("{base}/device"),
-        "--redirect-host",
-        "127.0.0.1",
-        "--public-client-id",
-        "builtin-id",
-    ]);
-    assert!(ok, "{out}");
+        "",
+        &[
+            "--scope",
+            "repo",
+            "--device-url",
+            &format!("{base}/device"),
+            "--redirect-host",
+            "127.0.0.1",
+            "--public-client-id",
+            "builtin-id",
+        ],
+    );
 
     // No client stored: the built-in one, with no secret.
-    let (_, out) = sesame(&["providers"]);
+    let out = m.run(&["providers"]).text();
     let l = line(&out);
     assert!(
         l.contains("not logged in")
@@ -1586,10 +1126,10 @@ fn built_in_public_client() {
         "{out}"
     );
     assert!(in_use());
-    let (ok, out) = sesame(&["setup", "pub"]);
-    assert!(ok && out.contains("No setup is needed"), "{out}");
-    let (ok, out) = sesame(&["login", "pub", "--no-browser"]);
-    assert!(ok && out.contains("Logged in to `pub`"), "{out}");
+    let out = m.run(&["setup", "pub"]);
+    assert!(out.ok && out.text().contains("No setup is needed"), "{out}");
+    let out = m.run(&["login", "pub", "--no-browser"]);
+    assert!(out.ok && out.text().contains("Logged in to `pub`"), "{out}");
     let calls = token_calls();
     assert!(
         calls.len() == 1
@@ -1600,27 +1140,25 @@ fn built_in_public_client() {
     );
 
     // --browser with the built-in client: refused before anything is sent.
-    let (ok, out) = sesame(&["login", "pub", "--browser", "--no-browser"]);
+    let out = m.run(&["login", "pub", "--browser", "--no-browser"]);
+    let text = out.text();
     assert!(
-        !ok && out.contains("only with the device flow") && out.contains("`sesame setup pub`"),
+        !out.ok
+            && text.contains("only with the device flow")
+            && text.contains("`sesame setup pub`"),
         "{out}"
     );
-    assert!(
-        !log.lock()
-            .unwrap()
-            .iter()
-            .any(|l| l.starts_with("/authorize"))
-    );
+    assert!(fake.to("/authorize").is_empty());
 
     // A stored client replaces it, secret and all.
-    let (ok, out) = sesame_in(
+    let out = m.run_with_stdin(
         &["client", "pub", "--client-id", "mine", "--secret-stdin"],
         "s3cret\n",
     );
-    assert!(ok, "{out}");
+    assert!(out.ok, "{out}");
     assert!(!in_use());
-    let (ok, out) = sesame(&["login", "pub", "--no-browser"]);
-    assert!(ok, "{out}");
+    let out = m.run(&["login", "pub", "--no-browser"]);
+    assert!(out.ok, "{out}");
     let calls = token_calls();
     assert!(
         calls[1].contains("device_code=dev-mine")
@@ -1630,118 +1168,24 @@ fn built_in_public_client() {
     );
 
     // --reset: back to the built-in client.
-    let (ok, out) = sesame(&["client", "pub", "--reset"]);
+    let out = m.run(&["client", "pub", "--reset"]);
     assert!(
-        ok && out.contains("login uses the built-in client"),
+        out.ok && out.text().contains("login uses the built-in client"),
         "{out}"
     );
     assert!(in_use());
-    let (ok, out) = sesame(&["login", "pub", "--no-browser"]);
-    assert!(ok, "{out}");
+    let out = m.run(&["login", "pub", "--no-browser"]);
+    assert!(out.ok, "{out}");
     let calls = token_calls();
     assert!(
         calls[2].contains("client_id=builtin-id") && !calls[2].contains("client_secret"),
         "{calls:?}"
     );
-    let (ok, out) = sesame(&["client", "pub", "--reset"]);
-    assert!(ok && out.contains("There was no stored"), "{out}");
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-/// A 1Password vault for a test: the fake `op` (tests/support/fake_op.rs) on
-/// a PATH of its own, its items and call log in `dir`.
-struct FakeVault {
-    dir: std::path::PathBuf,
-    bin: std::path::PathBuf,
-}
-
-const VAULT: &str = "scratch";
-const SA_TOKEN: &str = "ops_service-account-secret";
-
-impl FakeVault {
-    fn new(tmp: &std::path::Path) -> FakeVault {
-        let dir = tmp.join("op");
-        let bin = tmp.join("bin");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::create_dir_all(&bin).unwrap();
-        // cargo test builds the example next to sesame, in target/<profile>/examples.
-        let fake = std::path::Path::new(env!("CARGO_BIN_EXE_sesame"))
-            .parent()
-            .unwrap()
-            .join("examples/fake-op");
-        assert!(
-            fake.exists(),
-            "{} missing: run `cargo test`",
-            fake.display()
-        );
-        std::os::unix::fs::symlink(&fake, bin.join("op")).unwrap();
-        FakeVault { dir, bin }
-    }
-
-    /// Sets `c` up to use the vault, as a machine that opted in would.
-    fn env<'a>(&self, c: &'a mut Command) -> &'a mut Command {
-        c.env("SESAME_1PASSWORD_VAULT", VAULT)
-            .env("OP_SERVICE_ACCOUNT_TOKEN", SA_TOKEN)
-            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
-            .env("FAKE_OP_DIR", &self.dir)
-            .env("FAKE_OP_TOKEN", SA_TOKEN)
-            .env("FAKE_OP_VAULT", VAULT)
-    }
-
-    /// Every `op` call so far: its argv, and whether it had the token.
-    fn calls(&self) -> Vec<(Vec<String>, bool)> {
-        std::fs::read_to_string(self.dir.join("calls.log"))
-            .unwrap_or_default()
-            .lines()
-            .map(|l| {
-                let v: serde_json::Value = serde_json::from_str(l).unwrap();
-                let argv = v["argv"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|a| a.as_str().unwrap().to_string())
-                    .collect();
-                (argv, v["token"].as_bool().unwrap())
-            })
-            .collect()
-    }
-
-    fn items(&self) -> Vec<serde_json::Value> {
-        std::fs::read(self.dir.join("items.json"))
-            .map(|b| serde_json::from_slice(&b).unwrap())
-            .unwrap_or_default()
-    }
-
-    fn item(&self, title: &str) -> Option<serde_json::Value> {
-        self.items().into_iter().find(|i| i["title"] == title)
-    }
-
-    /// `op read op://<vault>/<title>/<field>`, as a person would.
-    fn read(&self, reference: &str) -> String {
-        let mut c = Command::new(self.bin.join("op"));
-        self.env(&mut c);
-        let out = c.args(["read", reference]).output().unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    }
-}
-
-/// The field `label` of an item: (type, value).
-fn field(item: &serde_json::Value, label: &str) -> Option<(String, String)> {
-    item["fields"]
-        .as_array()?
-        .iter()
-        .find(|f| f["label"] == label)
-        .map(|f| {
-            (
-                f["type"].as_str().unwrap().to_string(),
-                f["value"].as_str().unwrap().to_string(),
-            )
-        })
+    let out = m.run(&["client", "pub", "--reset"]);
+    assert!(
+        out.ok && out.text().contains("There was no stored"),
+        "{out}"
+    );
 }
 
 /// With `SESAME_1PASSWORD_VAULT` set, every command keeps its clients, tokens
@@ -1752,22 +1196,22 @@ fn field(item: &serde_json::Value, label: &str) -> Option<(String, String)> {
 #[test]
 fn one_password_vault_store() {
     let mut refreshes = 0;
-    let (port, _log) = serve(move |target, body| {
-        match target {
+    let fake = FakeProvider::serve(move |r| {
+        match r.target.as_str() {
         "/device" => (
             "200 OK",
             r#"{"device_code":"dev","user_code":"WDJB-MJHT","verification_uri":"https://example.com/device","expires_in":60,"interval":0}"#.into(),
         ),
-        "/token" if body.contains("grant_type=urn") => (
+        "/token" if r.body.contains("grant_type=urn") => (
             "200 OK",
             r#"{"access_token":"device-token","refresh_token":"refresh-secret-1","expires_in":3600,"scope":"repo"}"#.into(),
         ),
-        "/token" if body.contains("grant_type=authorization_code") => (
+        "/token" if r.body.contains("grant_type=authorization_code") => (
             "200 OK",
             r#"{"access_token":"browser-token","refresh_token":"refresh-secret-1","expires_in":3600}"#.into(),
         ),
-        "/token" if body.contains("grant_type=refresh_token") => {
-            assert!(body.contains("refresh_token=refresh-secret-1"), "{body}");
+        "/token" if r.is_refresh() => {
+            assert!(r.body.contains("refresh_token=refresh-secret-1"), "{}", r.body);
             refreshes += 1;
             let b = format!(
                 r#"{{"access_token":"refreshed-{refreshes}","refresh_token":"refresh-secret-1","expires_in":3600}}"#
@@ -1779,89 +1223,50 @@ fn one_password_vault_store() {
         _ => ("404 Not Found", "{}".into()),
     }
     });
-    let tmp = std::env::temp_dir().join(format!("sesame-vault-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    let vault = FakeVault::new(&tmp);
-    let run = |args: &[&str], stdin: Option<&str>| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        vault.env(&mut c);
-        let mut child = c
-            .args(args)
-            .env("SESAME_CONFIG_DIR", &config)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stdin.unwrap_or_default().as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        (out.status.success(), text)
-    };
-    let sesame = |args: &[&str]| run(args, None);
-    // The `op` calls a command makes, and how many of them write.
-    let counted = |args: &[&str]| {
-        let before = vault.calls().len();
-        let (ok, out) = sesame(args);
-        let calls: Vec<_> = vault.calls().split_off(before);
-        let writes = calls
-            .iter()
-            .filter(|(a, _)| ["create", "edit", "delete"].contains(&a[1].as_str()))
-            .count();
-        (ok, out, calls.len(), writes)
-    };
+    let vault = FakeVault::new();
+    let m = Machine::new("vault").with_vault(&vault);
+    let config = m.config();
 
-    let base = format!("http://127.0.0.1:{port}");
-    let (ok, out) = sesame(&[
-        "provider",
-        "add",
+    let base = fake.base();
+    fake.add(
+        &m,
         "hub",
-        "--auth-url",
-        &format!("{base}/authorize"),
-        "--token-url",
-        &format!("{base}/token"),
-        "--api-base",
-        &base,
-        "--host",
-        "127.0.0.1",
-        "--scope",
-        "repo",
-        "--device-url",
-        &format!("{base}/device"),
-        "--redirect-host",
-        "127.0.0.1",
-        "--identity-url",
-        &format!("{base}/user"),
-        "--identity-field",
-        "login",
-    ]);
-    assert!(ok, "{out}");
-    let (ok, out) = sesame(&["provider", "set", "hub", "--about", "The hub"]);
-    assert!(ok, "{out}");
-    let (ok, out) = sesame(&["provider", "show", "hub"]);
-    assert!(ok, "{out}");
-    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+        "",
+        &[
+            "--scope",
+            "repo",
+            "--device-url",
+            &format!("{base}/device"),
+            "--redirect-host",
+            "127.0.0.1",
+            "--identity-url",
+            &format!("{base}/user"),
+            "--identity-field",
+            "login",
+        ],
+    );
+    let out = m.run(&["provider", "set", "hub", "--about", "The hub"]);
+    assert!(out.ok, "{out}");
+    let out = m.run(&["provider", "show", "hub"]);
+    assert!(out.ok, "{out}");
+    let shown: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(shown["about"]["value"], "The hub");
     assert_eq!(shown["device_url"]["from"], "user");
     let defs = vault.item("sesame-providers").expect("definitions item");
     assert!(field(&defs, "hub").unwrap().1.contains("The hub"));
 
-    let (ok, out) = run(
+    let out = m.run_with_stdin(
         &["client", "hub", "--client-id", "cid", "--secret-stdin"],
-        Some("client-secret-xyz\n"),
+        "client-secret-xyz\n",
     );
-    assert!(ok, "{out}");
+    assert!(out.ok, "{out}");
 
     // The device flow.
-    let (ok, out) = sesame(&["login", "hub", "--no-browser"]);
-    assert!(ok && out.contains("Logged in to `hub` (octo)"), "{out}");
+    let out = m.run(&["login", "hub", "--no-browser"]);
+    assert!(
+        out.ok && out.text().contains("Logged in to `hub` (octo)"),
+        "{out}"
+    );
     let item = vault.item("sesame.hub").expect("the provider's item");
     assert_eq!(item["tags"], serde_json::json!(["sesame"]));
     assert_eq!(item["category"], "SECURE_NOTE");
@@ -1880,28 +1285,28 @@ fn one_password_vault_store() {
     );
 
     // No refresh needed: all from the local copy, no `op` call.
-    let (ok, out, calls, writes) = counted(&["token", "hub"]);
-    assert!(ok && out.trim() == "device-token", "{out}");
-    assert_eq!((calls, writes), (0, 0));
-    let (ok, out, calls, writes) = counted(&["api", "hub", "/me"]);
-    assert!(ok && out.contains(r#"{"me":"octo"}"#), "{out}");
-    assert_eq!((calls, writes), (0, 0));
-    let (ok, out, calls, writes) = counted(&["token", "hub", "--json"]);
+    let out = m.run(&["token", "hub"]);
+    assert!(out.ok && out.text().trim() == "device-token", "{out}");
+    assert_eq!((out.calls, out.writes), (0, 0));
+    let out = m.run(&["api", "hub", "/me"]);
+    assert!(out.ok && out.text().contains(r#"{"me":"octo"}"#), "{out}");
+    assert_eq!((out.calls, out.writes), (0, 0));
+    let out = m.run(&["token", "hub", "--json"]);
     assert!(
-        ok && out.contains(r#""access_token":"device-token""#),
+        out.ok && out.text().contains(r#""access_token":"device-token""#),
         "{out}"
     );
-    assert_eq!((calls, writes), (0, 0));
+    assert_eq!((out.calls, out.writes), (0, 0));
 
     // A refresh that returns the same refresh token: one write, of the new
     // access token and its expiry, the rest of the item as it was.
     let before = vault.item("sesame.hub").unwrap();
-    let (ok, out, calls, writes) = counted(&["token", "hub", "--json", "--min-life", "7200"]);
+    let out = m.run(&["token", "hub", "--json", "--min-life", "7200"]);
     assert!(
-        ok && out.contains(r#""access_token":"refreshed-1""#),
+        out.ok && out.text().contains(r#""access_token":"refreshed-1""#),
         "{out}"
     );
-    assert_eq!((calls, writes), (3, 1));
+    assert_eq!((out.calls, out.writes), (3, 1));
     let after = vault.item("sesame.hub").unwrap();
     let changed: Vec<&str> = [
         "client_id",
@@ -1926,48 +1331,21 @@ fn one_password_vault_store() {
     );
 
     // The loopback flow (`--browser`), the test playing the browser.
-    let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-    vault.env(&mut c);
-    let mut login = c
-        .args(["login", "hub", "--browser", "--no-browser"])
-        .env("SESAME_CONFIG_DIR", &config)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut err = BufReader::new(login.stderr.take().unwrap());
-    let auth_url = loop {
-        let mut l = String::new();
-        assert!(
-            err.read_line(&mut l).unwrap() > 0,
-            "login ended before printing a URL"
-        );
-        if let Some(u) = l.trim().strip_prefix("http") {
-            break format!("http{u}");
-        }
-    };
-    let page = reqwest::blocking::get(&auth_url).unwrap().text().unwrap();
-    assert!(page.contains("Signed in"));
-    let status = login.wait().unwrap();
-    let mut rest = String::new();
-    err.read_to_string(&mut rest).unwrap();
-    assert!(status.success(), "login --browser failed: {rest}");
-    let (_, out) = sesame(&["token", "hub"]);
-    assert_eq!(out.trim(), "browser-token");
+    m.login_in_browser(&["login", "hub", "--browser", "--no-browser"]);
+    assert_eq!(m.run(&["token", "hub"]).text().trim(), "browser-token");
 
     // A pasted token.
-    let (ok, out) = run(
-        &["login", "hub", "--token-stdin"],
-        Some("pasted-secret-token"),
-    );
-    assert!(ok, "{out}");
-    let (ok, out) = sesame(&["providers"]);
+    let out = m.run_with_stdin(&["login", "hub", "--token-stdin"], "pasted-secret-token");
+    assert!(out.ok, "{out}");
+    let out = m.run(&["providers"]);
     assert!(
-        ok && out.contains("logged in (octo, pasted token)"),
+        out.ok && out.text().contains("logged in (octo, pasted token)"),
         "{out}"
     );
-    let (_, out) = sesame(&["token", "hub"]);
-    assert_eq!(out.trim(), "pasted-secret-token");
+    assert_eq!(
+        m.run(&["token", "hub"]).text().trim(),
+        "pasted-secret-token"
+    );
 
     // Nothing of sesame's under the config dir holds a secret: no sesame.db at all.
     assert!(!config.join("sesame.db").exists());
@@ -1980,7 +1358,7 @@ fn one_password_vault_store() {
         "pasted-secret-token",
         SA_TOKEN,
     ];
-    for entry in std::fs::read_dir(&config).unwrap() {
+    for entry in std::fs::read_dir(config).unwrap() {
         let path = entry.unwrap().path();
         let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
         for s in secrets {
@@ -1996,39 +1374,39 @@ fn one_password_vault_store() {
         }
     }
 
-    let (ok, out) = sesame(&["client", "hub", "--reset"]);
-    assert!(ok && out.contains("Forgot your `hub` client"), "{out}");
+    let out = m.run(&["client", "hub", "--reset"]);
+    assert!(
+        out.ok && out.text().contains("Forgot your `hub` client"),
+        "{out}"
+    );
     let item = vault.item("sesame.hub").unwrap();
     assert!(field(&item, "client_secret").is_none() && field(&item, "access_token").is_some());
     // Logged out with no client left: the item is archived.
-    let (ok, out) = sesame(&["logout", "hub"]);
-    assert!(ok, "{out}");
+    let out = m.run(&["logout", "hub"]);
+    assert!(out.ok, "{out}");
     assert!(vault.item("sesame.hub").is_none());
-    let (ok, out) = sesame(&["token", "hub"]);
-    assert!(!ok && out.contains("no OAuth client for `hub`"), "{out}");
-    let (ok, out) = sesame(&["provider", "rm", "hub"]);
-    assert!(ok, "{out}");
+    let out = m.run(&["token", "hub"]);
+    assert!(
+        !out.ok && out.text().contains("no OAuth client for `hub`"),
+        "{out}"
+    );
+    let out = m.run(&["provider", "rm", "hub"]);
+    assert!(out.ok, "{out}");
     assert!(vault.items().is_empty(), "{:?}", vault.items());
     assert!(!config.join("sesame.db").exists());
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// A vault named but unusable is one clear error, never sesame.db instead.
 #[test]
 fn one_password_vault_errors() {
-    let tmp = std::env::temp_dir().join(format!("sesame-vault-err-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    let vault = FakeVault::new(&tmp);
+    let vault = FakeVault::new();
+    let m = Machine::new("vault-err").with_vault(&vault);
     let sesame = |setup: &dyn Fn(&mut Command)| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        vault.env(&mut c);
-        c.args(["token", "github"])
-            .env("SESAME_CONFIG_DIR", &config);
+        let mut c = m.cmd(&["token", "github"]);
         setup(&mut c);
-        let out = c.output().unwrap();
-        assert!(!out.status.success());
-        String::from_utf8_lossy(&out.stderr).to_string()
+        let out = m.output(c, "");
+        assert!(!out.ok);
+        out.stderr
     };
 
     let err = sesame(&|c| {
@@ -2054,8 +1432,7 @@ fn one_password_vault_errors() {
         c.env("FAKE_OP_TOKEN", "another");
     });
     assert!(err.contains("authentication failed"), "{err}");
-    assert!(!config.join("sesame.db").exists());
-    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(!m.config().join("sesame.db").exists());
 }
 
 /// `sesame store migrate` copies sesame.db into the vault: a run cut short by
@@ -2065,13 +1442,13 @@ fn one_password_vault_errors() {
 /// vault alone.
 #[test]
 fn one_password_vault_migrate() {
-    let (port, _log) = serve(move |target, body| {
-        match target {
+    let fake = FakeProvider::serve(move |r| {
+        match r.target.as_str() {
         "/device" => (
             "200 OK",
             r#"{"device_code":"dev","user_code":"WDJB-MJHT","verification_uri":"https://example.com/device","expires_in":60,"interval":0}"#.into(),
         ),
-        "/token" if body.contains("grant_type=urn") => (
+        "/token" if r.body.contains("grant_type=urn") => (
             "200 OK",
             r#"{"access_token":"device-token","refresh_token":"refresh-secret-1","expires_in":3600,"scope":"repo"}"#.into(),
         ),
@@ -2080,134 +1457,90 @@ fn one_password_vault_migrate() {
         _ => ("404 Not Found", "{}".into()),
     }
     });
-    let tmp = std::env::temp_dir().join(format!("sesame-migrate-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let config = tmp.join("config");
-    let vault = FakeVault::new(&tmp);
+    let vault = FakeVault::new();
+    let m = Machine::new("migrate").with_vault(&vault);
+    let config = m.config();
+    // `in_vault` false: the same machine before it set SESAME_1PASSWORD_VAULT.
     let run = |in_vault: bool, args: &[&str], stdin: &str, setup: &dyn Fn(&mut Command)| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        vault.env(&mut c);
+        let mut c = m.cmd(args);
         if !in_vault {
             c.env_remove("SESAME_1PASSWORD_VAULT");
         }
         setup(&mut c);
-        let mut child = c
-            .args(args)
-            .env("SESAME_CONFIG_DIR", &config)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stdin.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        (out.status.success(), text)
+        m.output(c, stdin)
     };
     let local = |args: &[&str], stdin: &str| run(false, args, stdin, &|_| {});
-    let writes = || {
-        vault
-            .calls()
-            .iter()
-            .filter(|(a, _)| ["create", "edit", "delete"].contains(&a[1].as_str()))
-            .count()
-    };
     // A migrate run: (ok, output, writes it made).
     let migrate = |setup: &dyn Fn(&mut Command)| {
-        let before = writes();
-        let (ok, out) = run(true, &["store", "migrate"], "", setup);
-        (ok, out, writes() - before)
+        let out = run(true, &["store", "migrate"], "", setup);
+        (out.ok, out.text(), out.writes)
     };
 
     // sesame.db: a token with refresh (`hub`), a client only (`cli`), a
     // pasted token (`pst`), and the user provider fields defining them.
-    let base = format!("http://127.0.0.1:{port}");
+    let base = fake.base();
     for name in ["hub", "cli", "pst"] {
-        let (ok, out) = local(
+        let (device, user) = (format!("{base}/device"), format!("{base}/user"));
+        let args = fake.add_args(
+            name,
+            "",
             &[
-                "provider",
-                "add",
-                name,
-                "--auth-url",
-                &format!("{base}/authorize"),
-                "--token-url",
-                &format!("{base}/token"),
-                "--api-base",
-                &base,
-                "--host",
-                "127.0.0.1",
                 "--scope",
                 "repo",
                 "--device-url",
-                &format!("{base}/device"),
+                &device,
                 "--identity-url",
-                &format!("{base}/user"),
+                &user,
                 "--identity-field",
                 "login",
             ],
-            "",
         );
-        assert!(ok, "{out}");
+        let out = local(&args.iter().map(String::as_str).collect::<Vec<_>>(), "");
+        assert!(out.ok, "{out}");
     }
-    let (ok, out) = local(
+    let out = local(
         &["client", "hub", "--client-id", "hub-id", "--secret-stdin"],
         "hub-secret\n",
     );
-    assert!(ok, "{out}");
-    let (ok, out) = local(&["login", "hub", "--no-browser"], "");
-    assert!(ok && out.contains("Logged in to `hub` (octo)"), "{out}");
-    let (ok, out) = local(
+    assert!(out.ok, "{out}");
+    let out = local(&["login", "hub", "--no-browser"], "");
+    assert!(
+        out.ok && out.text().contains("Logged in to `hub` (octo)"),
+        "{out}"
+    );
+    let out = local(
         &["client", "cli", "--client-id", "cli-id", "--no-secret"],
         "",
     );
-    assert!(ok, "{out}");
-    let (ok, out) = local(&["login", "pst", "--token-stdin"], "pasted-secret");
-    assert!(ok, "{out}");
+    assert!(out.ok, "{out}");
+    let out = local(&["login", "pst", "--token-stdin"], "pasted-secret");
+    assert!(out.ok, "{out}");
     let db = config.join("sesame.db");
     assert!(db.exists());
 
     // Without the vault: refuses, saying what to set.
-    let (ok, out) = run(false, &["store", "migrate"], "", &|_| {});
+    let out = local(&["store", "migrate"], "");
     assert!(
-        !ok && out.contains("SESAME_1PASSWORD_VAULT is not set"),
+        !out.ok && out.text().contains("SESAME_1PASSWORD_VAULT is not set"),
         "{out}"
     );
     assert!(vault.calls().is_empty());
 
     // The vault already holds another client for `cli`.
-    let mut c = Command::new(vault.bin.join("op"));
-    vault.env(&mut c);
-    let mut op = c
-        .args(["item", "create", "--vault", VAULT, "--format", "json"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    op.stdin
-        .take()
-        .unwrap()
-        .write_all(
-            serde_json::json!({
-                "title": "sesame.cli",
-                "category": "SECURE_NOTE",
-                "tags": ["sesame"],
-                "fields": [{"label": "client_id", "type": "STRING", "value": "other-id"}],
-            })
-            .to_string()
-            .as_bytes(),
-        )
-        .unwrap();
-    assert!(op.wait().unwrap().success());
+    let other = serde_json::json!({
+        "title": "sesame.cli",
+        "category": "SECURE_NOTE",
+        "tags": ["sesame"],
+        "fields": [{"label": "client_id", "type": "STRING", "value": "other-id"}],
+    });
+    vault.op(
+        &["item", "create", "--vault", VAULT, "--format", "json"],
+        &other.to_string(),
+    );
     let conflicting = vault.item("sesame.cli").unwrap();
 
     // Cut short by the budget after one write: says so, keeps sesame.db.
-    let budget = (writes() + 1).to_string();
+    let budget = (vault.writes() + 1).to_string();
     let (ok, out, wrote) = migrate(&|c| {
         c.env("FAKE_OP_MAX_WRITES", &budget);
     });
@@ -2232,13 +1565,13 @@ fn one_password_vault_migrate() {
     assert_eq!(wrote, 0, "{out}");
 
     // Keep the vault's client: drop sesame.db's. Now everything is in the vault.
-    let (ok, out) = local(&["client", "cli", "--reset"], "");
-    assert!(ok, "{out}");
+    let out = local(&["client", "cli", "--reset"], "");
+    assert!(out.ok, "{out}");
     let (ok, out, wrote) = migrate(&|_| {});
     assert!(ok, "{out}");
     assert_eq!(wrote, 0, "{out}");
     assert!(!db.exists());
-    let moved: Vec<_> = std::fs::read_dir(&config)
+    let moved: Vec<_> = std::fs::read_dir(config)
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.to_string_lossy().contains("sesame.db.migrated-"))
@@ -2260,7 +1593,7 @@ fn one_password_vault_migrate() {
     assert!(!db.exists());
 
     // From the vault alone, sesame.db out of the way.
-    for entry in std::fs::read_dir(&config).unwrap() {
+    for entry in std::fs::read_dir(config).unwrap() {
         let p = entry.unwrap().path();
         if p.to_string_lossy().contains("sesame.db.") {
             std::fs::remove_file(p).unwrap();
@@ -2272,20 +1605,18 @@ fn one_password_vault_migrate() {
         vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
         "refresh-secret-1"
     );
-    let vaulted = |args: &[&str]| run(true, args, "", &|_| {});
-    let (ok, out) = vaulted(&["token", "hub"]);
-    assert!(ok && out.trim() == "device-token", "{out}");
-    let (ok, out) = vaulted(&["api", "hub", "/me"]);
-    assert!(ok && out.contains(r#"{"me":"octo"}"#), "{out}");
-    let (ok, out) = vaulted(&["token", "pst"]);
-    assert!(ok && out.trim() == "pasted-secret", "{out}");
-    let (ok, out) = vaulted(&["providers"]);
+    let out = m.run(&["token", "hub"]);
+    assert!(out.ok && out.text().trim() == "device-token", "{out}");
+    let out = m.run(&["api", "hub", "/me"]);
+    assert!(out.ok && out.text().contains(r#"{"me":"octo"}"#), "{out}");
+    let out = m.run(&["token", "pst"]);
+    assert!(out.ok && out.text().trim() == "pasted-secret", "{out}");
+    let out = m.run(&["providers"]);
     assert!(
-        ok && out.contains("logged in (octo)") && out.contains("pasted token"),
+        out.ok && out.text().contains("logged in (octo)") && out.text().contains("pasted token"),
         "{out}"
     );
     assert!(!db.exists());
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// The vault's local copy (docs/adr/0002): a call with a valid token makes no
@@ -2299,17 +1630,17 @@ fn one_password_local_copy() {
     // A login's token lasts 30 s, inside MIN_LIFE, so the first call
     // refreshes it; a refresh's lasts an hour.
     let mut refreshes = 0;
-    let (port, log) = serve(move |target, body| {
-        match target {
+    let fake = FakeProvider::serve(move |r| {
+        match r.target.as_str() {
         "/device" => (
             "200 OK",
             r#"{"device_code":"dev","user_code":"WDJB-MJHT","verification_uri":"https://example.com/device","expires_in":60,"interval":0}"#.into(),
         ),
-        "/token" if body.contains("grant_type=urn") => (
+        "/token" if r.body.contains("grant_type=urn") => (
             "200 OK",
             r#"{"access_token":"login-token","refresh_token":"refresh-secret","expires_in":30}"#.into(),
         ),
-        "/token" if body.contains("grant_type=refresh_token") => {
+        "/token" if r.is_refresh() => {
             refreshes += 1;
             let b = format!(
                 r#"{{"access_token":"refreshed-{refreshes}","refresh_token":"refresh-secret","expires_in":3600}}"#
@@ -2320,138 +1651,99 @@ fn one_password_local_copy() {
         _ => ("404 Not Found", "{}".into()),
     }
     });
-    let tmp = std::env::temp_dir().join(format!("sesame-copy-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let vault = FakeVault::new(&tmp);
-    let (a, b) = (tmp.join("machine-a"), tmp.join("machine-b"));
-    // `sesame` on a machine (its config dir) under a service account token:
-    // whether it succeeded, its output, its `op` calls and how many wrote.
-    let run = |config: &std::path::Path, sa: &str, args: &[&str], stdin: &str| {
-        let before = vault.calls().len();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sesame"));
-        vault.env(&mut c);
-        let mut child = c
-            .args(args)
-            .env("SESAME_CONFIG_DIR", config)
-            .env("OP_SERVICE_ACCOUNT_TOKEN", sa)
-            .env("FAKE_OP_TOKEN", sa)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stdin.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        let calls: Vec<_> = vault.calls().split_off(before);
-        let writes = calls
-            .iter()
-            .filter(|(a, _)| ["create", "edit", "delete"].contains(&a[1].as_str()))
-            .count();
-        (out.status.success(), text, calls.len(), writes)
+    let vault = FakeVault::new();
+    let a = Machine::new("copy-a").with_vault(&vault);
+    let b = Machine::new("copy-b").with_vault(&vault);
+    // `sesame` on a machine under another service account token.
+    let as_sa = |m: &Machine, sa: &str, args: &[&str]| {
+        let mut c = m.cmd(args);
+        c.env("OP_SERVICE_ACCOUNT_TOKEN", sa)
+            .env("FAKE_OP_TOKEN", sa);
+        m.output(c, "")
     };
-    let on = |config: &std::path::Path, args: &[&str]| run(config, SA_TOKEN, args, "");
-    let refresh_bodies = || -> Vec<String> {
-        log.lock()
-            .unwrap()
-            .iter()
-            .filter(|l| l.starts_with("/token") && l.contains("grant_type=refresh_token"))
-            .cloned()
-            .collect()
+    let refresh_bodies = || {
+        fake.refreshes()
+            .into_iter()
+            .map(|r| r.body)
+            .collect::<Vec<_>>()
     };
 
-    let base = format!("http://127.0.0.1:{port}");
-    let (ok, out, ..) = on(
+    let base = fake.base();
+    fake.add(
         &a,
+        "hub",
+        "",
         &[
-            "provider",
-            "add",
-            "hub",
-            "--auth-url",
-            &format!("{base}/authorize"),
-            "--token-url",
-            &format!("{base}/token"),
-            "--api-base",
-            &base,
-            "--host",
-            "127.0.0.1",
             "--device-url",
             &format!("{base}/device"),
             "--about",
             "first",
         ],
     );
-    assert!(ok, "{out}");
-    let (ok, out, ..) = run(
-        &a,
-        SA_TOKEN,
+    let out = a.run_with_stdin(
         &["client", "hub", "--client-id", "cid-1", "--secret-stdin"],
         "client-secret-1\n",
     );
-    assert!(ok, "{out}");
-    let (ok, out, ..) = on(&a, &["login", "hub", "--no-browser"]);
-    assert!(ok, "{out}");
+    assert!(out.ok, "{out}");
+    let out = a.run(&["login", "hub", "--no-browser"]);
+    assert!(out.ok, "{out}");
 
     // Machine B, no copy yet: it fills one from the vault (a list and a read
     // of each item), then calls with the token as the vault holds it.
-    let (ok, out, calls, writes) = on(&b, &["provider", "show", "hub"]);
-    assert!(ok && out.contains("first"), "{out}");
-    assert_eq!((calls, writes), (3, 0));
+    let out = b.run(&["provider", "show", "hub"]);
+    assert!(out.ok && out.text().contains("first"), "{out}");
+    assert_eq!((out.calls, out.writes), (3, 0));
 
     // A's login token is expiring: the first call refreshes (a list, the
     // item's read, one write), the next makes no `op` call at all.
-    let (ok, out, calls, writes) = on(&a, &["api", "hub", "/me"]);
-    assert!(ok && out.contains("octo"), "{out}");
-    assert_eq!((calls, writes), (3, 1));
+    let out = a.run(&["api", "hub", "/me"]);
+    assert!(out.ok && out.text().contains("octo"), "{out}");
+    assert_eq!((out.calls, out.writes), (3, 1));
     assert_eq!(refresh_bodies().len(), 1);
     for args in [
         &["api", "hub", "/me"][..],
         &["token", "hub"],
         &["provider", "show", "hub"],
     ] {
-        let (ok, out, calls, writes) = on(&a, args);
-        assert!(ok, "{out}");
-        assert_eq!((calls, writes), (0, 0), "{args:?}");
+        let out = a.run(args);
+        assert!(out.ok, "{out}");
+        assert_eq!((out.calls, out.writes), (0, 0), "{args:?}");
     }
-    let (_, out, ..) = on(&a, &["token", "hub"]);
-    assert_eq!(out.trim(), "refreshed-1");
+    assert_eq!(a.run(&["token", "hub"]).text().trim(), "refreshed-1");
 
     // B's copy still has the login token, expiring: its next call syncs, finds
     // A's refreshed token, and uses it without refreshing (no write).
-    let (ok, out, calls, writes) = on(&b, &["token", "hub"]);
-    assert!(ok && out.trim() == "refreshed-1", "{out}");
-    assert_eq!((calls, writes), (2, 0));
+    let out = b.run(&["token", "hub"]);
+    assert!(out.ok && out.text().trim() == "refreshed-1", "{out}");
+    assert_eq!((out.calls, out.writes), (2, 0));
     assert_eq!(refresh_bodies().len(), 1);
-    let (_, _, calls, _) = on(&b, &["api", "hub", "/me"]);
-    assert_eq!(calls, 0);
+    assert_eq!(b.run(&["api", "hub", "/me"]).calls, 0);
 
     // A changes the provider's fields and client. B goes on with its copy
     // until its next refresh, which reads both and refreshes with A's client.
-    let (ok, out, ..) = on(&a, &["provider", "set", "hub", "--about", "second"]);
-    assert!(ok, "{out}");
-    let (ok, out, ..) = run(
-        &a,
-        SA_TOKEN,
+    let out = a.run(&["provider", "set", "hub", "--about", "second"]);
+    assert!(out.ok, "{out}");
+    let out = a.run_with_stdin(
         &["client", "hub", "--client-id", "cid-2", "--secret-stdin"],
         "client-secret-2\n",
     );
-    assert!(ok, "{out}");
-    let (ok, out, calls, _) = on(&b, &["provider", "show", "hub"]);
-    assert!(ok && out.contains("first") && calls == 0, "{out}");
-    let (ok, out, calls, writes) = on(&b, &["token", "hub", "--min-life", "7200"]);
-    assert!(ok && out.trim() == "refreshed-2", "{out}");
+    assert!(out.ok, "{out}");
+    let out = b.run(&["provider", "show", "hub"]);
+    assert!(
+        out.ok && out.text().contains("first") && out.calls == 0,
+        "{out}"
+    );
+    let out = b.run(&["token", "hub", "--min-life", "7200"]);
+    assert!(out.ok && out.text().trim() == "refreshed-2", "{out}");
     // The list; the definitions and the provider's item, both moved; the write.
-    assert_eq!((calls, writes), (4, 1));
+    assert_eq!((out.calls, out.writes), (4, 1));
     let last = refresh_bodies().pop().unwrap();
     assert!(last.contains("client_id=cid-2"), "{last}");
-    let (ok, out, calls, _) = on(&b, &["provider", "show", "hub"]);
-    assert!(ok && out.contains("second") && calls == 0, "{out}");
+    let out = b.run(&["provider", "show", "hub"]);
+    assert!(
+        out.ok && out.text().contains("second") && out.calls == 0,
+        "{out}"
+    );
 
     // Nothing under either config dir holds a secret in plaintext.
     let secrets = [
@@ -2463,8 +1755,8 @@ fn one_password_local_copy() {
         "client-secret-2",
         SA_TOKEN,
     ];
-    for dir in [&a, &b] {
-        let files: Vec<_> = std::fs::read_dir(dir)
+    for m in [&a, &b] {
+        let files: Vec<_> = std::fs::read_dir(m.config())
             .unwrap()
             .map(|e| e.unwrap().path())
             .collect();
@@ -2487,32 +1779,31 @@ fn one_password_local_copy() {
     // Under another service account token (one rotated) the copy does not
     // open: it is rebuilt from the vault, then used again.
     let other = "ops_another-service-account";
-    let (ok, out, calls, writes) = run(&a, other, &["token", "hub"], "");
-    assert!(ok && out.trim() == "refreshed-2", "{out}");
-    assert_eq!((calls, writes), (3, 0));
-    let (_, _, calls, _) = run(&a, other, &["token", "hub"], "");
-    assert_eq!(calls, 0);
+    let out = as_sa(&a, other, &["token", "hub"]);
+    assert!(out.ok && out.text().trim() == "refreshed-2", "{out}");
+    assert_eq!((out.calls, out.writes), (3, 0));
+    assert_eq!(as_sa(&a, other, &["token", "hub"]).calls, 0);
     // And a damaged copy the same.
-    let copy = a.join("1password-copy");
+    let copy = a.config().join("1password-copy");
     let mut bytes = std::fs::read(&copy).unwrap();
     *bytes.last_mut().unwrap() ^= 1;
     std::fs::write(&copy, bytes).unwrap();
-    let (ok, out, calls, _) = run(&a, other, &["token", "hub"], "");
-    assert!(ok && out.trim() == "refreshed-2", "{out}");
-    assert_eq!(calls, 3);
+    let out = as_sa(&a, other, &["token", "hub"]);
+    assert!(out.ok && out.text().trim() == "refreshed-2", "{out}");
+    assert_eq!(out.calls, 3);
 
     // A logout elsewhere reaches B at its next sync (`sesame providers`).
-    let (ok, out, ..) = on(&a, &["logout", "hub"]);
-    assert!(ok, "{out}");
-    let (ok, out, ..) = on(&b, &["providers"]);
-    let hub = out
+    let out = a.run(&["logout", "hub"]);
+    assert!(out.ok, "{out}");
+    let out = b.run(&["providers"]);
+    let text = out.text();
+    let hub = text
         .lines()
         .find(|l| l.starts_with("hub "))
         .unwrap_or_default();
-    assert!(ok && hub.contains("not logged in"), "{out}");
-    let (ok, out, calls, _) = on(&b, &["token", "hub"]);
-    assert!(!ok && out.contains("not logged in"), "{out}");
+    assert!(out.ok && hub.contains("not logged in"), "{out}");
+    let out = b.run(&["token", "hub"]);
+    assert!(!out.ok && out.text().contains("not logged in"), "{out}");
     // Not logged in: it looked in the vault (another machine may have).
-    assert_eq!(calls, 2);
-    let _ = std::fs::remove_dir_all(&tmp);
+    assert_eq!(out.calls, 2);
 }
