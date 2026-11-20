@@ -7,8 +7,8 @@
 //! only where something is missing, so a run cut short (the service account's
 //! write budget, an error) goes on where it stopped when run again. Only when
 //! everything is in the vault is `sesame.db` renamed, not deleted.
+use super::sqlite;
 use super::vault::{TOKEN_VAR, VAULT_VAR, Vault};
-use super::{Client, Token, sqlite};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -102,8 +102,8 @@ fn copy(db: &sqlite::Sqlite, vault: &Vault) -> Result<Vec<String>, String> {
 
     // Clients and tokens: one write per provider.
     for provider in db.logins()? {
-        let client = db.client(&provider)?.and_then(client_as_kept);
-        let token = db.token(&provider)?.and_then(token_as_kept);
+        let client = db.client(&provider)?.and_then(|c| vault.as_kept_client(&c));
+        let token = db.token(&provider)?.and_then(|t| vault.as_kept_token(&t));
         let in_vault = (|| Ok((vault.client(&provider)?, vault.token(&provider)?)))()
             .map_err(|e: String| stopped(done, e))?;
         let (vc, vt) = in_vault;
@@ -143,32 +143,6 @@ fn copy(db: &sqlite::Sqlite, vault: &Vault) -> Result<Vec<String>, String> {
         );
     }
     Ok(conflicts)
-}
-
-/// The client as the vault keeps it: an empty value is no value.
-fn client_as_kept(c: Client) -> Option<Client> {
-    Some(Client {
-        client_id: some(c.client_id)?,
-        client_secret: c.client_secret.and_then(some),
-    })
-}
-
-/// The token as the vault keeps it: an empty value is no value.
-fn token_as_kept(t: Token) -> Option<Token> {
-    Some(Token {
-        access_token: some(t.access_token)?,
-        refresh_token: t.refresh_token.and_then(some),
-        expires_at: t.expires_at,
-        scope: t.scope.and_then(some),
-        resource_id: t.resource_id.and_then(some),
-        resource_name: t.resource_name.and_then(some),
-        account: t.account.and_then(some),
-        pasted: t.pasted,
-    })
-}
-
-fn some(s: String) -> Option<String> {
-    (!s.is_empty()).then_some(s)
 }
 
 /// Renames `sesame.db` to `sesame.db.migrated-<date>` (`-2`, … if taken).
@@ -213,19 +187,5 @@ mod tests {
         assert_eq!(date(0), "1970-01-01");
         assert_eq!(date(951_782_400), "2000-02-29");
         assert_eq!(date(1_795_132_800), "2026-11-20");
-    }
-
-    #[test]
-    fn empty_values_are_no_values() {
-        let c = Client {
-            client_id: "id".into(),
-            client_secret: Some(String::new()),
-        };
-        assert_eq!(client_as_kept(c).unwrap().client_secret, None);
-        let c = Client {
-            client_id: String::new(),
-            client_secret: None,
-        };
-        assert!(client_as_kept(c).is_none());
     }
 }
