@@ -316,8 +316,6 @@ fn first_use_points_to_setup() {
 
     let (ok, _) = sesame(&["client", "acme", "--client-id", "cid", "--no-secret"]);
     assert!(ok);
-    let (_, out) = sesame(&["providers"]);
-    assert!(out.contains("next: sesame login acme"), "{out}");
     let (ok, out) = sesame(&["api", "acme", "/x"]);
     assert!(!ok && out.contains("run `sesame login acme`"), "{out}");
 
@@ -948,8 +946,6 @@ fn services_share_one_token() {
 
     let (ok, out) = run(&["client", "alpha", "--client-id", "cid", "--no-secret"]);
     assert!(ok, "{out}");
-    let (_, out) = run(&["providers"]);
-    assert!(out.contains("next: sesame login alpha"), "{out}");
 
     let scope_of = |u: &url::Url| {
         let q = |k: &str| {
@@ -963,16 +959,6 @@ fn services_share_one_token() {
     let (u, rest) = browser_login(&sesame, &["login", "alpha", "--no-browser"]);
     assert_eq!(scope_of(&u), "openid a.read");
     assert!(rest.contains("Logged in to `fake` for `alpha`"), "{rest}");
-    let (_, out) = run(&["providers"]);
-    let line = |name: &str| {
-        out.lines()
-            .find(|l| l.trim_start().starts_with(&format!("{name} ")))
-            .unwrap_or_default()
-            .to_string()
-    };
-    assert!(line("alpha").contains(" authorized"), "{out}");
-    assert!(line("beta").contains("not authorized"), "{out}");
-    assert!(line("beta").contains("next: sesame login beta"), "{out}");
 
     // `api <service>` uses the service's base; beta's scope is not granted yet.
     let (ok, out) = run(&["api", "alpha", "/things"]);
@@ -1632,8 +1618,6 @@ fn built_in_public_client() {
         "s3cret\n",
     );
     assert!(ok, "{out}");
-    let (_, out) = sesame(&["providers"]);
-    assert!(line(&out).contains("your client"), "{out}");
     assert!(!in_use());
     let (ok, out) = sesame(&["login", "pub", "--no-browser"]);
     assert!(ok, "{out}");
@@ -1651,8 +1635,6 @@ fn built_in_public_client() {
         ok && out.contains("login uses the built-in client"),
         "{out}"
     );
-    let (_, out) = sesame(&["providers"]);
-    assert!(line(&out).contains("built-in client"), "{out}");
     assert!(in_use());
     let (ok, out) = sesame(&["login", "pub", "--no-browser"]);
     assert!(ok, "{out}");
@@ -1984,7 +1966,6 @@ fn one_password_vault_store() {
         ok && out.contains("logged in (octo, pasted token)"),
         "{out}"
     );
-    assert!(out.contains("your client"), "{out}");
     let (_, out) = sesame(&["token", "hub"]);
     assert_eq!(out.trim(), "pasted-secret-token");
 

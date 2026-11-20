@@ -4,6 +4,7 @@
 //! store the command opened and the provider's token endpoint.
 use crate::oauth;
 use crate::providers::Provider;
+use crate::standing;
 use crate::store::{Store, Token};
 
 /// The least life, in seconds, a stored token is used with: one that expires
@@ -87,23 +88,22 @@ pub fn valid_token(
     run(
         store,
         name,
+        p,
         refresh,
         oauth::now(),
         |store, token, refresh_token| oauth::refresh(store, name, p, token, refresh_token),
-        |store| Ok(oauth::client(store, name, p)?.is_some()),
     )
 }
 
 /// `valid_token` with the token endpoint (`grant`: the stored token and its
-/// refresh token to the new token) and whether there is a client to log in
-/// with (`has_client`, for the error) given.
+/// refresh token to the new token) given.
 fn run(
     store: &Store,
     name: &str,
+    p: &Provider,
     refresh: Refresh,
     now: u64,
     grant: impl FnOnce(&Store, &Token, String) -> Result<Token, String>,
-    has_client: impl FnOnce(&Store) -> Result<bool, String>,
 ) -> Result<Token, String> {
     store.locked(|store| {
         let mut read = Read::First;
@@ -121,12 +121,7 @@ fn run(
                     store.save_token(name, &new)?;
                     return Ok(new);
                 }
-                Step::NotLoggedIn if !has_client(store)? => return Err(oauth::no_client(name)),
-                Step::NotLoggedIn => {
-                    return Err(format!(
-                        "not logged in to `{name}`; run `sesame login {name}`"
-                    ));
-                }
+                Step::NotLoggedIn => return Err(standing::no_token(store, name, p)?),
                 Step::NoRefreshToken => {
                     return Err(format!(
                         "`{name}` token expired and has no refresh token; run `sesame login {name}`"
@@ -203,6 +198,11 @@ mod tests {
         s
     }
 
+    /// A provider with a client to log in with: GitHub's built-in one.
+    fn with_client() -> Provider {
+        crate::providers::built_in("github")
+    }
+
     fn no_grant(_: &Store, _: &Token, _: String) -> Result<Token, String> {
         panic!("refreshed")
     }
@@ -210,9 +210,14 @@ mod tests {
     #[test]
     fn fresh_token_is_used_without_the_endpoint() {
         let s = store_with(Some(token("a", Some(3600), Some("r"))));
-        let got = run(&s, "p", Refresh::Within(MIN_LIFE), NOW, no_grant, |_| {
-            Ok(true)
-        });
+        let got = run(
+            &s,
+            "p",
+            &with_client(),
+            Refresh::Within(MIN_LIFE),
+            NOW,
+            no_grant,
+        );
         assert_eq!(got.unwrap().access_token, "a");
     }
 
@@ -222,13 +227,13 @@ mod tests {
         let got = run(
             &s,
             "p",
+            &with_client(),
             Refresh::Within(MIN_LIFE),
             NOW,
             |_, old, r| {
                 assert_eq!((old.access_token.as_str(), r.as_str()), ("a", "r1"));
                 Ok(token("b", Some(3600), Some("r2")))
             },
-            |_| Ok(true),
         )
         .unwrap();
         assert_eq!(got.access_token, "b");
@@ -238,14 +243,9 @@ mod tests {
     #[test]
     fn refused_token_is_refreshed_even_when_fresh() {
         let s = store_with(Some(token("a", Some(3600), Some("r"))));
-        let got = run(
-            &s,
-            "p",
-            Refresh::Now,
-            NOW,
-            |_, _, _| Ok(token("b", Some(3600), Some("r"))),
-            |_| Ok(true),
-        );
+        let got = run(&s, "p", &with_client(), Refresh::Now, NOW, |_, _, _| {
+            Ok(token("b", Some(3600), Some("r")))
+        });
         assert_eq!(got.unwrap().access_token, "b");
     }
 
@@ -255,10 +255,10 @@ mod tests {
         let got = run(
             &s,
             "p",
+            &with_client(),
             Refresh::Within(MIN_LIFE),
             NOW,
             |_, _, _| Err("refused".into()),
-            |_| Ok(true),
         );
         assert_eq!(got.unwrap_err(), "refused");
         assert_eq!(s.token("p").unwrap().unwrap().access_token, "a");
@@ -268,12 +268,14 @@ mod tests {
     fn errors_name_the_next_command() {
         let s = store_with(None);
         let within = Refresh::Within(MIN_LIFE);
-        let err = run(&s, "p", within, NOW, no_grant, |_| Ok(true)).unwrap_err();
+        let err = run(&s, "p", &with_client(), within, NOW, no_grant).unwrap_err();
         assert!(err.contains("run `sesame login p`"), "{err}");
-        let err = run(&s, "p", within, NOW, no_grant, |_| Ok(false)).unwrap_err();
+        let mut none = with_client();
+        none.public_client_id = None;
+        let err = run(&s, "p", &none, within, NOW, no_grant).unwrap_err();
         assert!(err.contains("run `sesame setup p`"), "{err}");
         let s = store_with(Some(token("a", Some(30), None)));
-        let err = run(&s, "p", within, NOW, no_grant, |_| Ok(true)).unwrap_err();
+        let err = run(&s, "p", &with_client(), within, NOW, no_grant).unwrap_err();
         assert!(err.contains("has no refresh token"), "{err}");
     }
 }
