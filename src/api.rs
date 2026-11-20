@@ -9,7 +9,7 @@ use crate::refresh;
 use crate::source::{self, Refused};
 use crate::store::{Store, Token};
 use crate::wire;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 /// The arguments of `sesame api`.
@@ -49,20 +49,7 @@ impl Call {
         let p = &t.p;
         let mut token = source.token(&t, refresh::MIN_LIFE)?;
         let url = wire::api_url(t.api_base(), p, &token, path)?;
-        let body = match data.as_deref() {
-            None => None,
-            Some("@-") => {
-                let mut b = Vec::new();
-                std::io::stdin()
-                    .read_to_end(&mut b)
-                    .map_err(|e| e.to_string())?;
-                Some(b)
-            }
-            Some(d) => match d.strip_prefix('@') {
-                Some(f) => Some(std::fs::read(f).map_err(|e| format!("{f}: {e}"))?),
-                None => Some(d.as_bytes().to_vec()),
-            },
-        };
+        let body = wire::api_body(data.as_deref(), std::io::stdin())?;
         let method = method.unwrap_or_else(|| if body.is_some() { "POST" } else { "GET" }.into());
         let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
             .map_err(|e| e.to_string())?;
