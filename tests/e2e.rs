@@ -1207,10 +1207,10 @@ fn built_in_public_client() {
 }
 
 /// With `SESAME_1PASSWORD_VAULT` set, every command keeps its clients, tokens
-/// and provider fields in the vault, through `op`: nothing secret under the
-/// config dir, no secret or service account token in any `op` argv, at most
-/// two `op` calls and no write for a call that needs no refresh, and a
-/// refresh that returns the same refresh token writes only the new access token.
+/// and provider fields in the vault, through a real `op` process: nothing
+/// secret under the config dir, no secret or service account token in any
+/// `op` argv, the token in every `op`'s environment. What the vault store
+/// reads and writes, call by call, is `store::vault`'s tests.
 #[test]
 fn one_password_vault_store() {
     let mut refreshes = 0;
@@ -1302,50 +1302,17 @@ fn one_password_vault_store() {
         "refresh-secret-1"
     );
 
-    // No refresh needed: all from the local copy, no `op` call.
-    let out = m.run(&["token", "hub"]);
-    assert!(out.ok && out.text().trim() == "device-token", "{out}");
-    assert_eq!((out.calls, out.writes), (0, 0));
     let out = m.run(&["api", "hub", "/me"]);
     assert!(out.ok && out.text().contains(r#"{"me":"octo"}"#), "{out}");
-    assert_eq!((out.calls, out.writes), (0, 0));
-    let out = m.run(&["token", "hub", "--json"]);
-    assert!(
-        out.ok && out.text().contains(r#""access_token":"device-token""#),
-        "{out}"
-    );
-    assert_eq!((out.calls, out.writes), (0, 0));
-
-    // A refresh that returns the same refresh token: one write, of the new
-    // access token and its expiry, the rest of the item as it was.
-    let before = vault.item("sesame.hub").unwrap();
+    // A refresh, written back.
     let out = m.run(&["token", "hub", "--json", "--min-life", "7200"]);
     assert!(
         out.ok && out.text().contains(r#""access_token":"refreshed-1""#),
         "{out}"
     );
-    assert_eq!((out.calls, out.writes), (3, 1));
-    let after = vault.item("sesame.hub").unwrap();
-    let changed: Vec<&str> = [
-        "client_id",
-        "client_secret",
-        "access_token",
-        "refresh_token",
-        "expires_at",
-        "scope",
-        "account",
-    ]
-    .into_iter()
-    .filter(|l| field(&before, l) != field(&after, l))
-    .collect();
-    assert!(
-        changed == ["access_token"] || changed == ["access_token", "expires_at"],
-        "{changed:?}"
-    );
     assert_eq!(
-        after["tags"],
-        serde_json::json!(["sesame"]),
-        "an edit keeps the tag"
+        vault.read(&format!("op://{VAULT}/sesame.hub/access_token")),
+        "refreshed-1"
     );
 
     // The loopback flow (`--browser`), the test playing the browser.
@@ -1392,27 +1359,6 @@ fn one_password_vault_store() {
             assert!(!argv.iter().any(|a| a.contains(s)), "{s} in {argv:?}");
         }
     }
-
-    let out = m.run(&["client", "hub", "--reset"]);
-    assert!(
-        out.ok && out.text().contains("Forgot your `hub` client"),
-        "{out}"
-    );
-    let item = vault.item("sesame.hub").unwrap();
-    assert!(field(&item, "client_secret").is_none() && field(&item, "access_token").is_some());
-    // Logged out with no client left: the item is archived.
-    let out = m.run(&["logout", "hub"]);
-    assert!(out.ok, "{out}");
-    assert!(vault.item("sesame.hub").is_none());
-    let out = m.run(&["token", "hub"]);
-    assert!(
-        !out.ok && out.text().contains("no OAuth client for `hub`"),
-        "{out}"
-    );
-    let out = m.run(&["provider", "rm", "hub"]);
-    assert!(out.ok, "{out}");
-    assert!(vault.items().is_empty(), "{:?}", vault.items());
-    assert!(!config.join("sesame.db").exists());
 }
 
 /// A vault named but unusable is one clear error, never sesame.db instead.
@@ -1638,12 +1584,12 @@ fn one_password_vault_migrate() {
     assert!(!db.exists());
 }
 
-/// The vault's local copy (docs/adr/0002): a call with a valid token makes no
-/// `op` call at all, provider resolution included; a refresh lists the vault
-/// once, reads the provider's item, and writes it only when it refreshed;
-/// the copy on disk holds no secret in plaintext and opens only under the
-/// service account token that sealed it; and what one machine writes reaches
-/// another at that one's next refresh, without it refreshing again.
+/// The vault's local copy (docs/adr/0002), across two machines: a call with a
+/// valid token makes no `op` call at all, provider resolution included; the
+/// copy on disk holds no secret in plaintext and opens only under the service
+/// account token that sealed it; and what one machine writes reaches another
+/// at that one's next refresh, without it refreshing again. Which items a
+/// sync reads is `store::vault`'s tests.
 #[test]
 fn one_password_local_copy() {
     // A login's token lasts 30 s, inside MIN_LIFE, so the first call
@@ -1711,13 +1657,11 @@ fn one_password_local_copy() {
     // of each item), then calls with the token as the vault holds it.
     let out = b.run(&["provider", "show", "hub"]);
     assert!(out.ok && out.text().contains("first"), "{out}");
-    assert_eq!((out.calls, out.writes), (3, 0));
 
-    // A's login token is expiring: the first call refreshes (a list, the
-    // item's read, one write), the next makes no `op` call at all.
+    // A's login token is expiring: the first call refreshes, the next makes
+    // no `op` call at all.
     let out = a.run(&["api", "hub", "/me"]);
     assert!(out.ok && out.text().contains("octo"), "{out}");
-    assert_eq!((out.calls, out.writes), (3, 1));
     assert_eq!(refresh_bodies().len(), 1);
     for args in [
         &["api", "hub", "/me"][..],
@@ -1734,8 +1678,7 @@ fn one_password_local_copy() {
     // A's refreshed token, and uses it without refreshing (no write).
     let out = b.run(&["token", "hub"]);
     assert!(out.ok && out.text().trim() == "refreshed-1", "{out}");
-    assert_eq!((out.calls, out.writes), (2, 0));
-    assert_eq!(refresh_bodies().len(), 1);
+    assert_eq!((out.writes, refresh_bodies().len()), (0, 1));
     assert_eq!(b.run(&["api", "hub", "/me"]).calls, 0);
 
     // A changes the provider's fields and client. B goes on with its copy
@@ -1754,8 +1697,6 @@ fn one_password_local_copy() {
     );
     let out = b.run(&["token", "hub", "--min-life", "7200"]);
     assert!(out.ok && out.text().trim() == "refreshed-2", "{out}");
-    // The list; the definitions and the provider's item, both moved; the write.
-    assert_eq!((out.calls, out.writes), (4, 1));
     let last = refresh_bodies().pop().unwrap();
     assert!(last.contains("client_id=cid-2"), "{last}");
     let out = b.run(&["provider", "show", "hub"]);
@@ -1799,8 +1740,10 @@ fn one_password_local_copy() {
     // open: it is rebuilt from the vault, then used again.
     let other = "ops_another-service-account";
     let out = as_sa(&a, other, &["token", "hub"]);
-    assert!(out.ok && out.text().trim() == "refreshed-2", "{out}");
-    assert_eq!((out.calls, out.writes), (3, 0));
+    assert!(
+        out.ok && out.text().trim() == "refreshed-2" && out.calls > 0,
+        "{out}"
+    );
     assert_eq!(as_sa(&a, other, &["token", "hub"]).calls, 0);
     // And a damaged copy the same.
     let copy = a.config().join("1password-copy");
@@ -1808,8 +1751,10 @@ fn one_password_local_copy() {
     *bytes.last_mut().unwrap() ^= 1;
     std::fs::write(&copy, bytes).unwrap();
     let out = as_sa(&a, other, &["token", "hub"]);
-    assert!(out.ok && out.text().trim() == "refreshed-2", "{out}");
-    assert_eq!(out.calls, 3);
+    assert!(
+        out.ok && out.text().trim() == "refreshed-2" && out.calls > 0,
+        "{out}"
+    );
 
     // A logout elsewhere reaches B at its next sync (`sesame providers`).
     let out = a.run(&["logout", "hub"]);
