@@ -1,0 +1,6 @@
+{
+  "tree": "f0adbd0ab766487c95295e973f7c7c986de5d80d+d1fba762150c532c",
+  "picker": "codex:01a1fc7e-8b57-7d21-a45c-347487a9f64f:default",
+  "author": "claude-code:a395fe90-1088-5f31-a4d0-9c68f5a01030:opus",
+  "none": "The default replacement requires Item to implement Default, and the new cross-client test exercises the archive handling that the inverted comparison breaks."
+}
