@@ -244,7 +244,8 @@ impl Vault {
     /// it). An item the copy holds that the list lacks is asked for by id
     /// before its rows go: 1Password may list a new item late.
     pub fn sync(&self, provider: Option<&str>) -> Result<(), String> {
-        for p in self.unwritten()? {
+        let unwritten = self.unwritten(&self.copy())?;
+        for p in unwritten {
             if let Err(e) = self.update_locked(&title(&p), is_provider_field, |_| {}) {
                 warn_unwritten(&p, &e);
             }
@@ -300,25 +301,20 @@ impl Vault {
                 }
             }
         } else if let Some(provider) = title.strip_prefix("sesame.") {
-            let unwritten = match self.is_unwritten(&copy, provider)? {
-                true => copy.token(provider)?,
-                false => None,
-            };
+            let mut token = self.unwritten_token(&copy, provider)?;
             copy.delete_client(provider)?;
             copy.delete_token(provider)?;
-            if let Some(t) = unwritten {
-                copy.save_token(provider, &t)?;
-            }
             if let Some(item) = item {
                 let k = kept(&item.json, is_provider_field);
                 if let Some(c) = client_of(&k) {
                     copy.save_client(provider, &c)?;
                 }
-                if let Some(t) = self.token_of(provider, &k)?
-                    && !self.is_unwritten(&copy, provider)?
-                {
-                    copy.save_token(provider, &t)?;
+                if token.is_none() {
+                    token = self.token_of(provider, &k)?;
                 }
+            }
+            if let Some(t) = token {
+                copy.save_token(provider, &t)?;
             }
         } else {
             return Ok(());
@@ -415,15 +411,8 @@ impl Vault {
             .unwrap_or_default();
         let mut want = have.clone();
         let provider = title.strip_prefix("sesame.").unwrap_or_default();
-        let unwritten = {
-            let copy = self.copy();
-            match self.is_unwritten(&copy, provider)? {
-                true => copy.token(provider)?,
-                false => None,
-            }
-        };
-        if let Some(t) = &unwritten {
-            put_token(&mut want, t);
+        if let Some(t) = self.unwritten_token(&self.copy(), provider)? {
+            put_token(&mut want, &t);
         }
         change(&mut want);
         if want == have {
@@ -570,8 +559,7 @@ impl Vault {
     }
 
     /// The providers whose token in the copy the vault does not hold yet.
-    fn unwritten(&self) -> Result<Vec<String>, String> {
-        let copy = self.copy();
+    fn unwritten(&self, copy: &Sqlite) -> Result<Vec<String>, String> {
         let mut stmt = copy
             .conn()
             .prepare("SELECT provider FROM unwritten_tokens")
@@ -582,16 +570,12 @@ impl Vault {
         rows.collect::<Result<_, _>>().map_err(|e| self.copy_err(e))
     }
 
-    fn is_unwritten(&self, copy: &Sqlite, provider: &str) -> Result<bool, String> {
-        copy.conn()
-            .query_row(
-                "SELECT 1 FROM unwritten_tokens WHERE provider = ?1",
-                [provider],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|r| r.is_some())
-            .map_err(|e| self.copy_err(e))
+    /// `provider`'s token in the copy, if the vault does not hold it yet.
+    fn unwritten_token(&self, copy: &Sqlite, provider: &str) -> Result<Option<Token>, String> {
+        match self.unwritten(copy)?.iter().any(|p| p == provider) {
+            true => copy.token(provider),
+            false => Ok(None),
+        }
     }
 
     fn set_unwritten(&self, provider: &str, unwritten: bool) -> Result<(), String> {
