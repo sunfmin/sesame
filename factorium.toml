@@ -11,10 +11,12 @@ steps = ["packaging/release.sh cut $FACTORIUM_VERSION"]
 formula = "sunfmin/tap/sesame"
 limit = 1800
 
-# slimfit's tasks and a sample of landed changes' mutants, filed as issues
-# while the host is idle (SPEC §1.16). No steps: no check is too slow for the
-# gate. every/limit from the times measured on sesame#12 (its comment).
+# slimfit's and truefit's tasks and a sample of landed changes' mutants, filed
+# as issues while the host is idle (SPEC §1.16). No steps: no check is too slow
+# for the gate. every/limit from the times measured on sesame#12 (its comment).
+# The version lines come first: factorium reads the answers as one run of JSON
+# from the first `{` line, so a line between them would hide truefit's.
 [idle]
-tasks = "slimfit --version && slimfit next --all --sample 5"
+tasks = "slimfit --version && truefit --version && slimfit next --all --sample 5 && truefit next --all"
 every = 86400
 limit = 1800
