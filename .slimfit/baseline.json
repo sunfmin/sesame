@@ -17,6 +17,12 @@
       "test": "sesame::release::dry_packages_the_development_build_for_both_arches_and_checks_the_formula",
       "hash": "a3c8db4b7ef6a239",
       "reason": "No assertion maps: this test checks packaging/release.sh's dry output (both arch archives hold only sesame, formula version/urls/sha256s/test block, gh and git never run); the 76 shared lines are only the binary's startup for --version, which the guide test runs for help text. Nothing in the setups to share, so no merge."
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::e2e::one_password_local_copy",
+      "hash": "fd3e049a7c82cdde",
+      "reason": "No assertion maps onto one_password_vault_store: this test checks the local copy (no op call while a token is valid, cross-machine sync without a second refresh, rebuild under a rotated service account token or a damaged copy, logout and archive reaching another machine); vault_store checks the vault wiring (item fields, no secret in files or argv). Setups conflict: this one's 30 s login token makes the first call refresh, while vault_store's refreshed-1 / --min-life assertions need an hour-long one, and its identity URL changes the op call/write counts asserted here."
     }
   ],
   "measured": {
