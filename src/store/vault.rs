@@ -301,20 +301,22 @@ impl Vault {
                 }
             }
         } else if let Some(provider) = title.strip_prefix("sesame.") {
-            let mut token = self.unwritten_token(&copy, provider)?;
+            // A token the vault does not hold yet stays as it is.
+            let unwritten = self.unwritten(&copy)?.iter().any(|p| p == provider);
             copy.delete_client(provider)?;
-            copy.delete_token(provider)?;
+            if !unwritten {
+                copy.delete_token(provider)?;
+            }
             if let Some(item) = item {
                 let k = kept(&item.json, is_provider_field);
                 if let Some(c) = client_of(&k) {
                     copy.save_client(provider, &c)?;
                 }
-                if token.is_none() {
-                    token = self.token_of(provider, &k)?;
+                if let Some(t) = self.token_of(provider, &k)?
+                    && !unwritten
+                {
+                    copy.save_token(provider, &t)?;
                 }
-            }
-            if let Some(t) = token {
-                copy.save_token(provider, &t)?;
             }
         } else {
             return Ok(());
@@ -415,69 +417,67 @@ impl Vault {
             put_token(&mut want, &t);
         }
         change(&mut want);
-        if want == have {
-            self.set_unwritten(provider, false)?;
-            self.apply(title, current.as_ref())?;
-            self.save()?;
-            return Ok(have);
-        }
-        let what = format!("writing `{title}`");
-        let id = current.as_ref().map(|i| i.id.clone());
-        let written = match current {
-            None => {
-                let template = json!({
-                    "title": title,
-                    "category": "SECURE_NOTE",
-                    "tags": [TAG],
-                    "fields": fields(&want),
-                });
-                Some(
-                    self.op
-                        .create(&template)
-                        .map_err(|e| self.failed(&what, e))?,
-                )
-            }
-            Some(item) if want.is_empty() && kept(&item.json, |l| !ours(l)).is_empty() => {
-                // Archived, not deleted: it can be restored in 1Password.
-                self.op
-                    .archive(&item.id)
-                    .map_err(|e| self.failed(&what, e))?;
-                None
-            }
-            Some(item) => {
-                let mut tags: Vec<Value> =
-                    item.json["tags"].as_array().cloned().unwrap_or_default();
-                if !tags.iter().any(|t| t == TAG) {
-                    tags.push(TAG.into());
+        let written = if want == have {
+            current
+        } else {
+            let what = format!("writing `{title}`");
+            let id = current.as_ref().map(|i| i.id.clone());
+            let written = match current {
+                None => {
+                    let template = json!({
+                        "title": title,
+                        "category": "SECURE_NOTE",
+                        "tags": [TAG],
+                        "fields": fields(&want),
+                    });
+                    Some(
+                        self.op
+                            .create(&template)
+                            .map_err(|e| self.failed(&what, e))?,
+                    )
                 }
-                let mut all: Vec<Value> = item.json["fields"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|f| !is_ours(f, &ours))
-                    .cloned()
-                    .collect();
-                all.extend(fields(&want));
-                let mut template = json!({ "title": title, "tags": tags, "fields": all });
-                if let Some(sections) = item.json.get("sections") {
-                    template["sections"] = sections.clone();
-                }
-                Some(
+                Some(item) if want.is_empty() && kept(&item.json, |l| !ours(l)).is_empty() => {
+                    // Archived, not deleted: it can be restored in 1Password.
                     self.op
-                        .edit(&item.id, &template)
-                        .map_err(|e| self.failed(&what, e))?,
-                )
-            }
-        };
+                        .archive(&item.id)
+                        .map_err(|e| self.failed(&what, e))?;
+                    None
+                }
+                Some(item) => {
+                    let mut tags: Vec<Value> =
+                        item.json["tags"].as_array().cloned().unwrap_or_default();
+                    if !tags.iter().any(|t| t == TAG) {
+                        tags.push(TAG.into());
+                    }
+                    let mut all: Vec<Value> = item.json["fields"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|f| !is_ours(f, &ours))
+                        .cloned()
+                        .collect();
+                    all.extend(fields(&want));
+                    let mut template = json!({ "title": title, "tags": tags, "fields": all });
+                    if let Some(sections) = item.json.get("sections") {
+                        template["sections"] = sections.clone();
+                    }
+                    Some(
+                        self.op
+                            .edit(&item.id, &template)
+                            .map_err(|e| self.failed(&what, e))?,
+                    )
+                }
+            };
 
-        let written = match written {
-            Some(Some(item)) => Some(item),
-            // What op printed was not the item: read it again.
-            Some(None) => {
-                self.items().remove(title);
-                self.get(title, id.as_deref())?
+            match written {
+                Some(Some(item)) => Some(item),
+                // What op printed was not the item: read it again.
+                Some(None) => {
+                    self.items().remove(title);
+                    self.get(title, id.as_deref())?
+                }
+                None => None,
             }
-            None => None,
         };
         self.items().insert(title.into(), written.clone());
         self.set_unwritten(provider, false)?;

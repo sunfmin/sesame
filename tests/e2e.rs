@@ -1792,9 +1792,7 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
             r#"{"access_token":"access-0","refresh_token":"refresh-0","expires_in":30}"#.into(),
         ),
         "/token" if r.is_refresh() => {
-            if !r.body.contains(&format!("refresh_token=refresh-{issued}&"))
-                && !r.body.ends_with(&format!("refresh_token=refresh-{issued}"))
-            {
+            if !r.body.split('&').any(|f| f == format!("refresh_token=refresh-{issued}")) {
                 return ("400 Bad Request", r#"{"error":"invalid_grant"}"#.into());
             }
             issued += 1;
