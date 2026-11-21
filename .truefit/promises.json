@@ -1,0 +1,260 @@
+{
+  "08e5dcc290b7": {
+    "mark": "not",
+    "sentence": "GitHub's built-in tokens do not expire (refreshing would need the secret). A provider with an `identity_url` records who signed in, shown by `sesame providers`. A provider that takes only https callbacks (`--redirect https-paste`, as slack) uses `https://localhost:<redirect-port>/callback`: nothing listens there, the browser says it cannot open the page, and you paste its address.",
+    "source": "README.md:119",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "08e8f26ffba1": {
+    "mark": "promise",
+    "sentence": "**Service** = one API of a provider, reached with the provider's client and token: Google's are `drive`, `docs`, `youtube`, `calendar` and `gmail`. A service has its own `api_base` and scopes, and its name is used like a provider's (the two share one namespace). `sesame login <service>` signs in to the provider asking for the scopes already granted plus the service's (Google adds `include_granted_scopes=true`), and the new token replaces the old one; `sesame login google` alone asks only for `openid email`. A call refused with a 403 for a missing scope says which `sesame login <service>` adds it.",
+    "source": "README.md:85"
+  },
+  "0eb6ab4c46e0": {
+    "mark": "not",
+    "sentence": "**A service account with read and write on that vault only**: in 1Password's Developer > Service Accounts (or `op service-account create sesame --vault sesame:read_items,write_items`), give it no other vault, and copy its token, shown once.",
+    "source": "README.md:188",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "150a41bfe2ae": {
+    "mark": "not",
+    "sentence": "Definitions change only by a person's command, so a lost update between two machines editing definitions at the same moment is accepted.",
+    "source": "docs/adr/0001-1password-vault-store.md:37",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "15fc85b8f5d0": {
+    "mark": "promise",
+    "sentence": "Named but unusable (no token, no `op`, a vault the account cannot read) is an error naming what is missing; never a silent `sesame.db`.",
+    "source": "docs/adr/0001-1password-vault-store.md:23"
+  },
+  "1c2da7bd0416": {
+    "mark": "not",
+    "sentence": "(Written as \"without them op wipes them\"; sesame#22 found op 2.42.0 keeps an item's tags on an edit without `tags`: only that edit's printed answer shows none.",
+    "source": "docs/adr/0001-1password-vault-store.md:49",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "20ae6a8c69d0": {
+    "mark": "promise",
+    "sentence": "**`api`** sends the token only to the provider's `hosts`; a 401 triggers one refresh and retry.",
+    "source": "README.md:141"
+  },
+  "28c5ef6f0948": {
+    "mark": "promise",
+    "sentence": "The token is taken out of sesame's own environment at start and given only to `op` children.",
+    "source": "docs/adr/0001-1password-vault-store.md:54"
+  },
+  "2a66fdb122b6": {
+    "mark": "promise",
+    "sentence": "It also syncs when the copy is an hour old (for tokens that never expire), on `sesame providers`, and when there is no copy.",
+    "source": "README.md:245"
+  },
+  "350f81c4bc10": {
+    "mark": "promise",
+    "sentence": "service account**, whose token is `OP_SERVICE_ACCOUNT_TOKEN`. Every machine with the same two variables uses the same logins; on disk there is only an encrypted copy of the vault's sesame items (below) and an empty lock file, `sesame.lock`. Unset, sesame uses `sesame.db` as before.",
+    "source": "README.md:177"
+  },
+  "3c2a0c11fe8f": {
+    "mark": "promise",
+    "sentence": "The copy lives in memory (`rusqlite` `serialize`) and reaches disk only as `<config_dir>/1password-copy`: XChaCha20-Poly1305 with a random nonce, the key HKDF-SHA256 of `OP_SERVICE_ACCOUNT_TOKEN` with the vault's name as context (`src/store/sealed.rs`). Whoever lacks the token reads nothing; whoever has it can read the vault anyway, so holding the long-lived secrets locally widens nothing.",
+    "source": "docs/adr/0002-1password-local-copy.md:68"
+  },
+  "421d925dfdaa": {
+    "mark": "promise",
+    "sentence": "`store migrate` copies every client, token and provider field, one write per provider (and one for all provider fields), within the service account's write budget.",
+    "source": "README.md:207"
+  },
+  "44b5f21fc64d": {
+    "mark": "promise",
+    "sentence": "A change on another machine reaches this one at its next refresh (about an hour for Google, sooner for shorter tokens), at its next `sesame providers`, or within `COPY_LIFE`. Until then this machine uses what it has; a token revoked elsewhere is learned of from the provider's 401, which syncs and refreshes.",
+    "source": "docs/adr/0002-1password-local-copy.md:104"
+  },
+  "4c20e7722cf8": {
+    "mark": "promise",
+    "sentence": "**Writes** go through: under the machine's lock the item is read afresh (by id when the copy knows it), written (`create` / `edit` / archive, as in ADR 0001, only if what sesame keeps changed), then the copy is made what was written, version included, and saved.",
+    "source": "docs/adr/0002-1password-local-copy.md:33"
+  },
+  "4f5fce6dbe7e": {
+    "mark": "promise",
+    "sentence": "**`locked` serializes, nothing more** (sesame#11): writes go through to 1Password, which has no transaction, so an error midway undoes none of them; `sesame.db` keeps the same rule (it commits what was written), so no caller comes to rely on a rollback only one store gives.",
+    "source": "docs/adr/0002-1password-local-copy.md:81"
+  },
+  "5de212217492": {
+    "mark": "promise",
+    "sentence": "Only then is `sesame.db` renamed to `sesame.db.migrated-<date>`, not deleted: it prints how to go back (unset `SESAME_1PASSWORD_VAULT`, rename it back) and, since it still holds the secrets in plaintext, how to delete it once sesame works from the vault.",
+    "source": "README.md:212"
+  },
+  "6045fc86b00e": {
+    "mark": "promise",
+    "sentence": "Fields cover how providers differ, so none needs code of its own: no `--scope` means the authorization URL has no `scope`; `--client-auth basic` sends the client as HTTP Basic instead of in the body; `--api-header 'Name: value'` goes on every `sesame api` request (a `-H` of that name replaces it); `--site-name-field` names the token response's field that `sesame providers` shows as the site (Notion's `workspace_name`); `--refresh-url` sends refreshes to their own endpoint (Figma's `/v1/oauth/refresh`; without it, the token endpoint); `--code-seconds` says how long the authorization code lasts (Figma: 30), so login asks for the pasted address within that time and a refused exchange says the code most likely expired.",
+    "source": "README.md:54"
+  },
+  "6186a0e4a758": {
+    "mark": "promise",
+    "sentence": "**Secrets** (clients and tokens) and provider definitions are stored **in plaintext** in one SQLite database, `~/.config/sesame/sesame.db` (`$SESAME_CONFIG_DIR/sesame.db` when set), protected only by file permissions, as gcloud does: the file is 0600, the directory 0700.",
+    "source": "README.md:130"
+  },
+  "66adf084bde7": {
+    "mark": "promise",
+    "sentence": "A write happens only when what sesame keeps in the item changed, and a write is one `create`/`edit`/`delete` with the whole item.",
+    "source": "docs/adr/0001-1password-vault-store.md:41"
+  },
+  "6fc5b9bb9a85": {
+    "mark": "not",
+    "sentence": "With ADR 0001 alone every `sesame api` / `token` read two items, about a second each against real 1Password (measured 2026-11-20: `op item get` 1.15 s, `item list` 0.9 s, `item create` 1.8 s, `item edit` 1.7 s), and the account allows 1000 requests a day for everything.",
+    "source": "docs/adr/0002-1password-local-copy.md:10",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "727d96843ea4": {
+    "mark": "not",
+    "sentence": "(Before the copy, every `sesame api` cost two reads: 500 calls a day would have spent the account's whole budget.)",
+    "source": "README.md:259",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "78a37c6f6c2e": {
+    "mark": "not",
+    "sentence": "**Syncing on every call** (only the list). Rejected: one request per call still burns the daily budget the copy is meant to keep.",
+    "source": "docs/adr/0002-1password-local-copy.md:99",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "7ba53c477ab0": {
+    "mark": "promise",
+    "sentence": "The rest is as with a stored token: it goes only to the provider's hosts, and the provider's `api_header`s and `error_fields` apply.",
+    "source": "README.md:158"
+  },
+  "7f54d5654cd2": {
+    "mark": "not",
+    "sentence": "Every field is one row of the field table in [`src/providers/fields.rs`](src/providers/fields.rs): its flag, type, check, and the question to answer about a platform to fill it in.",
+    "source": "README.md:72",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "83301037e317": {
+    "mark": "promise",
+    "sentence": "**`token`** prints a valid access token alone, refreshed if it expires within a minute.",
+    "source": "README.md:145"
+  },
+  "8bb2a55bc833": {
+    "mark": "promise",
+    "sentence": "An item is read at most once per process; taking the local lock forgets what was read, so a read-then-write sees the other process's write.",
+    "source": "docs/adr/0001-1password-vault-store.md:39"
+  },
+  "8c8c720ed527": {
+    "mark": "not",
+    "sentence": "**An access-token-only cache.**",
+    "source": "docs/adr/0002-1password-local-copy.md:93",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "8c933ddef0a9": {
+    "mark": "not",
+    "sentence": "Rejected: every command would read every item (above).",
+    "source": "docs/adr/0001-1password-vault-store.md:70",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "8cfa11f5153d": {
+    "mark": "promise",
+    "sentence": "It never falls back to `sesame.db`.",
+    "source": "README.md:220"
+  },
+  "90cca75f1700": {
+    "mark": "promise",
+    "sentence": "It is written to a file beside it and renamed over it, under the lock, so a reader never sees half of one.",
+    "source": "docs/adr/0002-1password-local-copy.md:75"
+  },
+  "9541baaeff07": {
+    "mark": "not",
+    "sentence": "`./gate.sh` — fmt, clippy, tests, and the `op` stand-in's truefit contract (`truefit.toml`). Its real run, `truefit contract --real op` outside the gate, signs in as mytokens profile `sesame-scratch` (a service account that sees only the vault `sesame-scratch`): `(eval \"$(mytokens env sesame-scratch)\"; cargo build --example fake-op && truefit contract --real op)`. `tests/e2e.rs` runs the whole flow against a fake provider on 127.0.0.1.",
+    "source": "README.md:283",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "9cf3c7d193d8": {
+    "mark": "not",
+    "sentence": "`sesame-providers`: every provider's fields, one text field per provider holding JSON.",
+    "source": "docs/adr/0001-1password-vault-store.md:31",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "9e2309c6ae48": {
+    "mark": "promise",
+    "sentence": "`sesame.<provider>`: the provider's client and token, so two machines writing different providers never overwrite each other.",
+    "source": "docs/adr/0001-1password-vault-store.md:27"
+  },
+  "9ed07cd5b4af": {
+    "mark": "not",
+    "sentence": "**Why the definitions are one item**: resolving any name (a service shares a namespace with providers, and a person may add services to any provider) needs every provider's fields.",
+    "source": "docs/adr/0001-1password-vault-store.md:33",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "abd13f4c10ea": {
+    "mark": "promise",
+    "sentence": "Among the fields: how the scopes are joined in the authorization URL (`--scope-separator ,` for Linear), and which fields of a 2xx JSON answer still mean failure (`--error-field errors` for GraphQL). `sesame provider add --help` lists every field; `add` and `set` refuse an invalid value before writing anything, and a fixed `--redirect-port` another provider already uses.",
+    "source": "README.md:67"
+  },
+  "b43b0af4ccc2": {
+    "mark": "not",
+    "sentence": "**Both variables in mytokens**, never in a shell rc or a file:",
+    "source": "README.md:192",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "b908a7a69e95": {
+    "mark": "promise",
+    "sentence": "`sesame providers` says which is used (`built-in client` or `your client`), and `sesame provider show` marks `public_client_id` with `in_use`. With a `device_url`, the built-in client signs in only through the device flow: GitHub's code exchange on the loopback redirect needs the secret, so `--browser` needs your own client.",
+    "source": "README.md:115"
+  },
+  "ba880cc0b152": {
+    "mark": "not",
+    "sentence": "One item makes that one read; an item per provider would make every `sesame api` cost a list plus a read per provider.",
+    "source": "docs/adr/0001-1password-vault-store.md:35",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "d0ec56e0fb50": {
+    "mark": "promise",
+    "sentence": "when the copy is older than `COPY_LIFE` (1 h), so a provider whose token never expires (GitHub's, a pasted one) still sees another machine's change within the hour;",
+    "source": "docs/adr/0002-1password-local-copy.md:62"
+  },
+  "e0adecc63d0e": {
+    "mark": "promise",
+    "sentence": "So a change made elsewhere reaches a machine within its token's life (an hour for Google), at most an hour.",
+    "source": "README.md:247"
+  },
+  "e5fcd62fcf84": {
+    "mark": "promise",
+    "sentence": "**Per day**, a machine spends about 2 requests per refresh: a provider with hour-long tokens used all day long is ~24 refreshes, ~50 requests; one whose token does not expire, at most 24 hourly syncs.",
+    "source": "README.md:255"
+  },
+  "e9d2cba057b1": {
+    "mark": "not",
+    "sentence": "**Move what `sesame.db` holds into the vault**, so you keep your logins instead of signing in to every provider again:",
+    "source": "README.md:199",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "ef8c0392881b": {
+    "mark": "promise",
+    "sentence": "**`logout`** deletes the local token only; to revoke it, remove the app's access on the provider's side (Google account permissions, Atlassian connected apps, Notion's Settings > Connections, GitHub's Settings > Applications, the Slack app's page).",
+    "source": "README.md:137"
+  },
+  "f24eb1ef54d1": {
+    "mark": "not",
+    "sentence": "An access-token-only cache (the issue's first scope) cannot reach 0 calls: resolving the provider reads the definitions from the vault too.",
+    "source": "docs/adr/0002-1password-local-copy.md:16",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "f8a7feef6869": {
+    "mark": "promise",
+    "sentence": "Once a provider you added is built in, only the fields where yours differ from the built-in count as your changes; your client and token stay.",
+    "source": "README.md:82"
+  },
+  "fad87738fc27": {
+    "mark": "not",
+    "sentence": "Tested against a fake `op` (`tests/support/fake_op.rs`, an example cargo builds for the tests) in `tests/e2e.rs`: every command, no secret under the config dir or in any `op` argv, call and write counts, the three errors.",
+    "source": "docs/adr/0001-1password-vault-store.md:75",
+    "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "fc4a710123fe": {
+    "mark": "promise",
+    "sentence": "Before refreshing a token sesame syncs: it lists the vault once and reads only the items whose version moved, so a token another machine already refreshed is used without refreshing again, and another machine's `client`, `provider set` or `logout` arrives too.",
+    "source": "README.md:242"
+  },
+  "ff6e95c8888b": {
+    "mark": "promise",
+    "sentence": "Secrets reach `op` only on its stdin and the token only in its environment, never on its command line.",
+    "source": "README.md:260"
+  }
+}

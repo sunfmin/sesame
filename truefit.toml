@@ -97,3 +97,223 @@ normalise = [
 name = "write-budget"
 args = ["write-budget"]
 env = { FAKE_OP_MAX_WRITES = "3" }
+
+# Sesame's promises (`truefit promise`): each sentence of README.md and
+# docs/adr/ that a run could break, with the tests that keep it named in the
+# comment above it. Candidates that are descriptions, rationale, advice or
+# another program's behaviour are marked `not` in .truefit/promises.json.
+[promises]
+sources = ["SPEC.md", "README.md", "docs/adr/*.md"]
+
+# wire.rs api_headers_merge
+[[promise]]
+name = "api-header-on-every-request"
+says = '''`--api-header 'Name: value'` goes on every `sesame api` request (a `-H` of that name replaces it)'''
+source = "README.md:54"
+check = ["test"]
+
+# providers.rs invalid_fields_are_refused; e2e provider_set_show_rm, a_fixed_port_is_one_providers_only
+[[promise]]
+name = "invalid-field-refused-before-write"
+says = '''`add` and `set` refuse an invalid value before writing anything, and a fixed `--redirect-port` another provider already uses.'''
+source = "README.md:67"
+check = ["test"]
+
+# providers.rs user_fields_override_only_themselves
+[[promise]]
+name = "user-fields-override-only-themselves"
+says = '''Once a provider you added is built in, only the fields where yours differ from the built-in count as your changes; your client and token stay.'''
+source = "README.md:82"
+check = ["test"]
+
+# e2e services_share_one_token; wire.rs a_403_for_a_missing_scope
+[[promise]]
+name = "service-login-adds-its-scopes"
+says = '''`sesame login <service>` signs in to the provider asking for the scopes already granted plus the service's (Google adds `include_granted_scopes=true`), and the new token replaces the old one; `sesame login google` alone asks only for `openid email`. A call refused with a 403 for a missing scope says which `sesame login <service>` adds it.'''
+source = "README.md:85"
+check = ["test"]
+
+# e2e built_in_public_client; standing.rs the_user_client_wins_over_the_built_in
+[[promise]]
+name = "built-in-client-device-flow-only"
+says = '''With a `device_url`, the built-in client signs in only through the device flow'''
+source = "README.md:115"
+check = ["test"]
+
+# store/sqlite.rs new_database_is_0600_in_a_0700_directory, wider_existing_file_is_tightened
+[[promise]]
+name = "db-file-0600-dir-0700"
+says = '''the file is 0600, the directory 0700.'''
+source = "README.md:130"
+check = ["test"]
+
+# e2e login_call_refresh_logout
+[[promise]]
+name = "logout-deletes-only-the-local-token"
+says = '''**`logout`** deletes the local token only'''
+source = "README.md:137"
+check = ["test"]
+
+# wire.rs api_urls_go_only_to_the_hosts; source.rs a_refused_stored_token_is_refreshed_once
+[[promise]]
+name = "token-only-to-provider-hosts"
+says = '''**`api`** sends the token only to the provider's `hosts`; a 401 triggers one refresh and retry.'''
+source = "README.md:141"
+check = ["test"]
+why = "one command's own sequence: the retry is a single call in source.rs after its own 401, nothing runs at once or out of sesame's order; the unit test drives the 401 and counts the refreshes"
+
+# refresh.rs decide_table, stale_token_is_refreshed_and_stored
+[[promise]]
+name = "token-refreshed-within-a-minute-of-expiry"
+says = '''**`token`** prints a valid access token alone, refreshed if it expires within a minute.'''
+source = "README.md:145"
+check = ["test"]
+
+# e2e handed_token_without_db; source.rs a_refused_handed_token_is_not_refreshed_and_its_holder_is_named
+[[promise]]
+name = "handed-token-only-to-provider-hosts"
+says = '''it goes only to the provider's hosts, and the provider's `api_header`s and `error_fields` apply.'''
+source = "README.md:158"
+check = ["test"]
+
+# e2e one_password_vault_store, one_password_local_copy (no secret in plaintext under the config dir)
+[[promise]]
+name = "vault-store-leaves-no-plaintext-on-disk"
+says = '''on disk there is only an encrypted copy of the vault's sesame items (below) and an empty lock file, `sesame.lock`.'''
+source = "README.md:177"
+check = ["test"]
+
+# e2e one_password_vault_migrate
+[[promise]]
+name = "migrate-one-write-per-provider"
+says = '''`store migrate` copies every client, token and provider field, one write per provider (and one for all provider fields), within the service account's write budget.'''
+source = "README.md:207"
+check = ["test"]
+
+# e2e one_password_vault_migrate
+[[promise]]
+name = "migrate-renames-db-never-deletes"
+says = '''Only then is `sesame.db` renamed to `sesame.db.migrated-<date>`, not deleted'''
+source = "README.md:212"
+check = ["test"]
+
+# e2e one_password_vault_errors
+[[promise]]
+name = "vault-never-falls-back-to-db"
+says = '''It never falls back to `sesame.db`.'''
+source = "README.md:220"
+check = ["test"]
+
+# store/vault.rs sync_rereads_only_items_whose_version_moved_plus_the_forced_one; e2e one_password_local_copy
+[[promise]]
+name = "sync-rereads-only-moved-items"
+says = '''Before refreshing a token sesame syncs: it lists the vault once and reads only the items whose version moved, so a token another machine already refreshed is used without refreshing again'''
+source = "README.md:242"
+check = ["test"]
+why = "each machine syncs under its own lock as one sequence (list, then the moved items); the other machine's write is a vault version the test sets up before the sync, and no interleaving inside one machine is involved"
+
+# e2e one_password_local_copy
+[[promise]]
+name = "sync-when-copy-stale"
+says = '''It also syncs when the copy is an hour old (for tokens that never expire), on `sesame providers`, and when there is no copy.'''
+source = "README.md:245"
+check = ["test"]
+
+# e2e one_password_local_copy (follows from sync-rereads-only-moved-items and sync-when-copy-stale)
+[[promise]]
+name = "change-elsewhere-arrives-within-an-hour"
+says = '''So a change made elsewhere reaches a machine within its token's life (an hour for Google), at most an hour.'''
+source = "README.md:247"
+check = ["test"]
+
+# e2e one_password_local_copy (op call and write counts per command)
+[[promise]]
+name = "two-op-requests-per-refresh"
+says = '''**Per day**, a machine spends about 2 requests per refresh'''
+source = "README.md:255"
+check = ["test"]
+
+# e2e one_password_vault_store (no secret in any op argv; the token in every op's environment)
+[[promise]]
+name = "secrets-never-on-op-argv"
+says = '''Secrets reach `op` only on its stdin and the token only in its environment, never on its command line.'''
+source = "README.md:260"
+check = ["test"]
+
+# e2e one_password_vault_errors
+[[promise]]
+name = "vault-unusable-is-an-error"
+says = '''Named but unusable (no token, no `op`, a vault the account cannot read) is an error naming what is missing; never a silent `sesame.db`.'''
+source = "docs/adr/0001-1password-vault-store.md:23"
+check = ["test"]
+
+# store/vault.rs an_edit_keeps_other_peoples_fields_sections_and_tags; e2e one_password_vault_store
+[[promise]]
+name = "different-providers-never-overwrite"
+says = '''`sesame.<provider>`: the provider's client and token, so two machines writing different providers never overwrite each other.'''
+source = "docs/adr/0001-1password-vault-store.md:27"
+check = ["test"]
+why = "kept by the layout, not by an order: each provider is its own item and a write is that item alone, so no interleaving of two machines' writes to different items can touch the other's; the tests check a write carries only its own item"
+
+# store/vault.rs a_read_is_cached_once_per_lock_and_forgotten_when_the_lock_is_taken_again
+[[promise]]
+name = "read-once-per-lock"
+says = '''An item is read at most once per process; taking the local lock forgets what was read, so a read-then-write sees the other process's write.'''
+source = "docs/adr/0001-1password-vault-store.md:39"
+check = ["test"]
+why = "the other process is serialized by the file lock; what is promised is that taking the lock drops the cache, one function's behaviour the unit test checks"
+
+# store/vault.rs an_unchanged_update_writes_nothing, an_item_left_empty_is_archived
+[[promise]]
+name = "write-only-when-changed"
+says = '''A write happens only when what sesame keeps in the item changed, and a write is one `create`/`edit`/`delete` with the whole item.'''
+source = "docs/adr/0001-1password-vault-store.md:41"
+check = ["test"]
+
+[[promise]]
+name = "op-token-only-to-op-children"
+says = '''The token is taken out of sesame's own environment at start and given only to `op` children.'''
+source = "docs/adr/0001-1password-vault-store.md:54"
+kept = "store::vault::take_token removes it first thing in main and only the op runner sets it; e2e one_password_vault_store sees it in every op call's environment, but no test inspects the environment of the other child (the browser opener)"
+
+# e2e one_password_local_copy, a_refreshed_token_the_vault_refuses_is_kept
+[[promise]]
+name = "write-through-under-lock"
+says = '''**Writes** go through: under the machine's lock the item is read afresh (by id when the copy knows it), written (`create` / `edit` / archive, as in ADR 0001, only if what sesame keeps changed), then the copy is made what was written, version included, and saved.'''
+source = "docs/adr/0002-1password-local-copy.md:33"
+check = ["test"]
+why = "the machine's lock serializes its processes (store/sqlite.rs concurrent_read_then_write_waits_instead_of_failing); within the lock the steps are one sequence the tests drive"
+
+# e2e one_password_local_copy
+[[promise]]
+name = "copy-life-sync"
+says = '''when the copy is older than `COPY_LIFE` (1 h), so a provider whose token never expires (GitHub's, a pasted one) still sees another machine's change within the hour;'''
+source = "docs/adr/0002-1password-local-copy.md:62"
+check = ["test"]
+
+# store/sealed.rs opens_only_under_the_same_secret_and_context; e2e one_password_local_copy
+[[promise]]
+name = "copy-on-disk-only-sealed"
+says = '''The copy lives in memory (`rusqlite` `serialize`) and reaches disk only as `<config_dir>/1password-copy`'''
+source = "docs/adr/0002-1password-local-copy.md:68"
+check = ["test"]
+
+[[promise]]
+name = "copy-written-whole"
+says = '''It is written to a file beside it and renamed over it, under the lock, so a reader never sees half of one.'''
+source = "docs/adr/0002-1password-local-copy.md:75"
+kept = "store/vault.rs writes a file beside the copy and renames it over it under the lock (a rename is atomic on one filesystem); no test or simulation interleaves a reader with that write"
+
+# store/sqlite.rs locked_keeps_writes_made_before_an_error; e2e a_refreshed_token_the_vault_refuses_is_kept
+[[promise]]
+name = "locked-keeps-writes-made-before-an-error"
+says = '''**`locked` serializes, nothing more** (sesame#11): writes go through to 1Password, which has no transaction, so an error midway undoes none of them; `sesame.db` keeps the same rule (it commits what was written)'''
+source = "docs/adr/0002-1password-local-copy.md:81"
+check = ["test"]
+
+# e2e one_password_local_copy (a logout elsewhere reaches B at its next sync); source.rs a_refused_stored_token_is_refreshed_once
+[[promise]]
+name = "change-elsewhere-arrives-at-next-sync"
+says = '''A change on another machine reaches this one at its next refresh (about an hour for Google, sooner for shorter tokens), at its next `sesame providers`, or within `COPY_LIFE`.'''
+source = "docs/adr/0002-1password-local-copy.md:104"
+check = ["test"]

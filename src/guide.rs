@@ -263,6 +263,24 @@ mod tests {
     }
 
     #[test]
+    fn draft_leaves_an_unsupported_client_auth_to_find_out() {
+        let meta = serde_json::json!({
+            "token_endpoint": "https://acme.example/oauth/token",
+            "token_endpoint_auth_methods_supported": ["private_key_jwt", "none"],
+        });
+        let url = url::Url::parse("https://acme.example/.well-known/openid-configuration").unwrap();
+        let out = draft(&url, meta.as_object().unwrap());
+        assert!(
+            out.contains("client_auth: the token endpoint takes private_key_jwt, none, neither"),
+            "{out}"
+        );
+        assert!(out.contains("sesame client --no-secret"), "{out}");
+        // Not answered: no flag is drafted, and the question stays open.
+        assert!(!out.contains("--client-auth "), "{out}");
+        assert!(out.contains("--client-auth: "), "{out}");
+    }
+
+    #[test]
     fn candidate_urls() {
         let s = |i: &str| -> Vec<String> {
             candidates(i)
