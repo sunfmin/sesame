@@ -90,7 +90,9 @@ fn main() {
         }
     }
     if args.iter().any(|a| a == "--template") {
-        fail("unable to process line 1: cannot create an item from template and stdin at the same time");
+        fail(
+            "unable to process line 1: cannot create an item from template and stdin at the same time",
+        );
     }
     let vault = std::env::var("FAKE_OP_VAULT").unwrap();
     if let Some(v) = flag(&args, "--vault")
