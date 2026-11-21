@@ -79,7 +79,6 @@ compare = ["exit", "stdout"]
 normalise = [
     { pattern = '\[ERROR\] \d{4}/\d\d/\d\d \d\d:\d\d:\d\d', replace = "[ERROR] <date> <time>" },
     { pattern = 'run\d+x\d+', replace = "run<n>" },
-    { pattern = 'Try again in \d+ seconds', replace = "Try again in <n> seconds" },
 ]
 
 [[standin.case]]
