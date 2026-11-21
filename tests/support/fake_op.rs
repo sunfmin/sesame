@@ -9,7 +9,10 @@
 //! answer shows none), and an archived item still answering `item get <id>`
 //! (`"state": "ARCHIVED"`) but not its title, a list or an edit. With
 //! `FAKE_OP_MAX_WRITES=<n>`, a write after the first n logged is refused as
-//! op refuses one over the service account's budget. Each of these is a case
+//! op refuses one over the service account's budget. An edit of an item not
+//! there is refused ("could not find item to edit"); with
+//! `FAKE_OP_FAULT=edit-gone` every edit is, as if another machine had removed
+//! its item since it was read. Each of these is a case
 //! of its truefit contract (truefit.toml, tests/contract/): `truefit contract`
 //! runs them in the gate, `truefit contract --real op` against the real `op`.
 use serde_json::{Value, json};
@@ -158,6 +161,14 @@ fn main() {
             items.push(t);
         }
         ["item", "edit", q, ..] => {
+            let gone = std::env::var("FAKE_OP_FAULT").is_ok_and(|f| f == "edit-gone");
+            if gone
+                || !items
+                    .iter()
+                    .any(|i| i["id"] == *q || (i["title"] == *q && !archived(i)))
+            {
+                fail("unable to process line 1: could not find item to edit");
+            }
             let i = find(&items, q);
             let Some(t) = template() else {
                 fail("fake op: an edit takes its template on a stdin pipe")

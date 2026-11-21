@@ -1773,13 +1773,9 @@ fn one_password_local_copy() {
     assert!(item.to_string().contains("cid-3"), "{item}");
 }
 
-/// A refreshed token is never dropped (sesame#24): when the vault refuses
-/// the write (here op's write budget), the command still gets the new token,
-/// and this machine keeps it, sealed in its copy, until a later write under
-/// the lock reaches the vault. Against a provider that rotates its refresh
-/// token, so the one the vault still holds is refused once used.
-#[test]
-fn a_refreshed_token_the_vault_refuses_is_kept() {
+/// `hub`, a provider that rotates its refresh token, logged in on a machine
+/// using `vault`: its token `access-0` (refresh `refresh-0`) is expiring.
+fn rotating_login(vault: &FakeVault) -> (FakeProvider, Machine<'_>) {
     let mut issued = 0;
     let fake = FakeProvider::serve(move |r| {
         match r.target.as_str() {
@@ -1804,8 +1800,7 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
         _ => ("404 Not Found", "{}".into()),
     }
     });
-    let vault = FakeVault::new();
-    let m = Machine::new("kept").with_vault(&vault);
+    let m = Machine::new("kept").with_vault(vault);
     let base = fake.base();
     fake.add(&m, "hub", "", &["--device-url", &format!("{base}/device")]);
     let out = m.run_with_stdin(
@@ -1815,6 +1810,18 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
     assert!(out.ok, "{out}");
     let out = m.run(&["login", "hub", "--no-browser"]);
     assert!(out.ok, "{out}");
+    (fake, m)
+}
+
+/// A refreshed token is never dropped (sesame#24): when the vault refuses
+/// the write (here op's write budget), the command still gets the new token,
+/// and this machine keeps it, sealed in its copy, until a later write under
+/// the lock reaches the vault. Against a provider that rotates its refresh
+/// token, so the one the vault still holds is refused once used.
+#[test]
+fn a_refreshed_token_the_vault_refuses_is_kept() {
+    let vault = FakeVault::new();
+    let (fake, m) = rotating_login(&vault);
     // Every write from here on is refused.
     let refusing = |args: &[&str]| {
         let mut c = m.cmd(args);
@@ -1853,4 +1860,45 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
     // Written: nothing is pending, so the next sync writes nothing.
     let out = m.run(&["providers"]);
     assert!(out.ok && out.writes == 0, "{out}");
+}
+
+/// A refused edit (`edit-gone`: op refuses an edit of an item another
+/// machine removed since it was read) after the provider issued a token: the refresh still
+/// answers it, and a sync whose write of it is refused again keeps it and
+/// still syncs; the first sync whose write goes through writes it.
+#[test]
+fn a_sync_whose_write_is_refused_keeps_the_token() {
+    let vault = FakeVault::new();
+    let (fake, m) = rotating_login(&vault);
+    let refused = |args: &[&str]| {
+        let mut c = m.cmd(args);
+        c.env("FAKE_OP_FAULT", "edit-gone");
+        m.output(c, "")
+    };
+
+    let out = refused(&["token", "hub"]);
+    assert!(out.ok && out.stdout.trim() == "access-1", "{out}");
+    assert!(out.stderr.contains("could not find item to edit"), "{out}");
+    // The sync tries the kept token first, is refused, and goes on.
+    let out = refused(&["providers"]);
+    assert!(out.ok && out.text().contains("hub"), "{out}");
+    assert!(
+        out.writes == 1 && out.stderr.contains("could not write"),
+        "{out}"
+    );
+    assert_eq!(
+        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
+        "refresh-0"
+    );
+
+    let out = m.run(&["providers"]);
+    assert!(out.ok && out.writes == 1, "{out}");
+    assert!(!out.stderr.contains("could not write"), "{out}");
+    assert_eq!(
+        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
+        "refresh-1"
+    );
+    let out = m.run(&["token", "hub"]);
+    assert!(out.ok && out.stdout.trim() == "access-1", "{out}");
+    assert_eq!(fake.refreshes().len(), 1);
 }
