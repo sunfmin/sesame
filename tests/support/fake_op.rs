@@ -6,7 +6,9 @@
 //! prefix, "isn't an item", "isn't a vault", a template only from a stdin pipe
 //! without `--template`, and an edit without `tags` wiping them. With
 //! `FAKE_OP_MAX_WRITES=<n>`, a write after the first n logged is refused as
-//! op refuses one over the service account's budget.
+//! op refuses one over the service account's budget. Each of these is a case
+//! of its truefit contract (truefit.toml, tests/contract/): `truefit contract`
+//! runs them in the gate, `truefit contract --real op` against the real `op`.
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
