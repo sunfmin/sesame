@@ -2,15 +2,20 @@
 //! against items kept in `$FAKE_OP_DIR/items.json`. Every call is appended to
 //! `$FAKE_OP_DIR/calls.log` as one JSON line: its argv and whether its
 //! environment carried the service account token. It answers as op 2.x does
-//! where sesame depends on it: errors on stderr with an `[ERROR] <date> <time>`
-//! prefix, "isn't an item", "isn't a vault", a template only from a stdin pipe
-//! without `--template`, and an edit without `tags` wiping them. With
+//! where sesame depends on it, as op 2.42.0 answered the contract's cases:
+//! errors on stderr with an `[ERROR] <date> <time>` prefix, "isn't an item",
+//! "isn't a vault", a template only from a stdin pipe without `--template`,
+//! tags kept sorted, an edit without `tags` keeping them (though its own
+//! answer shows none), and an archived item still answering `item get <id>`
+//! (`"state": "ARCHIVED"`) but not its title, a list or an edit. With
 //! `FAKE_OP_MAX_WRITES=<n>`, a write after the first n logged is refused as
 //! op refuses one over the service account's budget. Each of these is a case
 //! of its truefit contract (truefit.toml, tests/contract/): `truefit contract`
 //! runs them in the gate, `truefit contract --real op` against the real `op`.
 use serde_json::{Value, json};
-use std::io::{IsTerminal, Read, Write};
+use std::io::{Read, Write};
+use std::os::fd::AsFd;
+use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 
 fn fail(msg: &str) -> ! {
@@ -24,14 +29,31 @@ fn flag(args: &[String], name: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
-fn template() -> Value {
-    let mut stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        fail("expected an item template on stdin");
+/// The item template on stdin, if stdin is a pipe: op reads one from
+/// nothing else.
+fn template() -> Option<Value> {
+    let stdin = std::io::stdin();
+    let fd = stdin.as_fd().try_clone_to_owned().unwrap();
+    if !std::fs::File::from(fd)
+        .metadata()
+        .is_ok_and(|m| m.file_type().is_fifo())
+    {
+        return None;
     }
     let mut s = String::new();
-    stdin.read_to_string(&mut s).unwrap();
-    serde_json::from_str(&s).unwrap_or_else(|e| fail(&format!("invalid template: {e}")))
+    stdin.lock().read_to_string(&mut s).unwrap();
+    Some(serde_json::from_str(&s).unwrap_or_else(|e| fail(&format!("invalid template: {e}"))))
+}
+
+fn archived(item: &Value) -> bool {
+    item["state"] == "ARCHIVED"
+}
+
+/// `tags` sorted, as op keeps them.
+fn sort_tags(item: &mut Value) {
+    if let Some(tags) = item["tags"].as_array_mut() {
+        tags.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
 }
 
 fn main() {
@@ -68,7 +90,9 @@ fn main() {
         }
     }
     if args.iter().any(|a| a == "--template") {
-        fail("cannot create an item from template and stdin at the same time");
+        fail(
+            "unable to process line 1: cannot create an item from template and stdin at the same time",
+        );
     }
     let vault = std::env::var("FAKE_OP_VAULT").unwrap();
     if let Some(v) = flag(&args, "--vault")
@@ -83,9 +107,10 @@ fn main() {
         .ok()
         .map(|b| serde_json::from_slice(&b).unwrap())
         .unwrap_or_default();
+    // An archived item answers its id only.
     let find = |items: &[Value], q: &str| -> usize {
         let hits: Vec<usize> = (0..items.len())
-            .filter(|&i| items[i]["id"] == q || items[i]["title"] == q)
+            .filter(|&i| items[i]["id"] == q || (items[i]["title"] == q && !archived(&items[i])))
             .collect();
         match hits.as_slice() {
             [i] => *i,
@@ -105,6 +130,7 @@ fn main() {
             let tag = flag(&args, "--tags");
             let listed: Vec<Value> = items
                 .iter()
+                .filter(|i| !archived(i))
                 .filter(|i| {
                     tag.as_ref().is_none_or(|t| {
                         i["tags"]
@@ -117,7 +143,9 @@ fn main() {
             println!("{}", Value::Array(listed));
         }
         ["item", "create", ..] => {
-            let mut t = template();
+            let Some(mut t) = template() else {
+                fail("provide the item category with '--category' flag")
+            };
             let id = format!("item{}", std::process::id());
             t["id"] = id.into();
             t["version"] = 1.into();
@@ -125,26 +153,42 @@ fn main() {
             if t.get("tags").is_none() {
                 t["tags"] = json!([]);
             }
+            sort_tags(&mut t);
             println!("{t}");
             items.push(t);
         }
         ["item", "edit", q, ..] => {
             let i = find(&items, q);
-            let t = template();
+            let Some(t) = template() else {
+                fail("fake op: an edit takes its template on a stdin pipe")
+            };
+            if archived(&items[i]) {
+                fail("unable to process line 1: Couldn't update the item.");
+            }
             let item = &mut items[i];
-            for k in ["title", "fields", "sections"] {
+            for k in ["title", "fields", "sections", "tags"] {
                 if let Some(v) = t.get(k) {
                     item[k] = v.clone();
                 }
             }
-            // As op does: an edit without `tags` leaves the item none.
-            item["tags"] = t.get("tags").cloned().unwrap_or(json!([]));
+            sort_tags(item);
             item["version"] = (item["version"].as_u64().unwrap() + 1).into();
-            println!("{item}");
+            // As op does: an edit without `tags` keeps them, but its answer
+            // shows none.
+            let mut answer = item.clone();
+            if t.get("tags").is_none() {
+                answer["tags"] = json!([]);
+            }
+            println!("{answer}");
         }
         ["item", "delete", q, ..] => {
             let i = find(&items, q);
-            items.remove(i);
+            if args.iter().any(|a| a == "--archive") {
+                items[i]["state"] = "ARCHIVED".into();
+                items[i]["version"] = (items[i]["version"].as_u64().unwrap() + 1).into();
+            } else {
+                items.remove(i);
+            }
         }
         ["read", reference] => {
             let r = reference

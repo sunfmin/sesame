@@ -6,8 +6,9 @@
 # `truefit contract` (in ./gate.sh) runs the cases against the stand-in.
 # `truefit contract --real op`, outside the gate, runs them against the real
 # `op` too, as a service account that sees only the vault
-# `sesame-contract` (SESAME_CONTRACT_VAULT), never one of the owner's own:
-#   (eval "$(mytokens env sesame-contract)"; cargo build --example fake-op && truefit contract --real op)
+# SESAME_CONTRACT_VAULT names (the mytokens profile sesame-scratch's account
+# and vault), never one of the owner's own:
+#   (eval "$(mytokens env sesame-scratch)"; cargo build --example fake-op && SESAME_CONTRACT_VAULT=sesame-scratch truefit contract --real op)
 
 [contract]
 standins = ["tests/contract/fake-*"]
@@ -16,7 +17,7 @@ standins = ["tests/contract/fake-*"]
 name = "op"
 run = ["tests/contract/fake-op"]
 real = ["tests/contract/real-op"]
-needs = "op 2.x on PATH, jq, and OP_SERVICE_ACCOUNT_TOKEN of a service account that sees only the vault `sesame-contract` (mytokens profile sesame-contract)"
+needs = "op 2.x on PATH, jq, and OP_SERVICE_ACCOUNT_TOKEN of a service account that sees only the vault SESAME_CONTRACT_VAULT names (mytokens profile sesame-scratch, vault sesame-scratch)"
 ready = ["tests/contract/real-op-ready"]
 version = ["op", "--version"]
 compare = ["exit", "stdout"]
@@ -41,7 +42,8 @@ args = ["missing-vault"]
 name = "create-get-list-archive"
 args = ["create-get-list-archive"]
 
-# An edit without `tags` wipes them (and keeps the item's category).
+# An edit without `tags` keeps them (and the item's category), though its
+# answer shows none.
 [[standin.case]]
 name = "edit-without-tags"
 args = ["edit-without-tags"]
@@ -64,7 +66,7 @@ args = ["create-stdin-not-a-pipe"]
 # A write over the service account's budget is refused
 # (FAKE_OP_MAX_WRITES on the stand-in). Its real run spends that budget, so
 # it is a stand-in of its own, run only with SESAME_CONTRACT_SPEND_WRITES=1:
-#   (eval "$(mytokens env sesame-contract)"; SESAME_CONTRACT_SPEND_WRITES=1 truefit contract --real op-write-budget)
+#   (eval "$(mytokens env sesame-scratch)"; SESAME_CONTRACT_VAULT=sesame-scratch SESAME_CONTRACT_SPEND_WRITES=1 truefit contract --real op-write-budget)
 [[standin]]
 name = "op-write-budget"
 run = ["tests/contract/fake-op"]

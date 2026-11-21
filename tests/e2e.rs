@@ -1758,4 +1758,17 @@ fn one_password_local_copy() {
     assert!(!out.ok && out.text().contains("not logged in"), "{out}");
     // Not logged in: it looked in the vault (another machine may have).
     assert_eq!(out.calls, 2);
+
+    // An item archived elsewhere is gone here too, though op still answers
+    // its id (archived, and refuses an edit of it): B writes a new one.
+    let out = a.run(&["client", "hub", "--reset"]);
+    assert!(out.ok, "{out}");
+    assert!(vault.item("sesame.hub").is_none());
+    let out = b.run_with_stdin(
+        &["client", "hub", "--client-id", "cid-3", "--secret-stdin"],
+        "client-secret-3\n",
+    );
+    assert!(out.ok, "{out}");
+    let item = vault.item("sesame.hub").unwrap();
+    assert!(item.to_string().contains("cid-3"), "{item}");
 }

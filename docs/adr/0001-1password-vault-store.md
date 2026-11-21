@@ -45,8 +45,13 @@ sync), ~2 s per `op` call (mytokens ADR 0022, measured).
   (Superseded by ADR 0002: reads come from a local copy, 0 requests with no
   refresh.)
 - **Talking to `op`.** Templates go on stdin through a pipe with no
-  `--template`; an edit carries `tags` (without them op wipes them) and keeps
-  the fields, sections and tags someone else put on the item. The token is
+  `--template`; an edit carries `tags` (sesame's own added to the item's) and
+  keeps the fields, sections and tags someone else put on the item. (Written
+  as "without them op wipes them"; sesame#22 found op 2.42.0 keeps an item's
+  tags on an edit without `tags`: only that edit's printed answer shows none.
+  Tags come back sorted.) An archived item still answers `op item get <id>`
+  (`"state": "ARCHIVED"`, and an edit of it fails) though not its title or a
+  list: sesame reads it as gone. The token is
   taken out of sesame's own environment at start and given only to `op`
   children. Item left with nothing: archived (`--archive`), recoverable.
 - **Refresh.** A lock file in the config dir (`sesame.lock`, empty) serializes
