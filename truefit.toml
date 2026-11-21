@@ -26,6 +26,10 @@ normalise = [
     { pattern = '\[ERROR\] \d{4}/\d\d/\d\d \d\d:\d\d:\d\d', replace = "[ERROR] <date> <time>" },
     { pattern = 'run\d+x\d+', replace = "run<n>" },
 ]
+# An edit whose item is gone: sesame's write of a token the provider has
+# just issued must not lose it (tests/e2e.rs).
+faults = ["edit-gone"]
+fault_env = "FAKE_OP_FAULT"
 
 # Each error on stderr, `[ERROR] <date> <time> <message>`; "isn't an item".
 [[standin.case]]
@@ -63,6 +67,13 @@ args = ["template-flag-and-stdin"]
 [[standin.case]]
 name = "create-stdin-not-a-pipe"
 args = ["create-stdin-not-a-pipe"]
+
+# An edit of an item not there: "could not find item to edit". With the
+# fault, the stand-in refuses every edit so.
+[[standin.case]]
+name = "edit-gone"
+fault = "edit-gone"
+args = ["edit-gone"]
 
 # A write over the service account's budget is refused
 # (FAKE_OP_MAX_WRITES on the stand-in). Its real run spends that budget, so

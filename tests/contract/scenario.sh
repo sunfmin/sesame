@@ -92,6 +92,12 @@ edit-with-tags)
     printf '%s\n' "$out" | summary
     archive "$id"
     ;;
+edit-gone)
+    # An edit of an item not there (as one another machine removed since it
+    # was read): refused, not "isn't an item".
+    input=$(template "sesame-contract.gone.$run") \
+        call item edit "sesame-contract.gone.$run" --vault "$vault" --format json
+    ;;
 template-flag-and-stdin)
     # A --template file as well as a template on stdin is refused: sesame
     # never passes --template.
