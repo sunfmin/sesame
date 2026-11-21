@@ -1,0 +1,10 @@
+{
+  "tree": "ac2c39d9529df79f3e545f3a8ef1bde8f94aaf96+d1fba762150c532c",
+  "lines": 69,
+  "serves": "sesame#24",
+  "considered": "Reusing update_locked as the flush (no separate write path), the copy's own tokens table for the kept token (only a one-column unwritten_tokens mark is new), and the existing FAKE_OP_MAX_WRITES refusal and write-budget contract case instead of a new op answer; a separate pending-token file was weighed and rejected (a second sealed file and a second place for the token).",
+  "reviewer": "codex:01a1fd6d-75b9-7ee2-830d-9a75bb3a726c:default",
+  "author": "claude-code:c2a85501-8492-5ce8-b7b4-d69cf33dbd44:opus",
+  "cut": "In src/store/vault.rs, leave the pending token row untouched in apply and only delete or reload the token when it is not pending, then have both successful update_locked paths share the existing marker clear, apply and save tail. In tests/e2e.rs, match the expected refresh token against the ampersand-delimited form fields once instead of checking middle and final positions separately.",
+  "answer": "Made all three: apply now skips deleting/reloading an unwritten token (no save-restore); update_locked's unchanged and written paths share one tail (marker clear, apply, save); the fake provider matches refresh_token by splitting the form on & once. The rest (89 -> 69 net) is the mark's table and two small accessors, keep_token, the sync flush and its warning, and the ADR's test; nothing more to cut without dropping a behaviour the issue asks for."
+}
