@@ -118,7 +118,7 @@ fn run(
                 }
                 Step::Refresh(t, refresh_token) => {
                     let new = grant(store, &t, refresh_token)?;
-                    store.save_token(name, &new)?;
+                    store.keep_token(name, &new)?;
                     return Ok(new);
                 }
                 Step::NotLoggedIn => return Err(standing::no_token(store, name, p)?),

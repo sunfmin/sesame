@@ -1772,3 +1772,87 @@ fn one_password_local_copy() {
     let item = vault.item("sesame.hub").unwrap();
     assert!(item.to_string().contains("cid-3"), "{item}");
 }
+
+/// A refreshed token is never dropped (sesame#24): when the vault refuses
+/// the write (here op's write budget), the command still gets the new token,
+/// and this machine keeps it, sealed in its copy, until a later write under
+/// the lock reaches the vault. Against a provider that rotates its refresh
+/// token, so the one the vault still holds is refused once used.
+#[test]
+fn a_refreshed_token_the_vault_refuses_is_kept() {
+    let mut issued = 0;
+    let fake = FakeProvider::serve(move |r| {
+        match r.target.as_str() {
+        "/device" => (
+            "200 OK",
+            r#"{"device_code":"dev","user_code":"WDJB-MJHT","verification_uri":"https://example.com/device","expires_in":60,"interval":0}"#.into(),
+        ),
+        "/token" if r.body.contains("grant_type=urn") => (
+            "200 OK",
+            r#"{"access_token":"access-0","refresh_token":"refresh-0","expires_in":30}"#.into(),
+        ),
+        "/token" if r.is_refresh() => {
+            if !r.body.contains(&format!("refresh_token=refresh-{issued}&"))
+                && !r.body.ends_with(&format!("refresh_token=refresh-{issued}"))
+            {
+                return ("400 Bad Request", r#"{"error":"invalid_grant"}"#.into());
+            }
+            issued += 1;
+            let b = format!(
+                r#"{{"access_token":"access-{issued}","refresh_token":"refresh-{issued}","expires_in":3600}}"#
+            );
+            ("200 OK", b)
+        }
+        _ => ("404 Not Found", "{}".into()),
+    }
+    });
+    let vault = FakeVault::new();
+    let m = Machine::new("kept").with_vault(&vault);
+    let base = fake.base();
+    fake.add(&m, "hub", "", &["--device-url", &format!("{base}/device")]);
+    let out = m.run_with_stdin(
+        &["client", "hub", "--client-id", "cid", "--secret-stdin"],
+        "client-secret\n",
+    );
+    assert!(out.ok, "{out}");
+    let out = m.run(&["login", "hub", "--no-browser"]);
+    assert!(out.ok, "{out}");
+    // Every write from here on is refused.
+    let refusing = |args: &[&str]| {
+        let mut c = m.cmd(args);
+        c.env("FAKE_OP_MAX_WRITES", vault.writes().to_string());
+        m.output(c, "")
+    };
+
+    // The login token is expiring: refreshed; the vault refuses the new one.
+    let out = refusing(&["token", "hub"]);
+    assert!(out.ok && out.stdout.trim() == "access-1", "{out}");
+    assert!(
+        out.stderr.contains("could not write") && out.stderr.contains("Too many requests"),
+        "{out}"
+    );
+    assert_eq!(fake.refreshes().len(), 1);
+    // The next command finds it here, with no `op` call.
+    let out = refusing(&["token", "hub"]);
+    assert!(out.ok && out.stdout.trim() == "access-1", "{out}");
+    assert_eq!(out.calls, 0, "{out}");
+
+    // Refreshed again, still refused: with refresh-1, the one the provider
+    // honours now, not the vault's refresh-0.
+    let out = refusing(&["token", "hub", "--min-life", "7200"]);
+    assert!(out.ok && out.stdout.trim() == "access-2", "{out}");
+    assert_eq!(fake.refreshes().len(), 2);
+
+    // Writes go through again: the next write under the lock (a sync's)
+    // writes the kept token first; the refresh after it uses refresh-2.
+    let out = m.run(&["token", "hub", "--min-life", "7200"]);
+    assert!(out.ok && out.stdout.trim() == "access-3", "{out}");
+    assert!(!out.stderr.contains("could not write"), "{out}");
+    assert_eq!(
+        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
+        "refresh-3"
+    );
+    // Written: nothing is pending, so the next sync writes nothing.
+    let out = m.run(&["providers"]);
+    assert!(out.ok && out.writes == 0, "{out}");
+}

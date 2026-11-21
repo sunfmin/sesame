@@ -144,6 +144,16 @@ impl Store {
         }
     }
 
+    /// Stores `t`, a token the provider issued in place of the stored one
+    /// (a refresh): never lost, even where the vault refuses the write
+    /// (`Vault::keep_token`). `sesame.db` saves it.
+    pub fn keep_token(&self, provider: &str, t: &Token) -> Result<(), String> {
+        match self {
+            Store::Sqlite(s) => s.save_token(provider, t),
+            Store::Vault(v) => v.keep_token(provider, t),
+        }
+    }
+
     pub fn delete_token(&self, provider: &str) -> Result<(), String> {
         match self {
             Store::Sqlite(s) => s.delete_token(provider),

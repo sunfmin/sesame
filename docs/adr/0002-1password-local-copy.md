@@ -34,6 +34,21 @@ control session 2026-11-20: 「把整个 DB 缓存下来不就行了吗」, then
   (by id when the copy knows it), written (`create` / `edit` / archive, as in
   ADR 0001, only if what sesame keeps changed), then the copy is made what was
   written, version included, and saved.
+- **A refreshed token is kept here first** (sesame#24): the provider's new
+  token goes into the copy (sealed, saved) before the vault write. Should
+  the write fail (network, the write budget, an expired service account
+  token), the command still gets the token, a warning on stderr names the
+  failed write, and the copy marks the provider in `unwritten_tokens`.
+  While marked, the copy's token is what this machine uses and refreshes
+  with: a sync does not replace it with the vault's, and the next write
+  under the lock writes it, a sync's first step or any write of the
+  provider's item (folded into it). For a provider that rotates its refresh
+  token (Notion, Linear, HubSpot) the vault's old one is no longer honoured,
+  so dropping the new one would lose the login. While unwritten it wins over
+  the vault: a login or logout made meanwhile on another machine is
+  overwritten by it at that write (a logout elsewhere is undone; the token
+  is valid). Other writes (`client`, `login`, `provider set`) still fail as
+  they did: the person sees the error and nothing issued is lost.
 - **Sync**: one `op item list --tags sesame`, then a read of each item whose
   version is not the copy's; an item the copy holds that the list lacks is
   asked for by id before its rows go (1Password was said to list new items
@@ -97,5 +112,8 @@ control session 2026-11-20: 「把整个 DB 缓存下来不就行了吗」, then
   refreshing and A's `client` / `provider set` at its next refresh; no token,
   refresh token or client secret in plaintext under either config dir; a
   copy under another service account token, or damaged, is rebuilt.
+  `a_refreshed_token_the_vault_refuses_is_kept`: with op refusing writes, a
+  rotating provider's refreshed token is used, refreshed again from, and
+  written once writes go through.
 - Measured against real 1Password: see the README's budget and the comment on
   sesame#4.

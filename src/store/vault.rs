@@ -48,7 +48,8 @@ const DEFINITIONS: &str = "sesame-providers";
 /// (a pasted token, GitHub's): another machine's change arrives within it.
 const COPY_LIFE: u64 = 3600;
 /// The copy's own tables, beside `sesame.db`'s: which item each provider's
-/// rows came from and its version then, and when the copy last synced.
+/// rows came from and its version then, when the copy last synced, and the
+/// providers whose token row the vault does not hold yet (`keep_token`).
 const COPY_TABLES: &str = "
     CREATE TABLE IF NOT EXISTS vault_items (
         title TEXT PRIMARY KEY,
@@ -56,6 +57,7 @@ const COPY_TABLES: &str = "
         version INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS copy_synced (at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS unwritten_tokens (provider TEXT PRIMARY KEY);
 ";
 
 const CLIENT_ID: &str = "client_id";
@@ -242,6 +244,11 @@ impl Vault {
     /// it). An item the copy holds that the list lacks is asked for by id
     /// before its rows go: 1Password may list a new item late.
     pub fn sync(&self, provider: Option<&str>) -> Result<(), String> {
+        for p in self.unwritten()? {
+            if let Err(e) = self.update_locked(&title(&p), is_provider_field, |_| {}) {
+                warn_unwritten(&p, &e);
+            }
+        }
         let listed: BTreeMap<String, (String, u64)> = self
             .op
             .list(TAG)
@@ -293,14 +300,23 @@ impl Vault {
                 }
             }
         } else if let Some(provider) = title.strip_prefix("sesame.") {
+            let unwritten = match self.is_unwritten(&copy, provider)? {
+                true => copy.token(provider)?,
+                false => None,
+            };
             copy.delete_client(provider)?;
             copy.delete_token(provider)?;
+            if let Some(t) = unwritten {
+                copy.save_token(provider, &t)?;
+            }
             if let Some(item) = item {
                 let k = kept(&item.json, is_provider_field);
                 if let Some(c) = client_of(&k) {
                     copy.save_client(provider, &c)?;
                 }
-                if let Some(t) = self.token_of(provider, &k)? {
+                if let Some(t) = self.token_of(provider, &k)?
+                    && !self.is_unwritten(&copy, provider)?
+                {
                     copy.save_token(provider, &t)?;
                 }
             }
@@ -398,8 +414,20 @@ impl Vault {
             .map(|i| kept(&i.json, &ours))
             .unwrap_or_default();
         let mut want = have.clone();
+        let provider = title.strip_prefix("sesame.").unwrap_or_default();
+        let unwritten = {
+            let copy = self.copy();
+            match self.is_unwritten(&copy, provider)? {
+                true => copy.token(provider)?,
+                false => None,
+            }
+        };
+        if let Some(t) = &unwritten {
+            put_token(&mut want, t);
+        }
         change(&mut want);
         if want == have {
+            self.set_unwritten(provider, false)?;
             self.apply(title, current.as_ref())?;
             self.save()?;
             return Ok(have);
@@ -463,6 +491,7 @@ impl Vault {
             None => None,
         };
         self.items().insert(title.into(), written.clone());
+        self.set_unwritten(provider, false)?;
         self.apply(title, written.as_ref())?;
         self.save()?;
         Ok(have)
@@ -517,6 +546,64 @@ impl Vault {
 
     pub fn save_token(&self, provider: &str, t: &Token) -> Result<(), String> {
         self.save_login(provider, None, Some(t))
+    }
+
+    /// Stores `t`, a token the provider issued in place of the stored one:
+    /// it is kept in the copy first, so a vault that refuses the write loses
+    /// nothing. Refused, the copy marks it unwritten: reads and syncs keep it
+    /// over the vault's, and the next write of its item, or the next sync
+    /// (both under the lock), writes it. A provider that rotates its refresh
+    /// token honours only this one (docs/adr/0002).
+    pub fn keep_token(&self, provider: &str, t: &Token) -> Result<(), String> {
+        let Some(t) = self.as_kept_token(t) else {
+            return self.save_token(provider, t);
+        };
+        self.locked(|| {
+            self.copy().save_token(provider, &t)?;
+            self.set_unwritten(provider, true)?;
+            self.save()?;
+            if let Err(e) = self.update_locked(&title(provider), is_provider_field, |_| {}) {
+                warn_unwritten(provider, &e);
+            }
+            Ok(())
+        })
+    }
+
+    /// The providers whose token in the copy the vault does not hold yet.
+    fn unwritten(&self) -> Result<Vec<String>, String> {
+        let copy = self.copy();
+        let mut stmt = copy
+            .conn()
+            .prepare("SELECT provider FROM unwritten_tokens")
+            .map_err(|e| self.copy_err(e))?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| self.copy_err(e))?;
+        rows.collect::<Result<_, _>>().map_err(|e| self.copy_err(e))
+    }
+
+    fn is_unwritten(&self, copy: &Sqlite, provider: &str) -> Result<bool, String> {
+        copy.conn()
+            .query_row(
+                "SELECT 1 FROM unwritten_tokens WHERE provider = ?1",
+                [provider],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|r| r.is_some())
+            .map_err(|e| self.copy_err(e))
+    }
+
+    fn set_unwritten(&self, provider: &str, unwritten: bool) -> Result<(), String> {
+        let sql = match unwritten {
+            true => "INSERT OR IGNORE INTO unwritten_tokens (provider) VALUES (?1)",
+            false => "DELETE FROM unwritten_tokens WHERE provider = ?1",
+        };
+        self.copy()
+            .conn()
+            .execute(sql, [provider])
+            .map(drop)
+            .map_err(|e| self.copy_err(e))
     }
 
     pub fn delete_token(&self, provider: &str) -> Result<(), String> {
@@ -638,6 +725,14 @@ fn open_copy(image: Option<&[u8]>) -> Result<Sqlite, String> {
 /// `<config_dir>/1password-copy`: the copy, sealed.
 fn copy_path(dir: &Path) -> PathBuf {
     dir.join("1password-copy")
+}
+
+/// Says on stderr that `provider`'s token stays unwritten, and why.
+fn warn_unwritten(provider: &str, e: &str) {
+    eprintln!(
+        "sesame: warning: could not write the new `{provider}` token to the vault: {e}\n\
+         This machine keeps it and writes it with its next write to the vault."
+    );
 }
 
 /// Whether an item with this title is sesame's to copy.
