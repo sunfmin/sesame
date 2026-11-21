@@ -1,0 +1,45 @@
+{
+  "tip": "2aed6198c638bf6f36f827217f70d4ed5294c25c",
+  "from": "2d5b9cae1c564b243e933cabc656cafe8f72ce34",
+  "pool": 99,
+  "drawn": {
+    "rust": [
+      {
+        "name": "src/store/vault.rs:385:9: replace Vault::items -> MutexGuard<'_, BTreeMap<String, Option<Item>>> with MutexGuard::from(BTreeMap::from_iter([(String::new(), Some(Default::default()))]))",
+        "outcome": "unviable"
+      },
+      {
+        "name": "src/store/vault.rs:711:5: replace copy_path -> PathBuf with Default::default()",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:385:9: replace Vault::items -> MutexGuard<'_, BTreeMap<String, Option<Item>>> with MutexGuard::from(BTreeMap::new())",
+        "outcome": "unviable"
+      },
+      {
+        "name": "src/store/vault.rs:716:5: replace warn_unwritten with ()",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:814:5: replace lock_file -> Result<std::fs::File, String> with Ok(Default::default())",
+        "outcome": "unviable"
+      },
+      {
+        "name": "src/store/vault/op.rs:153:9: replace <impl Op for OpCli>::edit -> Result<Option<Item>, OpError> with Ok(None)",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:351:9: replace Vault::get -> Result<Option<Item>, String> with Ok(None)",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/op.rs:94:9: replace OpCli::write -> Result<Option<Item>, OpError> with Ok(Some(Default::default()))",
+        "outcome": "unviable"
+      },
+      {
+        "name": "src/store/vault.rs:781:5: replace kept -> Kept with Default::default()",
+        "outcome": "killed"
+      }
+    ]
+  }
+}
