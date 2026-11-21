@@ -89,7 +89,15 @@ fn main() {
             })
             .count();
         if writes > max.parse().unwrap() && is_write(line["argv"].as_array().unwrap()) {
-            fail("Too many requests. Your client has been rate-limited. Try again in 3600 seconds");
+            // As op 2.42.0 refused them (sesame#31): no number of seconds;
+            // an edit or create, from its stdin template, as a network error
+            // on its line 1; an archive with exit 4.
+            let m = "Too many requests. Your client has been rate-limited. Try again in  seconds";
+            if args[1] == "delete" {
+                eprintln!("[ERROR] 2026/11/20 10:00:00 {m}: {m}");
+                std::process::exit(4)
+            }
+            fail(&format!("unable to process line 1: Network: ({m}), {m}"));
         }
     }
     if args.iter().any(|a| a == "--template") {
