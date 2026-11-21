@@ -48,7 +48,8 @@ const DEFINITIONS: &str = "sesame-providers";
 /// (a pasted token, GitHub's): another machine's change arrives within it.
 const COPY_LIFE: u64 = 3600;
 /// The copy's own tables, beside `sesame.db`'s: which item each provider's
-/// rows came from and its version then, and when the copy last synced.
+/// rows came from and its version then, when the copy last synced, and the
+/// providers whose token row the vault does not hold yet (`keep_token`).
 const COPY_TABLES: &str = "
     CREATE TABLE IF NOT EXISTS vault_items (
         title TEXT PRIMARY KEY,
@@ -56,6 +57,7 @@ const COPY_TABLES: &str = "
         version INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS copy_synced (at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS unwritten_tokens (provider TEXT PRIMARY KEY);
 ";
 
 const CLIENT_ID: &str = "client_id";
@@ -242,6 +244,12 @@ impl Vault {
     /// it). An item the copy holds that the list lacks is asked for by id
     /// before its rows go: 1Password may list a new item late.
     pub fn sync(&self, provider: Option<&str>) -> Result<(), String> {
+        let unwritten = self.unwritten(&self.copy())?;
+        for p in unwritten {
+            if let Err(e) = self.update_locked(&title(&p), is_provider_field, |_| {}) {
+                warn_unwritten(&p, &e);
+            }
+        }
         let listed: BTreeMap<String, (String, u64)> = self
             .op
             .list(TAG)
@@ -293,14 +301,20 @@ impl Vault {
                 }
             }
         } else if let Some(provider) = title.strip_prefix("sesame.") {
+            // A token the vault does not hold yet stays as it is.
+            let unwritten = self.unwritten(&copy)?.iter().any(|p| p == provider);
             copy.delete_client(provider)?;
-            copy.delete_token(provider)?;
+            if !unwritten {
+                copy.delete_token(provider)?;
+            }
             if let Some(item) = item {
                 let k = kept(&item.json, is_provider_field);
                 if let Some(c) = client_of(&k) {
                     copy.save_client(provider, &c)?;
                 }
-                if let Some(t) = self.token_of(provider, &k)? {
+                if let Some(t) = self.token_of(provider, &k)?
+                    && !unwritten
+                {
                     copy.save_token(provider, &t)?;
                 }
             }
@@ -398,71 +412,75 @@ impl Vault {
             .map(|i| kept(&i.json, &ours))
             .unwrap_or_default();
         let mut want = have.clone();
-        change(&mut want);
-        if want == have {
-            self.apply(title, current.as_ref())?;
-            self.save()?;
-            return Ok(have);
+        let provider = title.strip_prefix("sesame.").unwrap_or_default();
+        if let Some(t) = self.unwritten_token(&self.copy(), provider)? {
+            put_token(&mut want, &t);
         }
-        let what = format!("writing `{title}`");
-        let id = current.as_ref().map(|i| i.id.clone());
-        let written = match current {
-            None => {
-                let template = json!({
-                    "title": title,
-                    "category": "SECURE_NOTE",
-                    "tags": [TAG],
-                    "fields": fields(&want),
-                });
-                Some(
-                    self.op
-                        .create(&template)
-                        .map_err(|e| self.failed(&what, e))?,
-                )
-            }
-            Some(item) if want.is_empty() && kept(&item.json, |l| !ours(l)).is_empty() => {
-                // Archived, not deleted: it can be restored in 1Password.
-                self.op
-                    .archive(&item.id)
-                    .map_err(|e| self.failed(&what, e))?;
-                None
-            }
-            Some(item) => {
-                let mut tags: Vec<Value> =
-                    item.json["tags"].as_array().cloned().unwrap_or_default();
-                if !tags.iter().any(|t| t == TAG) {
-                    tags.push(TAG.into());
+        change(&mut want);
+        let written = if want == have {
+            current
+        } else {
+            let what = format!("writing `{title}`");
+            let id = current.as_ref().map(|i| i.id.clone());
+            let written = match current {
+                None => {
+                    let template = json!({
+                        "title": title,
+                        "category": "SECURE_NOTE",
+                        "tags": [TAG],
+                        "fields": fields(&want),
+                    });
+                    Some(
+                        self.op
+                            .create(&template)
+                            .map_err(|e| self.failed(&what, e))?,
+                    )
                 }
-                let mut all: Vec<Value> = item.json["fields"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|f| !is_ours(f, &ours))
-                    .cloned()
-                    .collect();
-                all.extend(fields(&want));
-                let mut template = json!({ "title": title, "tags": tags, "fields": all });
-                if let Some(sections) = item.json.get("sections") {
-                    template["sections"] = sections.clone();
-                }
-                Some(
+                Some(item) if want.is_empty() && kept(&item.json, |l| !ours(l)).is_empty() => {
+                    // Archived, not deleted: it can be restored in 1Password.
                     self.op
-                        .edit(&item.id, &template)
-                        .map_err(|e| self.failed(&what, e))?,
-                )
-            }
-        };
+                        .archive(&item.id)
+                        .map_err(|e| self.failed(&what, e))?;
+                    None
+                }
+                Some(item) => {
+                    let mut tags: Vec<Value> =
+                        item.json["tags"].as_array().cloned().unwrap_or_default();
+                    if !tags.iter().any(|t| t == TAG) {
+                        tags.push(TAG.into());
+                    }
+                    let mut all: Vec<Value> = item.json["fields"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|f| !is_ours(f, &ours))
+                        .cloned()
+                        .collect();
+                    all.extend(fields(&want));
+                    let mut template = json!({ "title": title, "tags": tags, "fields": all });
+                    if let Some(sections) = item.json.get("sections") {
+                        template["sections"] = sections.clone();
+                    }
+                    Some(
+                        self.op
+                            .edit(&item.id, &template)
+                            .map_err(|e| self.failed(&what, e))?,
+                    )
+                }
+            };
 
-        let written = match written {
-            Some(Some(item)) => Some(item),
-            // What op printed was not the item: read it again.
-            Some(None) => {
-                self.items().remove(title);
-                self.get(title, id.as_deref())?
+            match written {
+                Some(Some(item)) => Some(item),
+                // What op printed was not the item: read it again.
+                Some(None) => {
+                    self.items().remove(title);
+                    self.get(title, id.as_deref())?
+                }
+                None => None,
             }
-            None => None,
         };
         self.items().insert(title.into(), written.clone());
+        self.set_unwritten(provider, false)?;
         self.apply(title, written.as_ref())?;
         self.save()?;
         Ok(have)
@@ -517,6 +535,59 @@ impl Vault {
 
     pub fn save_token(&self, provider: &str, t: &Token) -> Result<(), String> {
         self.save_login(provider, None, Some(t))
+    }
+
+    /// Stores `t`, a token the provider issued in place of the stored one:
+    /// it is kept in the copy first, so a vault that refuses the write loses
+    /// nothing. Refused, the copy marks it unwritten: reads and syncs keep it
+    /// over the vault's, and the next write of its item, or the next sync
+    /// (both under the lock), writes it. A provider that rotates its refresh
+    /// token honours only this one (docs/adr/0002).
+    pub fn keep_token(&self, provider: &str, t: &Token) -> Result<(), String> {
+        let Some(t) = self.as_kept_token(t) else {
+            return self.save_token(provider, t);
+        };
+        self.locked(|| {
+            self.copy().save_token(provider, &t)?;
+            self.set_unwritten(provider, true)?;
+            self.save()?;
+            if let Err(e) = self.update_locked(&title(provider), is_provider_field, |_| {}) {
+                warn_unwritten(provider, &e);
+            }
+            Ok(())
+        })
+    }
+
+    /// The providers whose token in the copy the vault does not hold yet.
+    fn unwritten(&self, copy: &Sqlite) -> Result<Vec<String>, String> {
+        let mut stmt = copy
+            .conn()
+            .prepare("SELECT provider FROM unwritten_tokens")
+            .map_err(|e| self.copy_err(e))?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| self.copy_err(e))?;
+        rows.collect::<Result<_, _>>().map_err(|e| self.copy_err(e))
+    }
+
+    /// `provider`'s token in the copy, if the vault does not hold it yet.
+    fn unwritten_token(&self, copy: &Sqlite, provider: &str) -> Result<Option<Token>, String> {
+        match self.unwritten(copy)?.iter().any(|p| p == provider) {
+            true => copy.token(provider),
+            false => Ok(None),
+        }
+    }
+
+    fn set_unwritten(&self, provider: &str, unwritten: bool) -> Result<(), String> {
+        let sql = match unwritten {
+            true => "INSERT OR IGNORE INTO unwritten_tokens (provider) VALUES (?1)",
+            false => "DELETE FROM unwritten_tokens WHERE provider = ?1",
+        };
+        self.copy()
+            .conn()
+            .execute(sql, [provider])
+            .map(drop)
+            .map_err(|e| self.copy_err(e))
     }
 
     pub fn delete_token(&self, provider: &str) -> Result<(), String> {
@@ -638,6 +709,14 @@ fn open_copy(image: Option<&[u8]>) -> Result<Sqlite, String> {
 /// `<config_dir>/1password-copy`: the copy, sealed.
 fn copy_path(dir: &Path) -> PathBuf {
     dir.join("1password-copy")
+}
+
+/// Says on stderr that `provider`'s token stays unwritten, and why.
+fn warn_unwritten(provider: &str, e: &str) {
+    eprintln!(
+        "sesame: warning: could not write the new `{provider}` token to the vault: {e}\n\
+         This machine keeps it and writes it with its next write to the vault."
+    );
 }
 
 /// Whether an item with this title is sesame's to copy.
