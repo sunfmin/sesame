@@ -62,7 +62,7 @@ missing-vault)
     ;;
 create-get-list-archive)
     # A template from a stdin pipe; the item get and list print; archive:
-    # its id still answers.
+    # its id still answers (archived, as sesame reads it), its title not.
     create "sesame-contract.item.$run" "[\"$tag\"]"
     call item get "sesame-contract.item.$run" --vault "$vault" --format json
     printf '%s\n' "$out" | summary
@@ -70,6 +70,8 @@ create-get-list-archive)
     printf '%s\n' "$out" | jq -c '[.[] | {title, id: (.id | type == "string"), version}]'
     archive "$id"
     call item get "$id" --vault "$vault" --format json
+    printf '%s\n' "$out" | jq -c '{state, version}'
+    call item get "sesame-contract.item.$run" --vault "$vault" --format json
     ;;
 edit-without-tags)
     # An edit whose template has no tags (nor category) keeps the item's tags
