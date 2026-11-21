@@ -4,7 +4,7 @@
 # with $OP set to the program; run by truefit in a fresh directory each time.
 # Usage: <wrapper> <scenario>. Needs jq.
 set -u
-vault=${SESAME_CONTRACT_VAULT:-sesame-contract}
+. "$root/tests/contract/vault.sh"
 # Titles and tags unique to this run, so leftovers of another run (a vault
 # keeps what a cut-short run made) never answer for this one. Normalised away.
 run="run$$x$(date +%s)"

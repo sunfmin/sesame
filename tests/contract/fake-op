@@ -6,6 +6,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 OP="$root/target/debug/examples/fake-op"
 [ -x "$OP" ] || { echo "$OP missing: run \`cargo build --example fake-op\`" >&2; exit 2; }
 export FAKE_OP_DIR="$PWD"
-export FAKE_OP_VAULT="${SESAME_CONTRACT_VAULT:-sesame-contract}"
+. "$root/tests/contract/vault.sh"
+export FAKE_OP_VAULT="$vault"
 export OP_SERVICE_ACCOUNT_TOKEN=contract-token FAKE_OP_TOKEN=contract-token
 . "$root/tests/contract/scenario.sh"

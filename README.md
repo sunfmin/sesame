@@ -281,5 +281,9 @@ definition, so a provider you add can carry its own:
 ## Development
 
 `./gate.sh` — fmt, clippy, tests, and the `op` stand-in's truefit contract
-(`truefit.toml`). `tests/e2e.rs` runs the whole flow against a fake provider on
+(`truefit.toml`). Its real run, `truefit contract --real op` outside the gate,
+signs in as mytokens profile `sesame-scratch` (a service account that sees only
+the vault `sesame-scratch`):
+`(eval "$(mytokens env sesame-scratch)"; cargo build --example fake-op && truefit contract --real op)`.
+`tests/e2e.rs` runs the whole flow against a fake provider on
 127.0.0.1.
