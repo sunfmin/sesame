@@ -30,7 +30,7 @@ pub enum OpError {
 pub trait Op: Send + Sync {
     /// The items tagged `tag`.
     fn list(&self, tag: &str) -> Result<Vec<Listed>, OpError>;
-    /// The item `query` (an id or a title) names.
+    /// The item `query` (an id or a title) names; an archived one is none.
     fn get(&self, query: &str) -> Result<Item, OpError>;
     /// Creates an item from `template`; the item, if 1Password printed it.
     fn create(&self, template: &Value) -> Result<Option<Item>, OpError>;
@@ -133,7 +133,13 @@ impl Op for OpCli {
             "--format",
             "json",
         ];
-        parse_item(&self.run(&args, None)?).map_err(OpError::Failed)
+        let item = parse_item(&self.run(&args, None)?).map_err(OpError::Failed)?;
+        // op still answers an archived item's id (not its title, nor a
+        // list), and refuses an edit of it.
+        if item.json["state"] == "ARCHIVED" {
+            return Err(OpError::NoItem);
+        }
+        Ok(item)
     }
 
     fn create(&self, template: &Value) -> Result<Option<Item>, OpError> {
@@ -142,7 +148,8 @@ impl Op for OpCli {
     }
 
     fn edit(&self, id: &str, template: &Value) -> Result<Option<Item>, OpError> {
-        // Without `tags` an edit wipes them; without a category it keeps its own.
+        // Without `tags` an edit keeps the item's (though its answer shows
+        // none); without a category it keeps its own. Tags come back sorted.
         let args = [
             "item",
             "edit",
@@ -180,7 +187,7 @@ fn op_message(stderr: &str) -> String {
 }
 
 /// A vault in memory, answering as `op` does where sesame depends on it (an
-/// edit without `tags` wipes them), and recording each request as one line:
+/// edit without `tags` keeps them), and recording each request as one line:
 /// `list <tag>`, `get <query>`, `create <title>`, `edit <id>`, `archive <id>`.
 #[cfg(test)]
 #[derive(Clone, Default)]
@@ -288,15 +295,11 @@ impl Op for Memory {
         s.calls.push(format!("edit {id}"));
         let i = Memory::find(&s, id)?;
         let item = &mut s.items[i];
-        for k in ["title", "fields", "sections"] {
+        for k in ["title", "fields", "sections", "tags"] {
             if let Some(v) = template.get(k) {
                 item[k] = v.clone();
             }
         }
-        item["tags"] = template
-            .get("tags")
-            .cloned()
-            .unwrap_or(serde_json::json!([]));
         item["version"] = (item["version"].as_u64().unwrap() + 1).into();
         let json = item.clone();
         Ok(Some(Item {

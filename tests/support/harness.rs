@@ -491,10 +491,14 @@ impl FakeVault {
         self.calls().iter().filter(|(a, _)| is_write(a)).count()
     }
 
+    /// The items not archived.
     pub fn items(&self) -> Vec<serde_json::Value> {
         std::fs::read(self.dir.join("items.json"))
-            .map(|b| serde_json::from_slice(&b).unwrap())
+            .map(|b| serde_json::from_slice::<Vec<serde_json::Value>>(&b).unwrap())
             .unwrap_or_default()
+            .into_iter()
+            .filter(|i| i["state"] != "ARCHIVED")
+            .collect()
     }
 
     pub fn item(&self, title: &str) -> Option<serde_json::Value> {
