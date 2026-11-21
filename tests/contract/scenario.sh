@@ -1,0 +1,119 @@
+# The contract's scenarios: each one a few `op` calls as sesame makes them
+# (src/store/vault/op.rs), printing what sesame reads of their answers and
+# nothing more. Sourced by fake-op (the stand-in) and real-op (the real `op`),
+# with $OP set to the program; run by truefit in a fresh directory each time.
+# Usage: <wrapper> <scenario>. Needs jq.
+set -u
+vault=${SESAME_CONTRACT_VAULT:-sesame-contract}
+# Titles and tags unique to this run, so leftovers of another run (a vault
+# keeps what a cut-short run made) never answer for this one. Normalised away.
+run="run$$x$(date +%s)"
+tag="sesame-contract-$run"
+
+# What sesame reads of an item: id, title, version, tags (missing reads as
+# none), and its own fields: no section, no purpose, a label.
+summary() {
+    jq -c '{id: (.id | type == "string"), title, version, category,
+            tags: (.tags // []),
+            fields: [.fields[]? | select((.section.id // "") == "" and .purpose == null and (.label // "") != "")
+                     | {label, type, value}]}'
+}
+
+# Runs `op "$@"` with $input on a stdin pipe (as sesame does for a write) or
+# /dev/null; prints its exit code and its stderr, and leaves stdout in $out.
+call() {
+    if [ -n "${input+set}" ]; then
+        out=$(printf '%s' "$input" | "$OP" "$@" 2>err)
+    else
+        out=$("$OP" "$@" </dev/null 2>err)
+    fi
+    code=$?
+    unset input
+    echo "exit $code"
+    [ -s err ] && sed 's/^/stderr /' err
+    return 0
+}
+
+template() { # <title> [tags json]
+    if [ $# -gt 1 ]; then tags=", \"tags\": $2"; else tags=; fi
+    printf '{"title": "%s", "category": "SECURE_NOTE"%s, "fields": [%s]}' "$1" "$tags" \
+        '{"id": "access_token", "label": "access_token", "type": "CONCEALED", "value": "a-secret"},
+         {"id": "scope", "label": "scope", "type": "STRING", "value": "read"}'
+}
+
+create() { # <title> [tags json]: the item's id in $id
+    input=$(template "$@") call item create --vault "$vault" --format json
+    printf '%s\n' "$out" | summary
+    id=$(printf '%s' "$out" | jq -r .id)
+}
+
+archive() {
+    call item delete "$1" --vault "$vault" --archive
+}
+
+case "${1:-}" in
+missing-item)
+    # A get of an item that is not there: "isn't an item" on stderr.
+    call item get "sesame-contract.missing.$run" --vault "$vault" --format json
+    ;;
+missing-vault)
+    # A vault the service account cannot see: "isn't a vault".
+    call item list --vault "sesame-contract-missing-$run" --tags "$tag" --format json
+    ;;
+create-get-list-archive)
+    # A template from a stdin pipe; the item get and list print; archive.
+    create "sesame-contract.item.$run" "[\"$tag\"]"
+    call item get "sesame-contract.item.$run" --vault "$vault" --format json
+    printf '%s\n' "$out" | summary
+    call item list --vault "$vault" --tags "$tag" --format json
+    printf '%s\n' "$out" | jq -c '[.[] | {title, id: (.id | type == "string"), version}]'
+    archive "$id"
+    call item get "$id" --vault "$vault" --format json
+    ;;
+edit-without-tags)
+    # An edit whose template has no tags (nor category) leaves the item none
+    # (and its own category).
+    create "sesame-contract.edit.$run" "[\"$tag\", \"other\"]"
+    input=$(template "sesame-contract.edit.$run" | jq -c 'del(.category)') \
+        call item edit "$id" --vault "$vault" --format json
+    printf '%s\n' "$out" | summary
+    call item get "$id" --vault "$vault" --format json
+    printf '%s\n' "$out" | summary
+    archive "$id"
+    ;;
+edit-with-tags)
+    # An edit whose template has tags sets them.
+    create "sesame-contract.retag.$run" "[\"$tag\"]"
+    input=$(template "sesame-contract.retag.$run" "[\"$tag\", \"kept\"]") \
+        call item edit "$id" --vault "$vault" --format json
+    printf '%s\n' "$out" | summary
+    archive "$id"
+    ;;
+template-flag-and-stdin)
+    # A --template file as well as a template on stdin is refused: sesame
+    # never passes --template.
+    template "sesame-contract.flag.$run" >t.json
+    input=$(template "sesame-contract.flag.$run") \
+        call item create --vault "$vault" --template t.json --format json
+    ;;
+create-stdin-not-a-pipe)
+    # No pipe on stdin, no template: op reads none.
+    call item create --vault "$vault" --format json
+    ;;
+write-budget)
+    # Writes until op refuses one over the service account's write budget.
+    create "sesame-contract.budget.$run" "[\"$tag\"]" >/dev/null
+    n=0
+    while [ $n -lt ${SESAME_CONTRACT_MAX_WRITES:-1000} ]; do
+        n=$((n + 1))
+        input=$(template "sesame-contract.budget.$run" "[\"$tag\"]") \
+            call item edit "$id" --vault "$vault" --format json >answer
+        grep -q '^exit 0$' answer || break
+    done
+    cat answer
+    ;;
+*)
+    echo "no scenario \`${1:-}\`: see tests/contract/scenario.sh" >&2
+    exit 2
+    ;;
+esac

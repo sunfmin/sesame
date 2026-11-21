@@ -280,5 +280,6 @@ definition, so a provider you add can carry its own:
 
 ## Development
 
-`./gate.sh` — fmt, clippy, tests. `tests/e2e.rs` runs the whole flow against a
-fake provider on 127.0.0.1.
+`./gate.sh` — fmt, clippy, tests, and the `op` stand-in's truefit contract
+(`truefit.toml`). `tests/e2e.rs` runs the whole flow against a fake provider on
+127.0.0.1.

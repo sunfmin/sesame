@@ -1,0 +1,11 @@
+#!/bin/sh
+# The stand-in of `op` as truefit runs it (truefit.toml): the fake
+# (tests/support/fake_op.rs, built by `cargo build --example fake-op`)
+# through one of the contract's scenarios, its items in the case's directory.
+root=$(cd "$(dirname "$0")/../.." && pwd)
+OP="$root/target/debug/examples/fake-op"
+[ -x "$OP" ] || { echo "$OP missing: run \`cargo build --example fake-op\`" >&2; exit 2; }
+export FAKE_OP_DIR="$PWD"
+export FAKE_OP_VAULT="${SESAME_CONTRACT_VAULT:-sesame-contract}"
+export OP_SERVICE_ACCOUNT_TOKEN=contract-token FAKE_OP_TOKEN=contract-token
+. "$root/tests/contract/scenario.sh"

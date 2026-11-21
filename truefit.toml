@@ -1,0 +1,85 @@
+# sesame's ties to the real programs its tests stand in for (`truefit --help`).
+# The `op` stand-in is tests/support/fake_op.rs, run through the scenarios of
+# tests/contract/scenario.sh: each case is a few `op` calls as sesame makes
+# them, printing only what sesame reads of their answers.
+#
+# `truefit contract` (in ./gate.sh) runs the cases against the stand-in.
+# `truefit contract --real op`, outside the gate, runs them against the real
+# `op` too, as a service account that sees only the vault
+# `sesame-contract` (SESAME_CONTRACT_VAULT), never one of the owner's own:
+#   (eval "$(mytokens env sesame-contract)"; cargo build --example fake-op && truefit contract --real op)
+
+[contract]
+standins = ["tests/contract/fake-*"]
+
+[[standin]]
+name = "op"
+run = ["tests/contract/fake-op"]
+real = ["tests/contract/real-op"]
+needs = "op 2.x on PATH, jq, and OP_SERVICE_ACCOUNT_TOKEN of a service account that sees only the vault `sesame-contract` (mytokens profile sesame-contract)"
+ready = ["tests/contract/real-op-ready"]
+version = ["op", "--version"]
+compare = ["exit", "stdout"]
+normalise = [
+    { pattern = '\[ERROR\] \d{4}/\d\d/\d\d \d\d:\d\d:\d\d', replace = "[ERROR] <date> <time>" },
+    { pattern = 'run\d+x\d+', replace = "run<n>" },
+]
+
+# Each error on stderr, `[ERROR] <date> <time> <message>`; "isn't an item".
+[[standin.case]]
+name = "missing-item"
+args = ["missing-item"]
+
+# "isn't a vault".
+[[standin.case]]
+name = "missing-vault"
+args = ["missing-vault"]
+
+# A template from a stdin pipe creates the item; get, list --tags and an
+# archive as sesame reads them.
+[[standin.case]]
+name = "create-get-list-archive"
+args = ["create-get-list-archive"]
+
+# An edit without `tags` wipes them (and keeps the item's category).
+[[standin.case]]
+name = "edit-without-tags"
+args = ["edit-without-tags"]
+
+# An edit with `tags` sets them.
+[[standin.case]]
+name = "edit-with-tags"
+args = ["edit-with-tags"]
+
+# A template only from a stdin pipe without `--template`.
+[[standin.case]]
+name = "template-flag-and-stdin"
+args = ["template-flag-and-stdin"]
+
+# No pipe on stdin: no template.
+[[standin.case]]
+name = "create-stdin-not-a-pipe"
+args = ["create-stdin-not-a-pipe"]
+
+# A write over the service account's budget is refused
+# (FAKE_OP_MAX_WRITES on the stand-in). Its real run spends that budget, so
+# it is a stand-in of its own, run only with SESAME_CONTRACT_SPEND_WRITES=1:
+#   (eval "$(mytokens env sesame-contract)"; SESAME_CONTRACT_SPEND_WRITES=1 truefit contract --real op-write-budget)
+[[standin]]
+name = "op-write-budget"
+run = ["tests/contract/fake-op"]
+real = ["tests/contract/real-op"]
+needs = "as `op`'s, and SESAME_CONTRACT_SPEND_WRITES=1: it spends the service account's hourly write budget"
+ready = ["tests/contract/real-op-budget-ready"]
+version = ["op", "--version"]
+compare = ["exit", "stdout"]
+normalise = [
+    { pattern = '\[ERROR\] \d{4}/\d\d/\d\d \d\d:\d\d:\d\d', replace = "[ERROR] <date> <time>" },
+    { pattern = 'run\d+x\d+', replace = "run<n>" },
+    { pattern = 'Try again in \d+ seconds', replace = "Try again in <n> seconds" },
+]
+
+[[standin.case]]
+name = "write-budget"
+args = ["write-budget"]
+env = { FAKE_OP_MAX_WRITES = "3" }
