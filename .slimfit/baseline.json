@@ -19,6 +19,16 @@
       "reason": "No assertion maps: this test checks packaging/release.sh's dry output (both arch archives hold only sesame, formula version/urls/sha256s/test block, gh and git never run); the 76 shared lines are only the binary's startup for --version, which the guide test runs for help text. Nothing in the setups to share, so no merge."
     }
   ],
+  "kept_files": [
+    {
+      "suite": "rust",
+      "file": "src/main.rs",
+      "prod_lines": 292,
+      "commits_90d": 28,
+      "commits_total": 28,
+      "reason": "main.rs is the command-line seam: ~half its prod lines are the clap definitions and help text (the CLI's interface itself), the rest a dispatch where each arm is one call into a deep module (providers, oauth, source/refresh, standing, store, api::Call). Its 90-day churn is new flags/commands landing here and logic moving out (api.rs, standing.rs, source.rs, refresh.rs, wire.rs); the deletion test only moves the clap surface, it concentrates nothing. Left inline: a few lines of user messages and the stdin-or-prompt secret read used twice, too small to be a module."
+    }
+  ],
   "measured": {
     "rust": {
       "uncovered_lines": 179,
