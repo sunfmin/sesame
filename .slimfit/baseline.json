@@ -1,12 +1,12 @@
 {
   "suites": {
     "rust": {
-      "prod_lines": 5576,
-      "test_lines": 5007,
-      "tests": 104,
+      "prod_lines": 5573,
+      "test_lines": 5037,
+      "tests": 102,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3791,
+      "covered_lines": 3788,
       "uncovered_lines": 166
     }
   },
@@ -41,14 +41,6 @@
       "test": "sesame::bin/sesame::store::vault::tests::kept_reads_only_sesames_top_level_fields",
       "hash": "e011372def08d2a8",
       "reason": "A pure check of kept()/fields() on a literal item, no machine; nothing in an_item_left_empty_is_archived asserts kept()'s filtering, and with no shared setup a merge saves nothing"
-    },
-    {
-      "suite": "rust",
-      "test": "sesame::release::cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium",
-      "kind": "slow-test",
-      "hash": "c77c03d123992747",
-      "seconds": 0.762,
-      "reason": "Runs packaging/release.sh cut four times (success, failed run, tag already on HEAD, tag on another commit) as a real sh with real git against a bare origin (ls-remote, tag push and its removal) and real ruby -c on the formula: ~40 process spawns per cut, ~0.25s CPU each. Only cargo/lipo/rustup/gh are faked; faking git or ruby would stop checking the tag handoff to factorium and the formula. Tried symlinking one prebuilt fake binary instead of writing a new one per run: CPU unchanged (0.72-1.02s before vs 0.69-1.02s after, load ~20)."
     }
   ],
   "kept_files": [
@@ -72,7 +64,7 @@
   "measured": {
     "rust": {
       "uncovered_lines": 166,
-      "test_seconds": 4.139
+      "test_seconds": 4.575
     }
   }
 }
