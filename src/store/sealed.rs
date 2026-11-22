@@ -49,10 +49,7 @@ impl Sealer {
     /// anything else (another secret, another context, a changed byte).
     pub fn open(&self, sealed: &[u8]) -> Option<Vec<u8>> {
         let rest = sealed.strip_prefix(MAGIC)?;
-        if rest.len() < NONCE {
-            return None;
-        }
-        let (nonce, body) = rest.split_at(NONCE);
+        let (nonce, body) = rest.split_at_checked(NONCE)?;
         let nonce: [u8; NONCE] = nonce.try_into().ok()?;
         self.cipher
             .decrypt(
@@ -83,6 +80,7 @@ mod tests {
         assert!(a.open(&changed).is_none());
         assert!(a.open(b"").is_none());
         assert!(a.open(MAGIC).is_none());
+        assert!(a.open(&sealed[..MAGIC.len() + NONCE]).is_none());
         // A fresh nonce each time.
         assert_ne!(a.seal(b"x"), a.seal(b"x"));
     }

@@ -1,12 +1,12 @@
 {
   "suites": {
     "rust": {
-      "prod_lines": 5576,
-      "test_lines": 5007,
-      "tests": 104,
+      "prod_lines": 5573,
+      "test_lines": 5037,
+      "tests": 102,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3791,
+      "covered_lines": 3788,
       "uncovered_lines": 166
     }
   },
@@ -20,11 +20,27 @@
     },
     {
       "suite": "rust",
-      "test": "sesame::release::cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium",
-      "kind": "slow-test",
-      "hash": "c77c03d123992747",
-      "seconds": 0.762,
-      "reason": "Runs packaging/release.sh cut four times (success, failed run, tag already on HEAD, tag on another commit) as a real sh with real git against a bare origin (ls-remote, tag push and its removal) and real ruby -c on the formula: ~40 process spawns per cut, ~0.25s CPU each. Only cargo/lipo/rustup/gh are faked; faking git or ruby would stop checking the tag handoff to factorium and the formula. Tried symlinking one prebuilt fake binary instead of writing a new one per run: CPU unchanged (0.72-1.02s before vs 0.69-1.02s after, load ~20)."
+      "test": "sesame::bin/sesame::store::vault::tests::sync_rereads_only_items_whose_version_moved_plus_the_forced_one",
+      "hash": "c3c48a4d0df12ab1",
+      "reason": "Asserts the exact op calls a sync makes (list, which gets); the e2e test checks a refused write through a real op process and no call sequence (its doc defers that to these tests); the setups differ (in-memory Op vs a process), so they can't be merged"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::bin/sesame::store::vault::tests::an_item_left_empty_is_archived",
+      "hash": "6f7b08802d1e2f0f",
+      "reason": "Asserts edit-vs-archive op calls and that another's field keeps the item from being archived; the e2e store test only checks the item is gone after reset+logout, through a process, so they can't be merged"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::bin/sesame::store::vault::tests::a_read_is_cached_once_per_lock_and_forgotten_when_the_lock_is_taken_again",
+      "hash": "40bf25873ba669fe",
+      "reason": "Asserts one get per lock and a fresh read on the next lock; no e2e test asserts call counts, and the in-memory seam can't fold into a process-level test"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::bin/sesame::store::vault::tests::kept_reads_only_sesames_top_level_fields",
+      "hash": "e011372def08d2a8",
+      "reason": "A pure check of kept()/fields() on a literal item, no machine; nothing in an_item_left_empty_is_archived asserts kept()'s filtering, and with no shared setup a merge saves nothing"
     }
   ],
   "kept_files": [
@@ -48,7 +64,7 @@
   "measured": {
     "rust": {
       "uncovered_lines": 166,
-      "test_seconds": 4.139
+      "test_seconds": 4.575
     }
   }
 }

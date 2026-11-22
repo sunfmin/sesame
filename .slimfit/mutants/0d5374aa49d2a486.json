@@ -1,0 +1,35 @@
+{
+  "tree": "4e9987063065adc71ef129a6e4e205e2d0323fbc+1b8b3c3e954d4d27",
+  "picker": "codex:01a204c1-fee9-7a20-89b8-dc1c32fcf737:default",
+  "author": "claude-code:cf41a60c-211f-5d6a-9d0e-f16e73598273:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store/sqlite.rs:327:24: replace > with >= in Sqlite::delete_client",
+        "why": "A zero-row delete would report success, and the merged missing-client assertion checks the vault API, which may determine its result separately.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/sqlite.rs:148:67: replace + with * in Sqlite::migrate",
+        "why": "A migration could create the expected tables while recording the wrong schema version, which fresh-store round trips may miss.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/sqlite.rs:332:9: replace Sqlite::delete_token -> Result<(), String> with Ok(())",
+        "why": "The merged sync test verifies client removal after a vault item disappears, leaving room for a stale token row to escape that check.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  },
+  "removed_tests": {
+    "rust": [
+      "src/store/vault.rs:945: an_item_the_list_lacks_is_asked_for_by_id_before_its_rows_go",
+      "src/store/vault.rs:968: an_unchanged_update_writes_nothing",
+      "src/store/vault.rs:1001: an_edit_keeps_other_peoples_fields_sections_and_tags",
+      "src/store/vault.rs:1112: the_normal_form_is_what_reads_back"
+    ]
+  }
+}
