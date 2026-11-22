@@ -1,0 +1,13 @@
+{
+  "tip": "e7b9484eb14d1ca1c941c14b8d91da8dad590da4",
+  "from": "2aed6198c638bf6f36f827217f70d4ed5294c25c",
+  "pool": 1,
+  "drawn": {
+    "rust": [
+      {
+        "name": "src/store/vault.rs:99:5: replace service_token -> Option<String> with Some(String::new())",
+        "outcome": "killed"
+      }
+    ]
+  }
+}

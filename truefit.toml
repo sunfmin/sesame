@@ -92,10 +92,24 @@ normalise = [
     { pattern = 'run\d+x\d+', replace = "run<n>" },
 ]
 
+# A write refused over the budget after an earlier one took effect: sesame
+# keeps a token the provider has just issued (tests/e2e.rs
+# a_refreshed_token_the_vault_refuses_is_kept), and a migrate cut short
+# says to run it again.
+faults = ["over-budget"]
+fault_env = "FAKE_OP_FAULT"
+
 [[standin.case]]
 name = "write-budget"
 args = ["write-budget"]
 env = { FAKE_OP_MAX_WRITES = "3" }
+
+# With the fault, the stand-in refuses every write; the real op, once the
+# scenario's writes have spent the budget.
+[[standin.case]]
+name = "over-budget"
+fault = "over-budget"
+args = ["over-budget"]
 
 # Sesame's promises (`truefit promise`): each sentence of README.md and
 # docs/adr/ that a run could break, with the tests that keep it named in the
@@ -315,4 +329,20 @@ check = ["test"]
 name = "change-elsewhere-arrives-at-next-sync"
 says = '''A change on another machine reaches this one at its next refresh (about an hour for Google, sooner for shorter tokens), at its next `sesame providers`, or within `COPY_LIFE`.'''
 source = "docs/adr/0002-1password-local-copy.md:104"
+check = ["test"]
+
+# release.rs cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium
+# (codesign, notarytool, security and xcrun's signing tools are stand-ins that record any call; the cut makes none)
+[[promise]]
+name = "cut-signs-nothing"
+says = '''Invariant: **the Developer ID identity and the notary key live only in sunfmin/homebrew-tap, and only its `release` workflow signs.**'''
+source = "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:17"
+check = ["test"]
+
+# release.rs cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium
+# (the cut runs with only PATH, HOME and the test's own variables, `gh` a stand-in)
+[[promise]]
+name = "cut-needs-no-tap-token"
+says = '''A cut needs no tap token on the host: only `gh` logged in as a user who may push sesame and dispatch the tap's workflow.'''
+source = "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:39"
 check = ["test"]
