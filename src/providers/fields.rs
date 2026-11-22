@@ -797,6 +797,22 @@ mod tests {
     }
 
     #[test]
+    fn help_names_each_flags_value_and_type() {
+        let mut cmd = FieldFlags::augment_args(clap::Command::new("t"));
+        let help = cmd.render_help().to_string();
+        let line = |flag: &str| {
+            help.lines()
+                .find(|l| l.contains(flag))
+                .unwrap_or_else(|| panic!("{flag}: {help}"))
+                .to_string()
+        };
+        let port = line("--redirect-port");
+        assert!(port.contains("--redirect-port <PORT>"), "{port}");
+        assert!(port.contains("[port 1-65535]"), "{port}");
+        assert!(line("--scope <TEXT>").contains("[text, not blank; repeatable]"));
+    }
+
+    #[test]
     fn names_and_flags_are_unique() {
         let mut names: Vec<_> = FIELDS.iter().map(|f| f.name).collect();
         let mut flags: Vec<_> = FIELDS.iter().map(|f| f.flag).collect();

@@ -9,7 +9,8 @@ slow_limit = 900
 [cut]
 steps = ["packaging/release.sh cut $FACTORIUM_VERSION"]
 formula = "sunfmin/tap/sesame"
-limit = 1800
+# The host's build, then the tap's run (release.sh waits at most 2400s).
+limit = 2700
 
 # slimfit's and truefit's tasks and a sample of landed changes' mutants, filed
 # as issues while the host is idle (SPEC §1.16). No steps: no check is too slow

@@ -1,30 +1,27 @@
 #!/bin/sh
-# One version of sesame, cut on this Mac: factorium.toml's cut step runs
-# `packaging/release.sh cut $FACTORIUM_VERSION` in a worktree at the base's
-# tip, then factorium tags what it left at HEAD and `brew upgrade`s the
-# formula.
+# One version of sesame (ADR 0003): this repo builds it; sunfmin/homebrew-tap's
+# release workflow signs, notarizes and publishes it. factorium.toml's cut step
+# runs `packaging/release.sh cut $FACTORIUM_VERSION` in a worktree at the base's
+# tip, then factorium tags what it left at HEAD and `brew upgrade`s the formula.
 #
-#   release.sh cut <vX.Y.Z>   build for Apple Silicon and Intel with the tag's
-#                             version stamped (build.rs, SESAME_RELEASE;
-#                             Cargo.toml is not edited and nothing is
-#                             committed), check each binary's arch and that
-#                             `sesame --version` equals the tag, package, and
-#                             publish: the archives to the tap's release
-#                             sesame-v<X.Y.Z>, the formula to the tap's
-#                             Formula/sesame.rb. Run again after a cut that
-#                             failed half way, it publishes over what is there.
+#   release.sh build <vX.Y.Z> <outdir>
+#                             build aarch64 and x86_64 with the tag's version
+#                             stamped (build.rs, SESAME_RELEASE; Cargo.toml is
+#                             not edited), `lipo -create` them, check the
+#                             universal binary says the version: <outdir> holds
+#                             `sesame` and the formula `sesame.rb`, its url and
+#                             sha256 left as @URL@ and @SHA256@ for the tap to
+#                             fill in. Signs nothing, needs no secret.
+#   release.sh cut <vX.Y.Z>   build, push the tag to origin, run the tap's
+#                             release.yml on it and wait for that run, bounded
+#                             (RELEASE_WAIT_LIMIT seconds from the cut's start,
+#                             default 2400); publishes nothing from this host
 #   release.sh check-tag <vX.Y.Z>  exit 0 if cut would take the version, 2 if not
-#   release.sh dry            what the tests run: check the binary this machine
-#                             built ($BUILT, target/debug/sesame by default)
-#                             says the development form
-#                             X.Y.Z+<commits>.g<commit>[.dirty], package it at
-#                             that version for both arches (the Intel archive
-#                             holds the same binary, the arm64 archive
-#                             copied: only cut builds both),
-#                             check the formula, publish nothing
+#   release.sh dry            what the gate runs: build at the development form
+#                             X.Y.Z+<commits>.g<commit>[.dirty], check the
+#                             formula, publish nothing
 #
-# The archives are downloaded from the tap (sunfmin/homebrew-tap), as every
-# formula there is. DIST names another directory than dist/.
+# DIST names another directory than dist/.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -36,94 +33,12 @@ export PATH
 
 REPO=https://github.com/sunfmin/sesame
 TAP=sunfmin/homebrew-tap
-ARCHES="arm64 x86_64"
+TARGETS="aarch64-apple-darwin x86_64-apple-darwin"
 DIST=${DIST:-dist}
-# gzip's level for the archives: its default for cut; dry publishes nothing,
-# so it packs fast.
-LEVEL=6
 
 usage() {
-    echo "usage: release.sh cut <vX.Y.Z> | dry | check-tag <vX.Y.Z>" >&2
+    echo "usage: release.sh build <vX.Y.Z> <outdir> | cut <vX.Y.Z> | dry | check-tag <vX.Y.Z>" >&2
     exit 2
-}
-
-# The Rust target that builds for an arch.
-target() {
-    case "$1" in
-    arm64) echo aarch64-apple-darwin ;;
-    *) echo "$1-apple-darwin" ;;
-    esac
-}
-
-archive() { # <version> <arch>
-    echo "sesame-$1-macos-$2.tar.gz"
-}
-
-sha() {
-    shasum -a 256 "$1" | cut -d' ' -f1
-}
-
-# check_binary <path> <arch> <version>: the binary is for the arch and, where
-# this machine can run it (Intel needs Rosetta), says the version.
-check_binary() {
-    lipo -archs "$1" | grep -qx "$2" || {
-        echo "release: $1 is not an $2 binary" >&2
-        exit 1
-    }
-    if arch "-$2" /usr/bin/true 2>/dev/null; then
-        said=$(arch "-$2" "$1" --version)
-        [ "$said" = "sesame $3" ] || {
-            echo "release: $1 --version says '$said', not 'sesame $3'" >&2
-            exit 1
-        }
-    else
-        echo "release: this machine cannot run $2: --version was not checked" >&2
-    fi
-}
-
-# pack <binary> <arch> <version>: the binary to $DIST/<archive>.
-pack() {
-    mkdir -p "$DIST"
-    staged=$(mktemp -d)
-    cp "$1" "$staged/sesame"
-    tar -czf "$DIST/$(archive "$3" "$2")" --options "gzip:compression-level=$LEVEL" \
-        -C "$staged" sesame
-    rm -rf "$staged"
-    echo "$DIST/$(archive "$3" "$2")"
-}
-
-# formula <version>: the Homebrew formula for the archives in $DIST, checked,
-# to $DIST/sesame.rb.
-formula() {
-    base=https://github.com/$TAP/releases/download/sesame-v$1
-    out=$DIST/sesame.rb
-    cat > "$out" <<FORMULA
-class Sesame < Formula
-  desc "Sign in to SaaS APIs from the terminal via OAuth and call their REST APIs"
-  homepage "$REPO"
-  version "$1"
-
-  depends_on :macos
-
-  on_arm do
-    url "$base/$(archive "$1" arm64)"
-    sha256 "$(sha "$DIST/$(archive "$1" arm64)")"
-  end
-  on_intel do
-    url "$base/$(archive "$1" x86_64)"
-    sha256 "$(sha "$DIST/$(archive "$1" x86_64)")"
-  end
-
-  def install
-    bin.install "sesame"
-  end
-
-  test do
-    assert_equal "sesame #{version}", shell_output("#{bin}/sesame --version").strip
-  end
-end
-FORMULA
-    ruby -c "$out" >/dev/null
 }
 
 # check_tag <tag>: a version tag vX.Y.Z, or usage.
@@ -136,35 +51,92 @@ check_tag() {
     case "$1" in v*.*.*.*) usage ;; esac
 }
 
-# build <version>: both release binaries, the version stamped, with rustup's
-# stable toolchain. Its own bin goes first on PATH: a `cargo` that is ahead
-# of rustup's there (Homebrew's) has no Intel target, and `rustup run stable
-# cargo` is not enough, as the cargo it starts still finds the `rustc` that
-# is first on PATH.
-build() {
-    targets=$(for arch in $ARCHES; do target "$arch"; done)
-    rustup=$(command -v rustup) || rustup=
-    stable=$([ -n "$rustup" ] && "$rustup" which --toolchain stable cargo 2>/dev/null) || stable=
-    installed=$([ -n "$stable" ] && "$rustup" target list --installed --toolchain stable) || installed=
-    for target in $targets; do
-        echo "$installed" | grep -qx "$target" && continue
-        if [ -n "$rustup" ]; then
-            why="that is not installed"
-        else
-            why="no rustup is installed (https://rustup.rs)"
-        fi
-        # shellcheck disable=SC2086
-        cat >&2 <<MSG
-release: cut needs rustup's stable toolchain with the target $target, and $why. With rustup, get it with:
-    rustup toolchain install stable --profile minimal --target $(echo $targets)
-MSG
+# toolchain: rustup's stable toolchain with both targets, its own bin first on
+# PATH: a `cargo` ahead of rustup's there (Homebrew's) has no Intel target,
+# and `rustup run stable cargo` is not enough, as the cargo it starts still
+# finds the `rustc` that is first on PATH. Adds a missing target (into
+# ~/.rustup): the tap's runner may have no Intel target.
+toolchain() {
+    command -v rustup >/dev/null || {
+        echo "release: building both arches needs rustup (https://rustup.rs)" >&2
         exit 1
-    done
-    PATH="$(dirname "$stable"):$PATH"
+    }
+    # shellcheck disable=SC2086 # the targets are words
+    rustup target add --toolchain stable $TARGETS >/dev/null
+    PATH="$(dirname "$(rustup which --toolchain stable cargo)"):$PATH"
     export PATH
-    for target in $targets; do
-        SESAME_RELEASE=$1 cargo build --release --locked -p sesame --target "$target"
+}
+
+# build <release or empty> <outdir>: the universal binary and the formula in
+# <outdir>; answers (in $version) the version the binary says. An empty
+# release builds the development form.
+build() {
+    toolchain
+    # build.rs takes a set SESAME_RELEASE, even an empty one, as the version.
+    if [ -n "$1" ]; then export SESAME_RELEASE="$1"; else unset SESAME_RELEASE; fi
+    slices=
+    for target in $TARGETS; do
+        cargo build --release --locked --quiet -p sesame --target "$target"
+        slices="$slices target/$target/release/sesame"
     done
+    rm -rf "$2"
+    mkdir -p "$2"
+    # shellcheck disable=SC2086 # the slices are paths without spaces
+    lipo -create -output "$2/sesame" $slices
+    archs=$(lipo -archs "$2/sesame")
+    [ "$archs" = "x86_64 arm64" ] || {
+        echo "release: $2/sesame holds '$archs', not 'x86_64 arm64'" >&2
+        exit 1
+    }
+    version=$("$2/sesame" --version | sed 's/^sesame //')
+    [ -z "$1" ] || [ "$version" = "$1" ] || {
+        echo "release: $2/sesame --version says 'sesame $version', not 'sesame $1'" >&2
+        exit 1
+    }
+    cat >"$2/sesame.rb" <<FORMULA
+class Sesame < Formula
+  desc "Sign in to SaaS APIs from the terminal via OAuth and call their REST APIs"
+  homepage "$REPO"
+  url "@URL@"
+  sha256 "@SHA256@"
+  version "$version"
+
+  depends_on :macos
+
+  def install
+    bin.install "sesame"
+  end
+
+  test do
+    assert_equal "sesame #{version}", shell_output("#{bin}/sesame --version").strip
+  end
+end
+FORMULA
+    ruby -c "$2/sesame.rb" >/dev/null
+}
+
+# push_tag <tag>: origin has <tag> on HEAD. factorium's own tag step tags
+# HEAD after the cut and fails on a tag origin already holds, so a tag this
+# cut pushed is taken away again when the cut ends, however it ends.
+push_tag() {
+    head=$(git rev-parse HEAD)
+    # An annotated tag's peeled line (^{}) comes after it: the last line is the commit.
+    there=$(git ls-remote origin "refs/tags/$1" "refs/tags/$1^{}" | tail -n1 | cut -f1)
+    if [ -z "$there" ]; then
+        git push --quiet origin "$head:refs/tags/$1"
+        trap 'git push --quiet origin ":refs/tags/$tag"' EXIT
+    elif [ "$there" != "$head" ]; then
+        echo "release: origin's $1 is on $there, not HEAD ($head)" >&2
+        exit 1
+    fi
+}
+
+# latest_run <tag>: the id of the newest run of the tap's release.yml on
+# sesame <tag>, or nothing.
+latest_run() {
+    gh run list -R "$TAP" --workflow release.yml --event workflow_dispatch --limit 50 \
+        --json databaseId,displayTitle \
+        --jq "[.[] | select(.displayTitle == \"sesame $1\") | .databaseId] | max // empty"
 }
 
 case "${1:-}" in
@@ -173,75 +145,67 @@ check-tag)
     check_tag "$2"
     exit 0
     ;;
+build)
+    [ $# -eq 3 ] || usage
+    check_tag "$2"
+    build "${2#v}" "$3"
+    echo "release: built sesame $version, universal, in $3"
+    exit 0
+    ;;
 dry)
     [ $# -eq 1 ] || usage
-    built=${BUILT:-target/debug/sesame}
-    [ -x "$built" ] || {
-        echo "release: $built is missing: build it first" >&2
-        exit 1
-    }
-    version=$("$built" --version | sed 's/^sesame //')
+    build "" "$DIST"
     case "$version" in
     *[!0-9a-z.+]* | *+*+*) dev=no ;;
     [0-9]*.[0-9]*.[0-9]*+[0-9]*.g[0-9a-f]*) dev=yes ;;
     *) dev=no ;;
     esac
     [ "$dev" = yes ] || {
-        echo "release: $built --version says '$version', not X.Y.Z+<commits>.g<commit>[.dirty]" >&2
+        echo "release: $DIST/sesame --version says '$version', not X.Y.Z+<commits>.g<commit>[.dirty]" >&2
         exit 1
     }
-    host=$(uname -m)
-    check_binary "$built" "$host" "$version"
-    LEVEL=1
-    # One archive, copied for the other arches: they hold the same binary,
-    # and compressing it again is most of what dry costs.
-    first=
-    for arch in $ARCHES; do
-        if [ -z "$first" ]; then
-            first=$(pack "$built" "$arch" "$version")
-        else
-            cp "$first" "$DIST/$(archive "$version" "$arch")"
-        fi
-    done
-    formula "$version"
-    echo "release: dry ok (sesame $version, $DIST/sesame.rb)"
+    echo "release: dry ok (sesame $version, universal, $DIST)"
     exit 0
     ;;
 cut) [ $# -eq 2 ] || usage ;;
 *) usage ;;
 esac
 check_tag "$2"
-version=${2#v}
-release=sesame-v$version
+tag=$2
+started=$(date +%s)
+limit=${RELEASE_WAIT_LIMIT:-2400}
 
-# The tag's version, stamped by build.rs: the tag goes on HEAD as it is.
-build "$version"
-archives=""
-for arch in $ARCHES; do
-    built=target/$(target "$arch")/release/sesame
-    check_binary "$built" "$arch" "$version"
-    archives="$archives $(pack "$built" "$arch" "$version")"
+# Built here first: a tag goes out only on a commit that builds at its version.
+build "${tag#v}" "$DIST"
+before=$(latest_run "$tag")
+push_tag "$tag"
+gh workflow run release.yml -R "$TAP" -f repo=sesame -f "tag=$tag"
+
+run=
+while :; do
+    run=$(latest_run "$tag")
+    [ -n "$run" ] && [ "$run" != "$before" ] && break
+    [ $(($(date +%s) - started)) -lt "$limit" ] || {
+        echo "release: no release.yml run of sesame $tag in $TAP after ${limit}s" >&2
+        exit 1
+    }
+    sleep 5
 done
-formula "$version"
-
-# A release that is there already takes the archives again: a cut that
-# failed half way is run a second time.
-if gh release view "$release" -R "$TAP" >/dev/null 2>&1; then
-    # shellcheck disable=SC2086
-    gh release upload "$release" -R "$TAP" --clobber $archives
-else
-    # shellcheck disable=SC2086
-    gh release create "$release" -R "$TAP" --title "sesame $version" \
-        --notes "The binaries the formula \`sesame\` installs." $archives
-fi
-tap=$(mktemp -d)
-gh repo clone "$TAP" "$tap" -- --quiet --depth 1
-cp "$DIST/sesame.rb" "$tap/Formula/sesame.rb"
-git -C "$tap" add Formula/sesame.rb
-if git -C "$tap" diff --cached --quiet; then
-    echo "release: the tap's formula is sesame $version already"
-else
-    git -C "$tap" commit --quiet -m "sesame $version"
-    git -C "$tap" push --quiet origin HEAD
-fi
-rm -rf "$tap"
+echo "release: waiting for https://github.com/$TAP/actions/runs/$run"
+while :; do
+    state=$(gh run view "$run" -R "$TAP" --json status,conclusion --jq '.status + " " + .conclusion')
+    case "$state" in
+    "completed success") break ;;
+    completed*)
+        echo "release: run $run of sesame $tag ended '$state'" >&2
+        gh run view "$run" -R "$TAP" --log-failed >&2 || true
+        exit 1
+        ;;
+    esac
+    [ $(($(date +%s) - started)) -lt "$limit" ] || {
+        echo "release: run $run of sesame $tag still '$state' after ${limit}s: gh run view $run -R $TAP" >&2
+        exit 1
+    }
+    sleep 15
+done
+echo "release: sesame $tag is published ($(($(date +%s) - started))s)"
