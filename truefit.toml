@@ -330,3 +330,19 @@ name = "change-elsewhere-arrives-at-next-sync"
 says = '''A change on another machine reaches this one at its next refresh (about an hour for Google, sooner for shorter tokens), at its next `sesame providers`, or within `COPY_LIFE`.'''
 source = "docs/adr/0002-1password-local-copy.md:104"
 check = ["test"]
+
+# release.rs cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium
+# (codesign, notarytool, security and xcrun's signing tools are stand-ins that record any call; the cut makes none)
+[[promise]]
+name = "cut-signs-nothing"
+says = '''Invariant: **the Developer ID identity and the notary key live only in sunfmin/homebrew-tap, and only its `release` workflow signs.**'''
+source = "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:17"
+check = ["test"]
+
+# release.rs cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium
+# (the cut runs with only PATH, HOME and the test's own variables, `gh` a stand-in)
+[[promise]]
+name = "cut-needs-no-tap-token"
+says = '''A cut needs no tap token on the host: only `gh` logged in as a user who may push sesame and dispatch the tap's workflow.'''
+source = "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:39"
+check = ["test"]
