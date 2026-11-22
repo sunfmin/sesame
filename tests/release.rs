@@ -92,6 +92,21 @@ impl Cut {
              \"run view\") case \"$*\" in *--log-failed*) echo \"the run's failed log\" ;; *) echo \"$RUN_ENDS\" ;; esac ;;\n\
              esac\n",
         );
+        // ADR 0003: only the tap signs. A cut that reached for a signing
+        // tool would leave its call here.
+        for tool in ["codesign", "notarytool", "security"] {
+            script(
+                &bin.join(tool),
+                &format!("#!/bin/sh\necho \"{tool} $*\" >>\"$FAKE_GH.signing\"\nexit 1\n"),
+            );
+        }
+        // xcrun also answers the system's own shims (--show-sdk-path).
+        script(
+            &bin.join("xcrun"),
+            "#!/bin/sh\ncase \" $* \" in\n\
+             *\\ codesign\\ * | *\\ notarytool\\ * | *\\ stapler\\ *) echo \"xcrun $*\" >>\"$FAKE_GH.signing\"; exit 1 ;;\n\
+             esac\nexec /usr/bin/xcrun \"$@\"\n",
+        );
         std::fs::write(dir.join("gh.n"), "0\n").unwrap();
         git(&dir, &["init", "-q", "--bare", "origin.git"]);
         git(&repo, &["init", "-q"]);
@@ -121,14 +136,18 @@ impl Cut {
             self.dir.join("bin").display(),
             std::env::var("PATH").unwrap()
         );
+        // ADR 0003: a cut needs no tap token on the host, only `gh` (here
+        // the stand-in): nothing of the caller's environment reaches it but
+        // PATH and HOME, so no GH_TOKEN, HOMEBREW_TAP_TOKEN or the like.
         Command::new("sh")
             .current_dir(&self.repo)
             .args(["packaging/release.sh", "cut", "v1.2.3"])
+            .env_clear()
+            .env("HOME", std::env::var("HOME").unwrap())
             .env("PATH", path)
             .env("FAKE_GH", self.dir.join("gh"))
             .env("RELEASE_WAIT_LIMIT", "20")
             .env("RUN_ENDS", ends)
-            .env_remove("DIST")
             .output()
             .unwrap()
     }
@@ -158,6 +177,11 @@ fn cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to
         assert!(formula.contains(line), "{line}: {formula}");
     }
     assert!(!formula.contains("on_arm") && !formula.contains("depends_on arch"));
+    assert!(
+        !cut.dir.join("gh.signing").exists(),
+        "the cut signed: {}",
+        std::fs::read_to_string(cut.dir.join("gh.signing")).unwrap_or_default()
+    );
     assert_eq!(
         cut.tagged(),
         "",

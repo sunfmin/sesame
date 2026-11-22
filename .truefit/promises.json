@@ -48,6 +48,11 @@
     "sentence": "It also syncs when the copy is an hour old (for tokens that never expire), on `sesame providers`, and when there is no copy.",
     "source": "README.md:245"
   },
+  "2f00b350e12b": {
+    "mark": "promise",
+    "sentence": "A cut needs no tap token on the host: only `gh` logged in as a user who may push sesame and dispatch the tap's workflow.",
+    "source": "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:39"
+  },
   "350f81c4bc10": {
     "mark": "promise",
     "sentence": "service account**, whose token is `OP_SERVICE_ACCOUNT_TOKEN`. Every machine with the same two variables uses the same logins; on disk there is only an encrypted copy of the vault's sesame items (below) and an empty lock file, `sesame.lock`. Unset, sesame uses `sesame.db` as before.",
@@ -165,6 +170,11 @@
     "source": "README.md:283",
     "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
   },
+  "985e7c1228f3": {
+    "mark": "promise",
+    "sentence": "Invariant: **the Developer ID identity and the notary key live only in sunfmin/homebrew-tap, and only its `release` workflow signs.**",
+    "source": "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:17"
+  },
   "9cf3c7d193d8": {
     "mark": "not",
     "sentence": "`sesame-providers`: every provider's fields, one text field per provider holding JSON.",
@@ -218,6 +228,12 @@
     "mark": "promise",
     "sentence": "**Per day**, a machine spends about 2 requests per refresh: a provider with hour-long tokens used all day long is ~24 refreshes, ~50 requests; one whose token does not expire, at most 24 hourly syncs.",
     "source": "README.md:255"
+  },
+  "e85f3027481d": {
+    "mark": "not",
+    "sentence": "The binaries were only ad hoc signed, so Gatekeeper rejected a copy downloaded in a browser.",
+    "source": "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:11",
+    "why": "history: how cuts were signed before sesame#33, not a promise of what sesame does now"
   },
   "e9d2cba057b1": {
     "mark": "not",
