@@ -27,6 +27,14 @@
       "commits_90d": 28,
       "commits_total": 28,
       "reason": "main.rs is the command-line seam: ~half its prod lines are the clap definitions and help text (the CLI's interface itself), the rest a dispatch where each arm is one call into a deep module (providers, oauth, source/refresh, standing, store, api::Call). Its 90-day churn is new flags/commands landing here and logic moving out (api.rs, standing.rs, source.rs, refresh.rs, wire.rs); the deletion test only moves the clap surface, it concentrates nothing. Left inline: a few lines of user messages and the stdin-or-prompt secret read used twice, too small to be a module."
+    },
+    {
+      "suite": "rust",
+      "file": "src/providers.rs",
+      "prod_lines": 540,
+      "commits_90d": 21,
+      "commits_total": 21,
+      "reason": "providers.rs is the definition-in-force module: its interface is the Provider/Service/Target data types plus eight calls (all, find, find_handed, add, set, show, export, remove); behind them sit the layering of built-in definition and stored fields (effective), the reduction of stored fields to the person's own changes (own_changes), per-service merge and drop, the cross-provider namespace and fixed-port checks, and the one validation point (fields::check + Provider::check). ~200 of its 540 prod lines are the Provider type itself, whose field docs are the interface. Its 90-day churn is new Provider fields landing with each built-in (slack, figma, linear, hubspot, public client) and earlier deepenings that already moved logic out (wire.rs sesame#9, refresh sesame#8, config_dir and find_handed sesame#17). The field table (fields.rs) and the built-ins (built_in.rs) are its own submodules, used by callers only through it (guide.rs reads the table, tests read built_in). Tests drive effective, the private one-place validation seam, which is the module's internal seam, not a reach past it. Deletion test: deleting it spreads layering and validation across every command; splitting the type out would only move lines."
     }
   ],
   "measured": {
