@@ -281,6 +281,22 @@ mod tests {
     }
 
     #[test]
+    fn draft_leaves_pkce_without_s256_to_find_out() {
+        let meta = serde_json::json!({
+            "authorization_endpoint": "https://acme.example/oauth/authorize",
+            "code_challenge_methods_supported": ["plain"],
+        });
+        let url = url::Url::parse("https://acme.example/.well-known/openid-configuration").unwrap();
+        let out = draft(&url, meta.as_object().unwrap());
+        assert!(
+            out.contains("PKCE: only plain listed, and sesame sends S256 only: try --pkce false"),
+            "{out}"
+        );
+        // Not answered: the --pkce question stays open.
+        assert!(out.contains("--pkce: "), "{out}");
+    }
+
+    #[test]
     fn candidate_urls() {
         let s = |i: &str| -> Vec<String> {
             candidates(i)
