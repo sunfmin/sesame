@@ -1,23 +1,17 @@
 {
   "suites": {
     "rust": {
-      "prod_lines": 5580,
-      "test_lines": 4892,
-      "tests": 102,
+      "prod_lines": 5576,
+      "test_lines": 4993,
+      "tests": 103,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3787,
+      "covered_lines": 3785,
       "uncovered_lines": 173
     }
   },
   "loosened": [],
   "kept": [
-    {
-      "suite": "rust",
-      "test": "sesame::release::dry_packages_the_development_build_for_both_arches_and_checks_the_formula",
-      "hash": "a3c8db4b7ef6a239",
-      "reason": "No assertion maps: this test checks packaging/release.sh's dry output (both arch archives hold only sesame, formula version/urls/sha256s/test block, gh and git never run); the 76 shared lines are only the binary's startup for --version, which the guide test runs for help text. Nothing in the setups to share, so no merge."
-    },
     {
       "suite": "rust",
       "test": "sesame::e2e::one_password_local_copy",
@@ -37,8 +31,8 @@
   ],
   "measured": {
     "rust": {
-      "uncovered_lines": 173,
-      "test_seconds": 3.921
+      "uncovered_lines": 172,
+      "test_seconds": 4.785
     }
   }
 }

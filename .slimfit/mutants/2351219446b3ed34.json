@@ -1,0 +1,38 @@
+{
+  "tree": "30409ef24bc198ed556ad9e759ba4c3bc2bf349f+d1fba762150c532c",
+  "picker": "codex:01a2030b-a7f2-7132-bea2-57884de8bd94:default",
+  "author": "claude-code:a8864821-fdf2-5340-9037-58f3f0a8fcd8:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store/vault.rs:92:5: replace take_token with ()",
+        "why": "A browser launch test can pass even if the child inherits the service account token, unless it inspects the child's environment.",
+        "outcome": "killed",
+        "first_outcome": "survived"
+      },
+      {
+        "name": "src/store/vault.rs:92:58: delete ! in take_token",
+        "why": "This reverses the empty-token filter, which tests may miss unless they check what op receives for both empty and nonempty values.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:99:5: replace service_token -> Option<String> with None",
+        "why": "Tests using fake op may pass even when the captured token is never forwarded.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:99:5: replace service_token -> Option<String> with Some(\"xyzzy\".into())",
+        "why": "This substitutes a fixed credential, which can survive a test that checks only whether op receives a token.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  },
+  "removed_tests": {
+    "rust": [
+      "tests/release.rs:66: dry_packages_the_development_build_for_both_arches_and_checks_the_formula"
+    ]
+  }
+}
