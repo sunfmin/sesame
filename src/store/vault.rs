@@ -96,9 +96,7 @@ pub fn take_token() {
 }
 
 fn service_token() -> Option<String> {
-    SERVICE_TOKEN
-        .get_or_init(|| std::env::var(TOKEN_VAR).ok().filter(|t| !t.is_empty()))
-        .clone()
+    SERVICE_TOKEN.get().cloned().flatten()
 }
 
 fn vault_name() -> Option<String> {
