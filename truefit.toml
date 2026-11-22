@@ -92,10 +92,24 @@ normalise = [
     { pattern = 'run\d+x\d+', replace = "run<n>" },
 ]
 
+# A write refused over the budget after an earlier one took effect: sesame
+# keeps a token the provider has just issued (tests/e2e.rs
+# a_refreshed_token_the_vault_refuses_is_kept), and a migrate cut short
+# says to run it again.
+faults = ["over-budget"]
+fault_env = "FAKE_OP_FAULT"
+
 [[standin.case]]
 name = "write-budget"
 args = ["write-budget"]
 env = { FAKE_OP_MAX_WRITES = "3" }
+
+# With the fault, the stand-in refuses every write; the real op, once the
+# scenario's writes have spent the budget.
+[[standin.case]]
+name = "over-budget"
+fault = "over-budget"
+args = ["over-budget"]
 
 # Sesame's promises (`truefit promise`): each sentence of README.md and
 # docs/adr/ that a run could break, with the tests that keep it named in the

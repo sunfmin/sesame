@@ -9,7 +9,8 @@
 //! answer shows none), and an archived item still answering `item get <id>`
 //! (`"state": "ARCHIVED"`) but not its title, a list or an edit. With
 //! `FAKE_OP_MAX_WRITES=<n>`, a write after the first n logged is refused as
-//! op refuses one over the service account's budget. An edit of an item not
+//! op refuses one over the service account's budget; with
+//! `FAKE_OP_FAULT=over-budget` every write is, as if the budget were spent. An edit of an item not
 //! there is refused ("could not find item to edit"); with
 //! `FAKE_OP_FAULT=edit-gone` every edit is, as if another machine had removed
 //! its item since it was read. Each of these is a case
@@ -79,7 +80,15 @@ fn main() {
             && argv[0] == "item"
             && ["create", "edit", "delete"].iter().any(|w| argv[1] == *w)
     };
-    if let Ok(max) = std::env::var("FAKE_OP_MAX_WRITES") {
+    // The fault `over-budget`: a budget already spent, every write refused.
+    let max = if std::env::var("FAKE_OP_FAULT").is_ok_and(|f| f == "over-budget") {
+        Some(0)
+    } else {
+        std::env::var("FAKE_OP_MAX_WRITES")
+            .ok()
+            .map(|m| m.parse::<usize>().unwrap())
+    };
+    if let Some(max) = max {
         let writes = std::fs::read_to_string(dir.join("calls.log"))
             .unwrap()
             .lines()
@@ -88,7 +97,7 @@ fn main() {
                 is_write(v["argv"].as_array().unwrap())
             })
             .count();
-        if writes > max.parse().unwrap() && is_write(line["argv"].as_array().unwrap()) {
+        if writes > max && is_write(line["argv"].as_array().unwrap()) {
             // As op 2.42.0 refused them (sesame#31): no number of seconds;
             // an edit or create, from its stdin template, as a network error
             // on its line 1; an archive with exit 4.

@@ -1822,10 +1822,10 @@ fn rotating_login(vault: &FakeVault) -> (FakeProvider, Machine<'_>) {
 fn a_refreshed_token_the_vault_refuses_is_kept() {
     let vault = FakeVault::new();
     let (fake, m) = rotating_login(&vault);
-    // Every write from here on is refused.
+    // Every write is refused: the budget is spent (the fault `over-budget`).
     let refusing = |args: &[&str]| {
         let mut c = m.cmd(args);
-        c.env("FAKE_OP_MAX_WRITES", vault.writes().to_string());
+        c.env("FAKE_OP_FAULT", "over-budget");
         m.output(c, "")
     };
 

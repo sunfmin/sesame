@@ -121,6 +121,20 @@ write-budget)
     done
     cat answer
     ;;
+over-budget)
+    # A write over the budget, refused: the stand-in, told the fault, its
+    # first; the real op once these writes have spent the budget.
+    input=$(template "sesame-contract.over.$run" "[\"$tag\"]") \
+        call item create --vault "$vault" --format json >answer
+    id=$(printf '%s' "$out" | jq -r '.id // empty' 2>/dev/null)
+    n=0
+    while grep -q '^exit 0$' answer && [ $n -lt ${SESAME_CONTRACT_MAX_WRITES:-1000} ]; do
+        n=$((n + 1))
+        input=$(template "sesame-contract.over.$run" "[\"$tag\"]") \
+            call item edit "$id" --vault "$vault" --format json >answer
+    done
+    cat answer
+    ;;
 *)
     echo "no scenario \`${1:-}\`: see tests/contract/scenario.sh" >&2
     exit 2
