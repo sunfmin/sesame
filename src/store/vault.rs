@@ -85,15 +85,13 @@ const TOKEN_FIELDS: [&str; 8] = [
 /// The service account token, taken out of the environment (`take_token`).
 static SERVICE_TOKEN: OnceLock<Option<String>> = OnceLock::new();
 
-/// Takes the service account token out of this process's environment when a
-/// vault is selected, so that only `op` children get it (a browser sesame
-/// opens does not). Called first thing in `main`, before any thread or child.
+/// Takes the service account token out of this process's environment, so
+/// that only `op` children get it (a browser sesame opens does not). Called
+/// first thing in `main`, before any thread or child.
 pub fn take_token() {
     let token = std::env::var(TOKEN_VAR).ok().filter(|t| !t.is_empty());
-    if vault_name().is_some() && token.is_some() {
-        // SAFETY: called at the start of main, before any other thread exists.
-        unsafe { std::env::remove_var(TOKEN_VAR) };
-    }
+    // SAFETY: called at the start of main, before any other thread exists.
+    unsafe { std::env::remove_var(TOKEN_VAR) };
     let _ = SERVICE_TOKEN.set(token);
 }
 
