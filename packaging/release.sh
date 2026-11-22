@@ -27,7 +27,7 @@ cd "$(dirname "$0")/.."
 
 # A cut runs under factorium's daemon, whose PATH may lack rustup's
 # ~/.cargo/bin. Put it last, so a cargo already on PATH still comes first;
-# `build` puts the stable toolchain's own bin first below.
+# `build` puts the pinned toolchain's own bin first below.
 PATH="$PATH:$HOME/.cargo/bin"
 export PATH
 
@@ -51,19 +51,20 @@ check_tag() {
     case "$1" in v*.*.*.*) usage ;; esac
 }
 
-# toolchain: rustup's stable toolchain with both targets, its own bin first on
-# PATH: a `cargo` ahead of rustup's there (Homebrew's) has no Intel target,
-# and `rustup run stable cargo` is not enough, as the cargo it starts still
-# finds the `rustc` that is first on PATH. Adds a missing target (into
-# ~/.rustup): the tap's runner may have no Intel target.
+# toolchain: the toolchain rust-toolchain.toml pins (the one the gate passed)
+# with both targets, its own bin first on PATH: a `cargo` ahead of rustup's
+# there (Homebrew's) has no Intel target, and rustup's proxy is not enough, as
+# the cargo it starts still finds the `rustc` that is first on PATH. Installs
+# it and adds a missing target (into ~/.rustup): the tap's runner has neither.
 toolchain() {
     command -v rustup >/dev/null || {
         echo "release: building both arches needs rustup (https://rustup.rs)" >&2
         exit 1
     }
+    rustup toolchain install --no-self-update >/dev/null
     # shellcheck disable=SC2086 # the targets are words
-    rustup target add --toolchain stable $TARGETS >/dev/null
-    PATH="$(dirname "$(rustup which --toolchain stable cargo)"):$PATH"
+    rustup target add $TARGETS >/dev/null
+    PATH="$(dirname "$(rustup which cargo)"):$PATH"
     export PATH
 }
 

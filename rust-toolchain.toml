@@ -1,0 +1,8 @@
+# The one toolchain everything builds with: the gate (fmt, clippy, tests,
+# `release.sh dry`) here and the tap's release run (`release.sh build`), so
+# the release compiles what the gate passed (sesame#34). The release targets
+# are packaging/release.sh's TARGETS, which it adds itself.
+[toolchain]
+channel = "nightly-2026-10-22"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
