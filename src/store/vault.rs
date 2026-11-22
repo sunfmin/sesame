@@ -942,30 +942,60 @@ mod tests {
     }
 
     #[test]
-    fn an_item_the_list_lacks_is_asked_for_by_id_before_its_rows_go() {
+    fn an_item_the_list_lacks_is_asked_for_by_id_and_an_edit_keeps_other_peoples_fields() {
         let mem = Memory::default();
         let a = machine(&mem);
-        a.save_client("x", &client("x-1")).unwrap();
-        let x = id(&mem, "sesame.x");
+        a.save_client("y", &client("y-1")).unwrap();
+        let y = id(&mem, "sesame.y");
         calls(&mem);
 
         // Listed late: still there when asked for, so its rows stay.
-        mem.state().unlisted.push(x.clone());
+        mem.state().unlisted.push(y.clone());
         a.locked(|| a.sync(None)).unwrap();
-        assert_eq!(calls(&mem), ["list sesame".into(), format!("get {x}")]);
-        assert_eq!(a.client("x").unwrap(), Some(client("x-1")));
+        assert_eq!(calls(&mem), ["list sesame".into(), format!("get {y}")]);
+        assert_eq!(a.client("y").unwrap(), Some(client("y-1")));
 
         // Gone: its rows go, and it is not asked for again.
         mem.state().items.clear();
         a.locked(|| a.sync(None)).unwrap();
-        assert_eq!(calls(&mem), ["list sesame".into(), format!("get {x}")]);
-        assert_eq!(a.client("x").unwrap(), None);
+        assert_eq!(calls(&mem), ["list sesame".into(), format!("get {y}")]);
+        assert_eq!(a.client("y").unwrap(), None);
         a.locked(|| a.sync(None)).unwrap();
         assert_eq!(calls(&mem), ["list sesame"]);
+
+        // An edit keeps other people's fields, sections and tags.
+        let theirs = json!([
+            {"id": "url", "label": "url", "type": "STRING", "value": "https://x"},
+            {"id": "n", "label": "client_id", "type": "STRING", "value": "theirs", "section": {"id": "s"}},
+            {"id": "notesPlain", "label": "notesPlain", "purpose": "NOTES", "type": "STRING", "value": "hello"},
+        ]);
+        let x = mem.add(json!({
+            "title": "sesame.x",
+            "category": "LOGIN",
+            "tags": ["mine"],
+            "sections": [{"id": "s", "label": "Theirs"}],
+            "fields": theirs,
+        }));
+        a.save_client("x", &client("x-1")).unwrap();
+        assert_eq!(
+            calls(&mem),
+            ["get sesame.x".to_string(), format!("edit {x}")]
+        );
+
+        let item = mem.item("sesame.x").unwrap();
+        assert_eq!(item["tags"], json!(["mine", "sesame"]));
+        assert_eq!(item["sections"], json!([{"id": "s", "label": "Theirs"}]));
+        assert_eq!(item["category"], "LOGIN");
+        let fields = item["fields"].as_array().unwrap();
+        for f in theirs.as_array().unwrap() {
+            assert!(fields.contains(f), "{f} kept");
+        }
+        assert_eq!(fields.len(), 5, "{fields:?}");
+        assert_eq!(a.client("x").unwrap(), Some(client("x-1")));
     }
 
     #[test]
-    fn an_unchanged_update_writes_nothing() {
+    fn an_unchanged_update_writes_nothing_and_the_normal_form_is_what_reads_back() {
         let mem = Memory::default();
         let a = machine(&mem);
         a.save_login("x", Some(&client("x-1")), Some(&token("t-1")))
@@ -995,40 +1025,33 @@ mod tests {
         assert!(!a.delete_client("z").unwrap());
         assert_eq!(calls(&mem), ["get sesame.z"]);
         assert!(mem.item("sesame.z").is_none());
-    }
 
-    #[test]
-    fn an_edit_keeps_other_peoples_fields_sections_and_tags() {
-        let mem = Memory::default();
-        let theirs = json!([
-            {"id": "url", "label": "url", "type": "STRING", "value": "https://x"},
-            {"id": "n", "label": "client_id", "type": "STRING", "value": "theirs", "section": {"id": "s"}},
-            {"id": "notesPlain", "label": "notesPlain", "purpose": "NOTES", "type": "STRING", "value": "hello"},
-        ]);
-        let x = mem.add(json!({
-            "title": "sesame.x",
-            "category": "LOGIN",
-            "tags": ["mine"],
-            "sections": [{"id": "s", "label": "Theirs"}],
-            "fields": theirs,
-        }));
-        let a = machine(&mem);
-        a.save_client("x", &client("x-1")).unwrap();
-        assert_eq!(
-            calls(&mem),
-            ["get sesame.x".to_string(), format!("edit {x}")]
+        // The normal form is what reads back.
+        let c = Client {
+            client_id: "id".into(),
+            client_secret: Some(String::new()),
+        };
+        let t = Token {
+            scope: Some(String::new()),
+            pasted: true,
+            ..token("t")
+        };
+        a.save_login("n", Some(&c), Some(&t)).unwrap();
+        let kept_c = a.as_kept_client(&c).unwrap();
+        assert_eq!(kept_c.client_secret, None);
+        assert_eq!(a.client("n").unwrap(), Some(kept_c));
+        let kept_t = a.as_kept_token(&t).unwrap();
+        assert_eq!(kept_t.scope, None);
+        assert_eq!(a.token("n").unwrap(), Some(kept_t));
+        // No id, no access token: nothing kept.
+        assert!(
+            a.as_kept_client(&Client {
+                client_id: String::new(),
+                client_secret: None
+            })
+            .is_none()
         );
-
-        let item = mem.item("sesame.x").unwrap();
-        assert_eq!(item["tags"], json!(["mine", "sesame"]));
-        assert_eq!(item["sections"], json!([{"id": "s", "label": "Theirs"}]));
-        assert_eq!(item["category"], "LOGIN");
-        let fields = item["fields"].as_array().unwrap();
-        for f in theirs.as_array().unwrap() {
-            assert!(fields.contains(f), "{f} kept");
-        }
-        assert_eq!(fields.len(), 5, "{fields:?}");
-        assert_eq!(a.client("x").unwrap(), Some(client("x-1")));
+        assert!(a.as_kept_token(&token("")).is_none());
     }
 
     #[test]
@@ -1106,37 +1129,6 @@ mod tests {
         a.save_token("x", &token("t-2")).unwrap();
         assert_eq!(calls(&mem), [format!("get {x}"), format!("edit {x}")]);
         assert_eq!(a.token("x").unwrap(), Some(token("t-2")));
-    }
-
-    #[test]
-    fn the_normal_form_is_what_reads_back() {
-        let mem = Memory::default();
-        let a = machine(&mem);
-        let c = Client {
-            client_id: "id".into(),
-            client_secret: Some(String::new()),
-        };
-        let t = Token {
-            scope: Some(String::new()),
-            pasted: true,
-            ..token("t")
-        };
-        a.save_login("x", Some(&c), Some(&t)).unwrap();
-        let kept_c = a.as_kept_client(&c).unwrap();
-        assert_eq!(kept_c.client_secret, None);
-        assert_eq!(a.client("x").unwrap(), Some(kept_c));
-        let kept_t = a.as_kept_token(&t).unwrap();
-        assert_eq!(kept_t.scope, None);
-        assert_eq!(a.token("x").unwrap(), Some(kept_t));
-        // No id, no access token: nothing kept.
-        assert!(
-            a.as_kept_client(&Client {
-                client_id: String::new(),
-                client_secret: None
-            })
-            .is_none()
-        );
-        assert!(a.as_kept_token(&token("")).is_none());
     }
 
     #[test]
