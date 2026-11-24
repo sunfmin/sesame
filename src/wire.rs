@@ -237,23 +237,8 @@ pub struct DeviceCode {
     pub user_code: String,
     pub verification_uri: String,
     verification_uri_complete: Option<String>,
-    /// Seconds the codes last.
-    #[serde(default = "fifteen_minutes")]
-    expires_in: u64,
-    /// When the codes expire, in seconds since the epoch.
-    #[serde(skip)]
-    pub expires_at: u64,
-    /// Seconds to wait between polls.
-    #[serde(default = "five_seconds")]
-    pub interval: u64,
-}
-
-fn fifteen_minutes() -> u64 {
-    900
-}
-
-fn five_seconds() -> u64 {
-    5
+    expires_in: Option<u64>,
+    interval: Option<u64>,
 }
 
 impl DeviceCode {
@@ -266,15 +251,22 @@ impl DeviceCode {
     }
 }
 
-/// Reads the device endpoint's answer, received at `now`.
-pub fn device_code(status: StatusCode, now: u64, text: &str) -> Result<DeviceCode, String> {
+/// Reads the device endpoint's answer, received at `now`: the codes, when
+/// they expire, and the seconds to wait before the first poll (RFC 8628's
+/// 15 minutes and 5 seconds when not given).
+pub fn device_code(
+    status: StatusCode,
+    now: u64,
+    text: &str,
+) -> Result<(DeviceCode, u64, u64), String> {
     if !status.is_success() {
         return Err(format!("device endpoint answered {status}: {text}"));
     }
-    let mut d: DeviceCode =
+    let d: DeviceCode =
         serde_json::from_str(text).map_err(|e| format!("device response: {e}: {text}"))?;
-    d.expires_at = now + d.expires_in;
-    Ok(d)
+    let expires_at = now + d.expires_in.unwrap_or(900);
+    let interval = d.interval.unwrap_or(5);
+    Ok((d, expires_at, interval))
 }
 
 const EXPIRED: &str = "the code expired before access was approved; run login again";
@@ -921,7 +913,7 @@ mod tests {
     #[test]
     fn device_codes() {
         let ok = StatusCode::OK;
-        let d = device_code(
+        let (d, expires_at, interval) = device_code(
             ok,
             NOW,
             r#"{"device_code":"dc","user_code":"WDJB-MJHT","verification_uri":"https://e.x/device","verification_uri_complete":"https://e.x/device?user_code=WDJB-MJHT","expires_in":600,"interval":2}"#,
@@ -931,12 +923,12 @@ mod tests {
             (d.device_code.as_str(), d.user_code.as_str()),
             ("dc", "WDJB-MJHT")
         );
-        assert_eq!((d.expires_at, d.interval), (NOW + 600, 2));
+        assert_eq!((expires_at, interval), (NOW + 600, 2));
         // The page with the code filled in, when the provider gives one.
         assert_eq!(d.page(), "https://e.x/device?user_code=WDJB-MJHT");
 
         // GitHub gives no complete URI, so the page is where the code is typed.
-        let d = device_code(
+        let (d, expires_at, interval) = device_code(
             ok,
             NOW,
             r#"{"device_code":"dc","user_code":"U","verification_uri":"https://e.x/device"}"#,
@@ -944,7 +936,7 @@ mod tests {
         .unwrap();
         assert_eq!(d.page(), "https://e.x/device");
         // RFC 8628 §3.2's defaults: 5s between polls, and 15 min to approve.
-        assert_eq!((d.expires_at, d.interval), (NOW + 900, 5));
+        assert_eq!((expires_at, interval), (NOW + 900, 5));
 
         let e = device_code(StatusCode::BAD_REQUEST, NOW, "nope").unwrap_err();
         assert_eq!(e, "device endpoint answered 400 Bad Request: nope");

@@ -274,7 +274,7 @@ fn device_flow(
     open_browser: bool,
 ) -> Result<Token, String> {
     let (status, text) = post(wire::token_request(p, Grant::Device(scopes), client)?)?;
-    let d = wire::device_code(status, now(), &text)?;
+    let (d, expires_at, mut interval) = wire::device_code(status, now(), &text)?;
     eprintln!(
         "To sign in, open {} and enter the code:\n\n  {}\n",
         d.verification_uri, d.user_code
@@ -284,12 +284,11 @@ fn device_flow(
         let _ = open::that_detached(d.page());
     }
 
-    let mut interval = d.interval;
     loop {
         std::thread::sleep(Duration::from_secs(interval));
         let poll = wire::token_request(p, Grant::DeviceCode(&d.device_code), client)?;
         let (status, text) = post(poll)?;
-        match wire::device_poll(p, status, &text, interval, now(), d.expires_at)? {
+        match wire::device_poll(p, status, &text, interval, now(), expires_at)? {
             Poll::Token(t) => return Ok(t),
             Poll::Again(next) => interval = next,
         }
