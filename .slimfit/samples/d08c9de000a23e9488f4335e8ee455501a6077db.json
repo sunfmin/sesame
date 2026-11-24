@@ -1,0 +1,33 @@
+{
+  "tip": "d08c9de000a23e9488f4335e8ee455501a6077db",
+  "from": "e7b9484eb14d1ca1c941c14b8d91da8dad590da4",
+  "pool": 17,
+  "drawn": {
+    "rust": [
+      {
+        "name": "src/help.rs:31:5: replace manual -> Help with Default::default()",
+        "outcome": "unviable"
+      },
+      {
+        "name": "src/store/sealed.rs:51:9: replace Sealer::open -> Option<Vec<u8>> with Some(vec![1])",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/sealed.rs:51:9: replace Sealer::open -> Option<Vec<u8>> with Some(vec![])",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/sealed.rs:51:9: replace Sealer::open -> Option<Vec<u8>> with None",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/source.rs:139:5: replace definitions -> Result<BTreeMap<String, Fields>, String> with Ok(BTreeMap::new())",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/source.rs:104:5: replace handed -> Result<Option<(Target, Handed)>, String> with Ok(None)",
+        "outcome": "killed"
+      }
+    ]
+  }
+}
