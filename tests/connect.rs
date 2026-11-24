@@ -141,6 +141,28 @@ fn guide_lists_every_flag_and_help_points_to_it() {
     assert!(top.contains("sesame provider guide"), "{top}");
 }
 
+/// `sesame help` answers the index, a topic, or the whole manual; an
+/// unknown topic is refused, naming the topics.
+#[test]
+fn help_answers_the_index_a_topic_or_all() {
+    let dir = Machine::new("connect-help");
+    let (ok, index, _) = sesame(&dir, &["help"]);
+    let (_, top, _) = sesame(&dir, &["--help"]);
+    assert!(
+        ok && index == top && index.contains("sesame help signing-in"),
+        "{index}"
+    );
+    let (ok, topic, _) = sesame(&dir, &["help", "handed-token"]);
+    assert!(ok && topic.contains("SESAME_TOKEN_<NAME>"), "{topic}");
+    let (ok, all, _) = sesame(&dir, &["help", "all"]);
+    assert!(
+        ok && all.contains("A token can be handed to") && all.contains("## The client"),
+        "{all}"
+    );
+    let (ok, _, err) = sesame(&dir, &["help", "nope"]);
+    assert!(!ok && err.contains("signing-in"), "{err}");
+}
+
 #[test]
 fn export_rebuilds_the_definition_in_an_empty_database() {
     let from = Machine::new("connect-export-from");
