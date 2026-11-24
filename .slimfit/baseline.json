@@ -2,12 +2,12 @@
   "suites": {
     "rust": {
       "prod_lines": 5682,
-      "test_lines": 5092,
-      "tests": 107,
+      "test_lines": 5109,
+      "tests": 108,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3868,
-      "uncovered_lines": 161
+      "covered_lines": 3873,
+      "uncovered_lines": 152
     }
   },
   "loosened": [],
@@ -38,17 +38,17 @@
     },
     {
       "suite": "rust",
-      "test": "sesame::bin/sesame::store::vault::tests::kept_reads_only_sesames_top_level_fields",
-      "hash": "e011372def08d2a8",
-      "reason": "A pure check of kept()/fields() on a literal item, no machine; nothing in an_item_left_empty_is_archived asserts kept()'s filtering, and with no shared setup a merge saves nothing"
-    },
-    {
-      "suite": "rust",
       "test": "sesame::release::cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium",
       "kind": "slow-test",
       "hash": "f5ea87f589891c8a",
       "seconds": 0.995,
       "reason": "Runs the real packaging/release.sh cut four times (success, failed run, tag already on HEAD, tag on another commit) against stand-ins; profiled: no sleep or network, its time is the script's own ~30 process spawns per cut (pushing the tag to a bare origin ~60ms, ruby -c ~50ms, git/gh/cargo/lipo stand-ins ~10-20ms each), so a cheaper test would not run the real script"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::bin/sesame::store::vault::item::tests::kept_reads_only_sesames_top_level_fields",
+      "hash": "e011372def08d2a8",
+      "reason": "A pure check of kept()/fields() on a literal item, no machine; nothing in an_item_left_empty_is_archived asserts kept()'s filtering, and with no shared setup a merge saves nothing (moved from store::vault::tests with the item layout, sesame#47)"
     }
   ],
   "kept_files": [
@@ -82,8 +82,8 @@
   ],
   "measured": {
     "rust": {
-      "uncovered_lines": 161,
-      "test_seconds": 4.186
+      "uncovered_lines": 152,
+      "test_seconds": 4.32
     }
   }
 }
