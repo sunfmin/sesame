@@ -1,0 +1,10 @@
+{
+  "tree": "4c43019c8989dd9bbfb2ed1bd9c8649a51b8780d+d1fba762150c532c",
+  "lines": 60,
+  "serves": "sesame#42",
+  "considered": "source::HELP and its token_prefix!/providers_var! macros (deleted, replaced by two consts); FOR_AI (deleted, moved to doc comments); rolesmith's parse/help_answer shape (reused); the field table's existing clap Args (reused unchanged)",
+  "reviewer": "codex:01a20ce6-52e3-79e3-a8c9-aa5855864b0a:default",
+  "author": "claude-code:06da10df-ef30-5ebb-8a5e-481a1e11ef64:opus",
+  "cut": "src/main.rs: use `Cli::try_parse()` and return every successful parse, including `Cmd::Help`, whose handler already renders the manual. Use the manual’s `try_get_matches()` only on a parse error and drop the collected argument vector.",
+  "answer": "Done: parse() now returns any successful Cli::try_parse() and goes through the manual's try_get_matches() only on an error; the argument vector is gone. The rest of the growth is the verbatim_doc_comment attributes agent-help requires on every command and argument, and src/help.rs (topics, constants, tests)."
+}

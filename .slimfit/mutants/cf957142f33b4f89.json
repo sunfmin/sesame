@@ -1,0 +1,15 @@
+{
+  "tree": "4c43019c8989dd9bbfb2ed1bd9c8649a51b8780d+d1fba762150c532c",
+  "picker": "codex:01a20ce7-ab00-7641-a7db-5401b4acc4da:default",
+  "author": "claude-code:06da10df-ef30-5ebb-8a5e-481a1e11ef64:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/help.rs:43:5: replace answer -> Result<String, clap::Error> with Ok(String::new())",
+        "why": "The shown tests render help through `--help` or the manual directly, so they can pass even if `sesame help` prints nothing and accepts unknown topics.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  }
+}
