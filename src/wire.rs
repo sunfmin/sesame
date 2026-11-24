@@ -1,6 +1,6 @@
 //! A provider's wire rules: what the fields of a `Provider` mean in the
 //! requests sesame sends and the answers it reads. The authorization URL; a
-//! request to the token or device endpoint and the token in its answer (or
+//! request to the token or device endpoint and the device code or token in its answer (or
 //! why it refused); who signed in and which site a login reached; and the
 //! URL, body, headers and failure signs of an API call. Nothing here sends: oauth.rs
 //! and api.rs send what this builds and hand back what came, so each
@@ -227,6 +227,48 @@ pub fn code_refused(name: &str, p: &Provider, status: StatusCode, text: &str) ->
         ));
     }
     e
+}
+
+/// The device endpoint's answer (RFC 8628 §3.2): the code to poll with, the
+/// code the person enters, and where.
+#[derive(Debug, Deserialize)]
+pub struct DeviceCode {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    verification_uri_complete: Option<String>,
+    /// Seconds the codes last.
+    #[serde(default = "fifteen_minutes")]
+    pub expires_in: u64,
+    /// Seconds to wait between polls.
+    #[serde(default = "five_seconds")]
+    pub interval: u64,
+}
+
+fn fifteen_minutes() -> u64 {
+    900
+}
+
+fn five_seconds() -> u64 {
+    5
+}
+
+impl DeviceCode {
+    /// The page to open: the one with the code already filled in, when the
+    /// provider gives it.
+    pub fn page(&self) -> &str {
+        self.verification_uri_complete
+            .as_deref()
+            .unwrap_or(&self.verification_uri)
+    }
+}
+
+/// Reads the device endpoint's answer.
+pub fn device_code(status: StatusCode, text: &str) -> Result<DeviceCode, String> {
+    if !status.is_success() {
+        return Err(format!("device endpoint answered {status}: {text}"));
+    }
+    serde_json::from_str(text).map_err(|e| format!("device response: {e}: {text}"))
 }
 
 /// What a poll of the token endpoint with a device code says.
@@ -855,6 +897,41 @@ mod tests {
             let e = poll(bad, text).unwrap_err();
             assert!(e.contains(want), "{text}: {e}");
         }
+    }
+
+    #[test]
+    fn device_codes() {
+        let ok = StatusCode::OK;
+        let d = device_code(
+            ok,
+            r#"{"device_code":"dc","user_code":"WDJB-MJHT","verification_uri":"https://e.x/device","verification_uri_complete":"https://e.x/device?user_code=WDJB-MJHT","expires_in":600,"interval":2}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (d.device_code.as_str(), d.user_code.as_str()),
+            ("dc", "WDJB-MJHT")
+        );
+        assert_eq!((d.expires_in, d.interval), (600, 2));
+        // The page with the code filled in, when the provider gives one.
+        assert_eq!(d.page(), "https://e.x/device?user_code=WDJB-MJHT");
+
+        // GitHub gives no complete URI, so the page is where the code is typed.
+        let d = device_code(
+            ok,
+            r#"{"device_code":"dc","user_code":"U","verification_uri":"https://e.x/device"}"#,
+        )
+        .unwrap();
+        assert_eq!(d.page(), "https://e.x/device");
+        // RFC 8628 §3.2's defaults: 5s between polls, and 15 min to approve.
+        assert_eq!((d.expires_in, d.interval), (900, 5));
+
+        let e = device_code(StatusCode::BAD_REQUEST, "nope").unwrap_err();
+        assert_eq!(e, "device endpoint answered 400 Bad Request: nope");
+        let e = device_code(ok, r#"{"user_code":"U"}"#).unwrap_err();
+        assert!(
+            e.starts_with("device response: ") && e.ends_with(r#"{"user_code":"U"}"#),
+            "{e}"
+        );
     }
 
     #[test]
