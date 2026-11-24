@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 const CLIENT_ID: &str = "client_id";
 const CLIENT_SECRET: &str = "client_secret";
-const CLIENT_FIELDS: [&str; 2] = [CLIENT_ID, CLIENT_SECRET];
+pub const CLIENT_FIELDS: [&str; 2] = [CLIENT_ID, CLIENT_SECRET];
 const EXPIRES_AT: &str = "expires_at";
 const ACCESS_TOKEN: &str = "access_token";
 const REFRESH_TOKEN: &str = "refresh_token";
@@ -21,7 +21,7 @@ const RESOURCE_ID: &str = "resource_id";
 const RESOURCE_NAME: &str = "resource_name";
 const ACCOUNT: &str = "account";
 const PASTED: &str = "pasted";
-const TOKEN_FIELDS: [&str; 8] = [
+pub const TOKEN_FIELDS: [&str; 8] = [
     ACCESS_TOKEN,
     REFRESH_TOKEN,
     EXPIRES_AT,
@@ -82,14 +82,14 @@ pub fn definitions(k: &Kept) -> Result<BTreeMap<String, Fields>, String> {
 
 /// Replaces the client kept with `c`.
 pub fn put_client(k: &mut Kept, c: &Client) {
-    remove_client(k);
+    k.retain(|l, _| !CLIENT_FIELDS.contains(&l.as_str()));
     put(k, CLIENT_ID, false, Some(c.client_id.clone()));
     put(k, CLIENT_SECRET, true, c.client_secret.clone());
 }
 
 /// Replaces the token kept with `t`.
 pub fn put_token(k: &mut Kept, t: &Token) {
-    remove_token(k);
+    k.retain(|l, _| !TOKEN_FIELDS.contains(&l.as_str()));
     put(k, ACCESS_TOKEN, true, Some(t.access_token.clone()));
     put(k, REFRESH_TOKEN, true, t.refresh_token.clone());
     put(k, EXPIRES_AT, false, t.expires_at.map(|e| e.to_string()));
@@ -106,14 +106,6 @@ pub fn put_definition(k: &mut Kept, provider: &str, fields: &Fields) {
     k.remove(provider);
     let value = (!fields.is_empty()).then(|| Value::Object(fields.clone()).to_string());
     put(k, provider, false, value);
-}
-
-pub fn remove_client(k: &mut Kept) {
-    k.retain(|l, _| !CLIENT_FIELDS.contains(&l.as_str()));
-}
-
-pub fn remove_token(k: &mut Kept) {
-    k.retain(|l, _| !TOKEN_FIELDS.contains(&l.as_str()));
 }
 
 /// Keeps `value` under `label`: an empty value is no value.

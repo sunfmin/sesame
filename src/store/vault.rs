@@ -492,7 +492,7 @@ impl Vault {
 
     pub fn delete_client(&self, provider: &str) -> Result<bool, String> {
         let had = self.update(&title(provider), is_provider_field, |k| {
-            item::remove_client(k);
+            k.retain(|l, _| !item::CLIENT_FIELDS.contains(&l.as_str()));
         })?;
         Ok(item::client_of(&had).is_some())
     }
@@ -569,7 +569,7 @@ impl Vault {
 
     pub fn delete_token(&self, provider: &str) -> Result<(), String> {
         self.update(&title(provider), is_provider_field, |k| {
-            item::remove_token(k);
+            k.retain(|l, _| !item::TOKEN_FIELDS.contains(&l.as_str()));
         })
         .map(drop)
     }
