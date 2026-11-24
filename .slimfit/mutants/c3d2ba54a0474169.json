@@ -1,0 +1,15 @@
+{
+  "tree": "5ec79887a5e886654b840fa8a6bb247e747165cc+d1fba762150c532c",
+  "picker": "codex:01a20eb8-65b7-7492-9428-e67d10f25664:default",
+  "author": "claude-code:a50d1bd4-4802-570a-9158-afe6bfa0678a:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/wire.rs:297:17: replace match guard status.is_success() with true in device_poll",
+        "why": "A non-success response with a token-shaped body and no OAuth error could be accepted unless the tests exercise that combination.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  }
+}

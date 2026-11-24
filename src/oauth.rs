@@ -273,46 +273,24 @@ fn device_flow(
     scopes: &[String],
     open_browser: bool,
 ) -> Result<Token, String> {
-    #[derive(serde::Deserialize)]
-    struct DeviceCode {
-        device_code: String,
-        user_code: String,
-        verification_uri: String,
-        verification_uri_complete: Option<String>,
-        expires_in: Option<u64>,
-        interval: Option<u64>,
-    }
     let (status, text) = post(wire::token_request(p, Grant::Device(scopes), client)?)?;
-    if !status.is_success() {
-        return Err(format!("device endpoint answered {status}: {text}"));
-    }
-    let d: DeviceCode =
-        serde_json::from_str(&text).map_err(|e| format!("device response: {e}: {text}"))?;
+    let (d, expires_at, mut interval) = wire::device_code(status, now(), &text)?;
     eprintln!(
         "To sign in, open {} and enter the code:\n\n  {}\n",
         d.verification_uri, d.user_code
     );
     eprintln!("Waiting for you to approve access there.");
     if open_browser {
-        let page = d
-            .verification_uri_complete
-            .as_ref()
-            .unwrap_or(&d.verification_uri);
-        let _ = open::that_detached(page);
+        let _ = open::that_detached(d.page());
     }
 
-    let deadline = now() + d.expires_in.unwrap_or(900);
-    let mut interval = d.interval.unwrap_or(5);
     loop {
         std::thread::sleep(Duration::from_secs(interval));
         let poll = wire::token_request(p, Grant::DeviceCode(&d.device_code), client)?;
         let (status, text) = post(poll)?;
-        match wire::device_poll(p, status, &text, interval, now())? {
+        match wire::device_poll(p, status, &text, interval, now(), expires_at)? {
             Poll::Token(t) => return Ok(t),
             Poll::Again(next) => interval = next,
-        }
-        if now() + interval > deadline {
-            return Err("the code expired before access was approved; run login again".into());
         }
     }
 }

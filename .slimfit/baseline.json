@@ -1,13 +1,13 @@
 {
   "suites": {
     "rust": {
-      "prod_lines": 5639,
-      "test_lines": 5109,
+      "prod_lines": 5682,
+      "test_lines": 5092,
       "tests": 108,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3828,
-      "uncovered_lines": 158
+      "covered_lines": 3868,
+      "uncovered_lines": 161
     }
   },
   "loosened": [],
@@ -35,6 +35,20 @@
       "test": "sesame::bin/sesame::store::vault::tests::a_read_is_cached_once_per_lock_and_forgotten_when_the_lock_is_taken_again",
       "hash": "40bf25873ba669fe",
       "reason": "Asserts one get per lock and a fresh read on the next lock; no e2e test asserts call counts, and the in-memory seam can't fold into a process-level test"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::bin/sesame::store::vault::tests::kept_reads_only_sesames_top_level_fields",
+      "hash": "e011372def08d2a8",
+      "reason": "A pure check of kept()/fields() on a literal item, no machine; nothing in an_item_left_empty_is_archived asserts kept()'s filtering, and with no shared setup a merge saves nothing"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::release::cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium",
+      "kind": "slow-test",
+      "hash": "f5ea87f589891c8a",
+      "seconds": 0.9949999999999999,
+      "reason": "Runs the real packaging/release.sh cut four times (success, failed run, tag already on HEAD, tag on another commit) against stand-ins; profiled: no sleep or network, its time is the script's own ~30 process spawns per cut (pushing the tag to a bare origin ~60ms, ruby -c ~50ms, git/gh/cargo/lipo stand-ins ~10-20ms each), so a cheaper test would not run the real script"
     }
   ],
   "kept_files": [
@@ -55,10 +69,21 @@
       "reason": "providers.rs is the definition-in-force module: its interface is the Provider/Service/Target data types plus eight calls (all, find, find_handed, add, set, show, export, remove); behind them sit the layering of built-in definition and stored fields (effective), the reduction of stored fields to the person's own changes (own_changes), per-service merge and drop, the cross-provider namespace and fixed-port checks, and the one validation point (fields::check + Provider::check). ~200 of its 540 prod lines are the Provider type itself, whose field docs are the interface. Its 90-day churn is new Provider fields landing with each built-in (slack, figma, linear, hubspot, public client) and earlier deepenings that already moved logic out (wire.rs sesame#9, refresh sesame#8, config_dir and find_handed sesame#17). The field table (fields.rs) and the built-ins (built_in.rs) are its own submodules, used by callers only through it (guide.rs reads the table, tests read built_in). Tests drive effective, the private one-place validation seam, which is the module's internal seam, not a reach past it. Deletion test: deleting it spreads layering and validation across every command; splitting the type out would only move lines."
     }
   ],
+  "kept_spans": [
+    {
+      "suite": "rust",
+      "file": "src/oauth.rs",
+      "start": 284,
+      "end": 284,
+      "function": "device_flow",
+      "hash": "68ceac83c7e92eba",
+      "reason": "Only opens the person's real browser (open::that_detached on the host); which page it opens is decided by wire::DeviceCode::page, tested in wire::tests::device_codes. A fast test could only launch a browser, asserting nothing"
+    }
+  ],
   "measured": {
     "rust": {
-      "uncovered_lines": 158,
-      "test_seconds": 4.347
+      "uncovered_lines": 161,
+      "test_seconds": 4.37
     }
   }
 }
