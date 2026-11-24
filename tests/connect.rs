@@ -125,10 +125,13 @@ fn guide_lists_every_flag_and_help_points_to_it() {
     assert!(ok, "{err}");
     let (ok, help, _) = sesame(&dir, &["provider", "add", "--help"]);
     assert!(ok);
+    // Each argument is a line `- `--flag <VALUE>`: …`.
     let flags: Vec<&str> = help
-        .split_whitespace()
+        .lines()
+        .filter_map(|l| l.strip_prefix("- `"))
+        .filter_map(|l| l.split([' ', '`']).next())
         // `--drop-service` removes a service: it fills in no field.
-        .filter(|w| w.starts_with("--") && !["--help", "--drop-service"].contains(w))
+        .filter(|w| w.starts_with("--") && *w != "--drop-service")
         .collect();
     assert!(flags.len() > 15, "{help}");
     for flag in flags {
