@@ -1,13 +1,13 @@
 {
   "suites": {
     "rust": {
-      "prod_lines": 5633,
-      "test_lines": 5092,
-      "tests": 107,
+      "prod_lines": 5639,
+      "test_lines": 5109,
+      "tests": 108,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3817,
-      "uncovered_lines": 166
+      "covered_lines": 3828,
+      "uncovered_lines": 158
     }
   },
   "loosened": [],
@@ -35,12 +35,6 @@
       "test": "sesame::bin/sesame::store::vault::tests::a_read_is_cached_once_per_lock_and_forgotten_when_the_lock_is_taken_again",
       "hash": "40bf25873ba669fe",
       "reason": "Asserts one get per lock and a fresh read on the next lock; no e2e test asserts call counts, and the in-memory seam can't fold into a process-level test"
-    },
-    {
-      "suite": "rust",
-      "test": "sesame::bin/sesame::store::vault::tests::kept_reads_only_sesames_top_level_fields",
-      "hash": "e011372def08d2a8",
-      "reason": "A pure check of kept()/fields() on a literal item, no machine; nothing in an_item_left_empty_is_archived asserts kept()'s filtering, and with no shared setup a merge saves nothing"
     }
   ],
   "kept_files": [
@@ -63,8 +57,8 @@
   ],
   "measured": {
     "rust": {
-      "uncovered_lines": 167,
-      "test_seconds": 4.997
+      "uncovered_lines": 158,
+      "test_seconds": 4.347
     }
   }
 }

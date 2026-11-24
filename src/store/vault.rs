@@ -750,6 +750,20 @@ mod tests {
     }
 
     #[test]
+    fn a_value_sesame_cannot_read_is_an_error_naming_the_vault_item_and_field() {
+        let field = |label: &str, value: &str| json!({"id": label, "label": label, "type": "STRING", "value": value});
+        let mem = Memory::default();
+        mem.add(json!({"title": "sesame.x", "tags": [TAG],
+            "fields": [field("access_token", "a"), field("expires_at", "soon")]}));
+        let a = machine(&mem);
+        let e = a.locked(|| a.sync(None)).unwrap_err();
+        assert!(
+            e.starts_with("1Password vault `v`: sesame.x/expires_at: `soon`: "),
+            "{e}"
+        );
+    }
+
+    #[test]
     fn sync_rereads_only_items_whose_version_moved_plus_the_forced_one() {
         let mem = Memory::default();
         let a = machine(&mem);
