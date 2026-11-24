@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub use migrate::migrate;
-pub use vault::take_token;
+pub use vault::{VAULT_VAR, take_token};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Client {

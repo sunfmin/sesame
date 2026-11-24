@@ -81,42 +81,15 @@ impl Source {
     }
 }
 
-macro_rules! token_prefix {
-    () => {
-        "SESAME_TOKEN_"
-    };
-}
-macro_rules! providers_var {
-    () => {
-        "SESAME_PROVIDERS"
-    };
-}
-
-/// For `--help`: how to hand a token, and a definition sesame does not build in.
-pub const HELP: &str = concat!(
-    "Handed token: with `",
-    token_prefix!(),
-    "<NAME>` set, where <NAME> is the service's or provider's name in upper case \
-     with `-` as `_` (`",
-    token_prefix!(),
-    "GMAIL`, `",
-    token_prefix!(),
-    "GOOGLE`), `api` and `token` use that access token instead of sesame.db: \
-     nothing is read from or written to the db, and nothing is refreshed. The \
-     service's variable is used before its provider's. A provider that is not \
-     built in is defined by `",
-    providers_var!(),
-    "`, a JSON object of `sesame provider show` outputs by provider name \
-     (`{\"acme\": <sesame provider show acme>}`)."
-);
+/// The start of a handed token's variable; the rest is the service's or
+/// provider's name, in upper case with `-` as `_`.
+pub const TOKEN_PREFIX: &str = "SESAME_TOKEN_";
+/// The variable holding the handed definitions of providers not built in.
+pub const PROVIDERS_VAR: &str = "SESAME_PROVIDERS";
 
 /// The environment variable holding the handed token of a provider or service.
 pub fn var(name: &str) -> String {
-    format!(
-        "{}{}",
-        token_prefix!(),
-        name.to_uppercase().replace('-', "_")
-    )
+    format!("{TOKEN_PREFIX}{}", name.to_uppercase().replace('-', "_"))
 }
 
 pub struct Handed {
@@ -128,7 +101,7 @@ pub struct Handed {
 /// `name`'s target and the token handed for it, when one is: the service's
 /// variable, else its provider's. `None` when neither is set, and the db is used.
 fn handed(name: &str) -> Result<Option<(Target, Handed)>, String> {
-    if !std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with(token_prefix!())) {
+    if !std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with(TOKEN_PREFIX)) {
         return Ok(None);
     }
     let t = match providers::find_handed(definitions()?, name) {
@@ -163,10 +136,10 @@ fn handed(name: &str) -> Result<Option<(Target, Handed)>, String> {
 
 /// The definitions handed in `SESAME_PROVIDERS`, as fields by provider.
 fn definitions() -> Result<BTreeMap<String, Fields>, String> {
-    let Ok(text) = std::env::var(providers_var!()) else {
+    let Ok(text) = std::env::var(PROVIDERS_VAR) else {
         return Ok(BTreeMap::new());
     };
-    let err = |e: String| format!("{}: {e}", providers_var!());
+    let err = |e: String| format!("{PROVIDERS_VAR}: {e}");
     let all: BTreeMap<String, Fields> =
         serde_json::from_str(&text).map_err(|e| err(e.to_string()))?;
     all.into_iter()
