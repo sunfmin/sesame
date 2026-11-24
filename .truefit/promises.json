@@ -219,6 +219,12 @@
     "sentence": "when the copy is older than `COPY_LIFE` (1 h), so a provider whose token never expires (GitHub's, a pasted one) still sees another machine's change within the hour;",
     "source": "docs/adr/0002-1password-local-copy.md:62"
   },
+  "d23bf892b42e": {
+    "mark": "not",
+    "sentence": "`sesame --help` is the manual's index, `sesame <command> --help` one command, `sesame help <topic>` a topic, `sesame help all` the whole manual, all assembled by [agent-help](https://github.com/sunfmin/agent-cli) from Markdown written where each fact lives: a command's doc comment on its clap variant in `src/main.rs` (with `verbatim_doc_comment`, each paragraph on one line, its group in `next_help_heading`), a topic in `src/help/<topic>.md`, registered in `src/help.rs`. The provider fields' flags and their help come from the field table, `src/providers/fields.rs`; an environment variable's name or a number is placed by `{const:NAME}`, registered in `src/help.rs`, never written out.",
+    "source": "README.md:293",
+    "why": "contributor guide: where each piece of the manual's source is written (doc comments, topic files, field table, {const:}); a description of the build, not a behaviour a run of sesame could break"
+  },
   "e0adecc63d0e": {
     "mark": "promise",
     "sentence": "So a change made elsewhere reaches a machine within its token's life (an hour for Google), at most an hour.",
