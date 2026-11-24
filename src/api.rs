@@ -16,19 +16,22 @@ use std::process::ExitCode;
 #[derive(clap::Args)]
 pub struct Call {
     /// A provider, or a service of one (`gmail`), whose API base paths are under.
+    #[arg(verbatim_doc_comment)]
     provider: String,
     /// Path under the API base, or a full URL on one of the provider's hosts.
+    #[arg(verbatim_doc_comment)]
     path: String,
-    #[arg(short = 'X', long)]
+    /// The HTTP method: GET, or POST when `-d` is given.
+    #[arg(short = 'X', long, verbatim_doc_comment)]
     method: Option<String>,
-    /// Header `Name: value`; repeatable.
-    #[arg(short = 'H', long = "header")]
+    /// Header `Name: value`; repeatable. One the provider sends on every call (`--api-header`) is replaced by the one of that name.
+    #[arg(short = 'H', long = "header", verbatim_doc_comment)]
     headers: Vec<String>,
     /// Request body; `@file` reads a file, `@-` reads stdin. Implies POST.
-    #[arg(short = 'd', long)]
+    #[arg(short = 'd', long, verbatim_doc_comment)]
     data: Option<String>,
     /// Print the status line and response headers to stderr.
-    #[arg(short = 'i', long)]
+    #[arg(short = 'i', long, verbatim_doc_comment)]
     include: bool,
 }
 

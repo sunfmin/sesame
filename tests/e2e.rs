@@ -183,7 +183,7 @@ fn first_use_points_to_setup() {
     );
 
     let out = m.run(&["--help"]).text();
-    assert!(out.starts_with("If you are an AI"), "{out}");
+    assert!(out.contains("If you are an AI using sesame"), "{out}");
     assert!(out.contains("sesame setup <provider>"), "{out}");
     assert!(!out.contains("providers.toml"), "{out}");
 }

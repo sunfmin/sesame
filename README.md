@@ -287,3 +287,18 @@ the vault `sesame-scratch`):
 `(eval "$(mytokens env sesame-scratch)"; cargo build --example fake-op && truefit contract --real op)`.
 `tests/e2e.rs` runs the whole flow against a fake provider on
 127.0.0.1.
+
+### How help is written
+
+`sesame --help` is the manual's index, `sesame <command> --help` one command,
+`sesame help <topic>` a topic, `sesame help all` the whole manual, all
+assembled by [agent-help](https://github.com/sunfmin/agent-cli) from Markdown
+written where each fact lives: a command's doc comment on its clap variant in
+`src/main.rs` (with `verbatim_doc_comment`, each paragraph on one line, its
+group in `next_help_heading`), a topic in `src/help/<topic>.md`, registered in
+`src/help.rs`. The provider fields' flags and their help come from the field
+table, `src/providers/fields.rs`; an environment variable's name or a number
+is placed by `{const:NAME}`, registered in `src/help.rs`, never written out. A
+message points at a topic by its `REFERENCE`. `agent_help::check` runs as a
+test, and fails on a command without text or a link naming no topic.
+`skills/sesame/SKILL.md` sends an agent to `sesame --help`.
