@@ -3,7 +3,7 @@
     "rust": {
       "prod_lines": 5682,
       "test_lines": 5092,
-      "tests": 108,
+      "tests": 107,
       "failures": 0,
       "test_seconds": 3.081,
       "covered_lines": 3868,
@@ -47,7 +47,7 @@
       "test": "sesame::release::cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium",
       "kind": "slow-test",
       "hash": "f5ea87f589891c8a",
-      "seconds": 0.9949999999999999,
+      "seconds": 0.995,
       "reason": "Runs the real packaging/release.sh cut four times (success, failed run, tag already on HEAD, tag on another commit) against stand-ins; profiled: no sleep or network, its time is the script's own ~30 process spawns per cut (pushing the tag to a bare origin ~60ms, ruby -c ~50ms, git/gh/cargo/lipo stand-ins ~10-20ms each), so a cheaper test would not run the real script"
     }
   ],
@@ -83,7 +83,7 @@
   "measured": {
     "rust": {
       "uncovered_lines": 161,
-      "test_seconds": 4.37
+      "test_seconds": 4.186
     }
   }
 }
