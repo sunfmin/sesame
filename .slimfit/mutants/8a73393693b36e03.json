@@ -1,0 +1,39 @@
+{
+  "tree": "0fc8402ccb56eaf0a638ab71bad3d6c9796bef8d+9653464ae28040e7",
+  "picker": "codex:01a20eb4-9176-7b00-a930-4bc59034651b:default",
+  "author": "claude-code:9ffc7b8a-6a77-5aff-8bc3-c84adcd83c55:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store/vault.rs:314:9: replace Vault::bad_item -> String with String::new()",
+        "why": "A malformed expiry or definition would still return an error, so only a test that checks its diagnostic would catch the missing vault, item, and field context.",
+        "outcome": "killed",
+        "first_outcome": "survived"
+      },
+      {
+        "name": "src/store/vault/item.rs:68:52: replace == with != in token_of",
+        "why": "Tokens without a pasted field still read as false, so ordinary token round trips could pass while explicitly pasted tokens are misread.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:433:37: delete ! in Vault::update_locked",
+        "why": "Newly written values can still read back correctly even if the edit drops unrelated fields and leaves old managed fields in the template.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/item.rs:112:5: replace remove_client with ()",
+        "why": "Deleting a client can still report success, and replacing a client with another that has a secret can mask the failure to clear an omitted secret.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/item.rs:116:5: replace remove_token with ()",
+        "why": "A token replacement can update the access token while silently retaining old optional fields that the replacement omits.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  }
+}

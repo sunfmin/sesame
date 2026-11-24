@@ -4,8 +4,7 @@
 //!
 //! - `sesame.<provider>`: the provider's client and token, one item each, so
 //!   two machines writing different providers never overwrite each other.
-//!   Every value is a top-level field labelled as below (`op read
-//!   op://<vault>/sesame.<provider>/refresh_token`); secrets are concealed.
+//!   How its values lie in it is `item`'s.
 //! - `sesame-providers`: the person's provider fields, one text field per
 //!   provider holding them as JSON. One item, so every command reads all
 //!   definitions in one request.
@@ -22,12 +21,14 @@
 //! `op item list`, then a read of each item whose version moved) when a token
 //! must be refreshed, when it is older than `COPY_LIFE`, for `sesame
 //! providers`, and when there is none that opens.
+mod item;
 mod op;
 
 use super::sealed::Sealer;
 use super::sqlite::Sqlite;
 use super::{Client, Token};
 use crate::providers::Fields;
+use item::{Kept, is_provider_field, kept};
 use op::{Item, Op, OpCli, OpError};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -59,29 +60,6 @@ const COPY_TABLES: &str = "
     CREATE TABLE IF NOT EXISTS copy_synced (at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS unwritten_tokens (provider TEXT PRIMARY KEY);
 ";
-
-const CLIENT_ID: &str = "client_id";
-const CLIENT_SECRET: &str = "client_secret";
-const CLIENT_FIELDS: [&str; 2] = [CLIENT_ID, CLIENT_SECRET];
-const ACCESS_TOKEN: &str = "access_token";
-const REFRESH_TOKEN: &str = "refresh_token";
-const EXPIRES_AT: &str = "expires_at";
-const SCOPE: &str = "scope";
-const RESOURCE_ID: &str = "resource_id";
-const RESOURCE_NAME: &str = "resource_name";
-const ACCOUNT: &str = "account";
-const PASTED: &str = "pasted";
-const TOKEN_FIELDS: [&str; 8] = [
-    ACCESS_TOKEN,
-    REFRESH_TOKEN,
-    EXPIRES_AT,
-    SCOPE,
-    RESOURCE_ID,
-    RESOURCE_NAME,
-    ACCOUNT,
-    PASTED,
-];
-
 /// The service account token, taken out of the environment (`take_token`).
 static SERVICE_TOKEN: OnceLock<Option<String>> = OnceLock::new();
 
@@ -102,10 +80,6 @@ fn service_token() -> Option<String> {
 fn vault_name() -> Option<String> {
     std::env::var(VAULT_VAR).ok().filter(|v| !v.is_empty())
 }
-
-/// What sesame keeps in an item: field label → (concealed, value).
-type Kept = BTreeMap<String, (bool, String)>;
-
 pub struct Vault {
     name: String,
     /// What answers the vault's requests: `op`, or the tests' vault in memory.
@@ -292,7 +266,9 @@ impl Vault {
                 copy.delete_provider_fields(&provider)?;
             }
             if let Some(item) = item {
-                for (provider, fields) in self.definitions(&kept(&item.json, |_| true))? {
+                for (provider, fields) in item::definitions(&kept(&item.json, |_| true))
+                    .map_err(|e| self.bad_item(DEFINITIONS, &e))?
+                {
                     copy.save_provider_fields(&provider, &fields)?;
                 }
             }
@@ -305,10 +281,10 @@ impl Vault {
             }
             if let Some(item) = item {
                 let k = kept(&item.json, is_provider_field);
-                if let Some(c) = client_of(&k) {
+                if let Some(c) = item::client_of(&k) {
                     copy.save_client(provider, &c)?;
                 }
-                if let Some(t) = self.token_of(provider, &k)?
+                if let Some(t) = item::token_of(&k).map_err(|e| self.bad_item(title, &e))?
                     && !unwritten
                 {
                     copy.save_token(provider, &t)?;
@@ -331,6 +307,11 @@ impl Vault {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// What item `title` holds that sesame cannot read, `e` saying which field.
+    fn bad_item(&self, title: &str, e: &str) -> String {
+        format!("1Password vault `{}`: {title}/{e}", self.name)
     }
 
     fn failed(&self, what: &str, e: OpError) -> String {
@@ -410,7 +391,7 @@ impl Vault {
         let mut want = have.clone();
         let provider = title.strip_prefix("sesame.").unwrap_or_default();
         if let Some(t) = self.unwritten_token(&self.copy(), provider)? {
-            put_token(&mut want, &t);
+            item::put_token(&mut want, &t);
         }
         change(&mut want);
         let written = if want == have {
@@ -424,7 +405,7 @@ impl Vault {
                         "title": title,
                         "category": "SECURE_NOTE",
                         "tags": [TAG],
-                        "fields": fields(&want),
+                        "fields": item::fields(&want),
                     });
                     Some(
                         self.op
@@ -449,10 +430,10 @@ impl Vault {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter(|f| !is_ours(f, &ours))
+                        .filter(|f| !item::is_ours(f, &ours))
                         .cloned()
                         .collect();
-                    all.extend(fields(&want));
+                    all.extend(item::fields(&want));
                     let mut template = json!({ "title": title, "tags": tags, "fields": all });
                     if let Some(sections) = item.json.get("sections") {
                         template["sections"] = sections.clone();
@@ -500,10 +481,10 @@ impl Vault {
     ) -> Result<(), String> {
         self.update(&title(provider), is_provider_field, |k| {
             if let Some(c) = c {
-                put_client(k, c);
+                item::put_client(k, c);
             }
             if let Some(t) = t {
-                put_token(k, t);
+                item::put_token(k, t);
             }
         })
         .map(drop)
@@ -511,9 +492,9 @@ impl Vault {
 
     pub fn delete_client(&self, provider: &str) -> Result<bool, String> {
         let had = self.update(&title(provider), is_provider_field, |k| {
-            k.retain(|l, _| !CLIENT_FIELDS.contains(&l.as_str()));
+            k.retain(|l, _| !item::CLIENT_FIELDS.contains(&l.as_str()));
         })?;
-        Ok(had.contains_key(CLIENT_ID))
+        Ok(item::client_of(&had).is_some())
     }
 
     /// `provider`'s token after a sync that reads its item whatever its
@@ -588,7 +569,7 @@ impl Vault {
 
     pub fn delete_token(&self, provider: &str) -> Result<(), String> {
         self.update(&title(provider), is_provider_field, |k| {
-            k.retain(|l, _| !TOKEN_FIELDS.contains(&l.as_str()));
+            k.retain(|l, _| !item::TOKEN_FIELDS.contains(&l.as_str()));
         })
         .map(drop)
     }
@@ -609,10 +590,7 @@ impl Vault {
             |_| true,
             |k| {
                 for (provider, fields) in all {
-                    k.remove(provider);
-                    let value =
-                        (!fields.is_empty()).then(|| Value::Object(fields.clone()).to_string());
-                    put(k, provider, false, value);
+                    item::put_definition(k, provider, fields);
                 }
             },
         )
@@ -623,8 +601,8 @@ impl Vault {
     /// `save_client(c)`: an empty value is no value, so none without an id.
     pub fn as_kept_client(&self, c: &Client) -> Option<Client> {
         let mut k = Kept::new();
-        put_client(&mut k, c);
-        client_of(&k)
+        item::put_client(&mut k, c);
+        item::client_of(&k)
     }
 
     /// `t` as the vault keeps it, what `token` reads back after
@@ -632,52 +610,9 @@ impl Vault {
     /// access token.
     pub fn as_kept_token(&self, t: &Token) -> Option<Token> {
         let mut k = Kept::new();
-        put_token(&mut k, t);
+        item::put_token(&mut k, t);
         // What `put_token` wrote reads back: its expiry is a number.
-        self.token_of("", &k).ok().flatten()
-    }
-
-    /// The token kept in a provider's item, if it holds one.
-    fn token_of(&self, provider: &str, k: &Kept) -> Result<Option<Token>, String> {
-        let Some(access_token) = value(k, ACCESS_TOKEN) else {
-            return Ok(None);
-        };
-        let expires_at = value(k, EXPIRES_AT)
-            .map(|t| {
-                t.parse().map_err(|e| {
-                    format!(
-                        "1Password vault `{}`: {}/{EXPIRES_AT}: `{t}`: {e}",
-                        self.name,
-                        title(provider)
-                    )
-                })
-            })
-            .transpose()?;
-        Ok(Some(Token {
-            access_token,
-            refresh_token: value(k, REFRESH_TOKEN),
-            expires_at,
-            scope: value(k, SCOPE),
-            resource_id: value(k, RESOURCE_ID),
-            resource_name: value(k, RESOURCE_NAME),
-            account: value(k, ACCOUNT),
-            pasted: value(k, PASTED).is_some_and(|p| p == "true"),
-        }))
-    }
-
-    /// Every provider's fields kept in the definitions item.
-    fn definitions(&self, k: &Kept) -> Result<BTreeMap<String, Fields>, String> {
-        k.iter()
-            .map(|(provider, (_, v))| {
-                let fields = serde_json::from_str(v).map_err(|e| {
-                    format!(
-                        "1Password vault `{}`: {DEFINITIONS}/{provider}: {e}",
-                        self.name
-                    )
-                })?;
-                Ok((provider.clone(), fields))
-            })
-            .collect()
+        item::token_of(&k).ok().flatten()
     }
 }
 
@@ -720,80 +655,9 @@ fn is_ours_title(t: &str) -> bool {
     t == DEFINITIONS || t.starts_with("sesame.")
 }
 
-fn client_of(k: &Kept) -> Option<Client> {
-    value(k, CLIENT_ID).map(|client_id| Client {
-        client_id,
-        client_secret: value(k, CLIENT_SECRET),
-    })
-}
-
 /// The item holding a provider's client and token.
 fn title(provider: &str) -> String {
     format!("sesame.{provider}")
-}
-
-fn is_provider_field(label: &str) -> bool {
-    CLIENT_FIELDS.contains(&label) || TOKEN_FIELDS.contains(&label)
-}
-
-fn put_client(k: &mut Kept, c: &Client) {
-    k.retain(|l, _| !CLIENT_FIELDS.contains(&l.as_str()));
-    put(k, CLIENT_ID, false, Some(c.client_id.clone()));
-    put(k, CLIENT_SECRET, true, c.client_secret.clone());
-}
-
-fn put_token(k: &mut Kept, t: &Token) {
-    k.retain(|l, _| !TOKEN_FIELDS.contains(&l.as_str()));
-    put(k, ACCESS_TOKEN, true, Some(t.access_token.clone()));
-    put(k, REFRESH_TOKEN, true, t.refresh_token.clone());
-    put(k, EXPIRES_AT, false, t.expires_at.map(|e| e.to_string()));
-    put(k, SCOPE, false, t.scope.clone());
-    put(k, RESOURCE_ID, false, t.resource_id.clone());
-    put(k, RESOURCE_NAME, false, t.resource_name.clone());
-    put(k, ACCOUNT, false, t.account.clone());
-    put(k, PASTED, false, t.pasted.then(|| "true".into()));
-}
-
-/// Keeps `value` under `label`: an empty value is no value.
-fn put(k: &mut Kept, label: &str, concealed: bool, value: Option<String>) {
-    if let Some(v) = value.filter(|v| !v.is_empty()) {
-        k.insert(label.into(), (concealed, v));
-    }
-}
-
-fn value(k: &Kept, label: &str) -> Option<String> {
-    k.get(label).map(|(_, v)| v.clone())
-}
-
-/// Whether an item's field is one sesame keeps: top level (no section), not
-/// one of the item's own (the notes), labelled as `ours` says.
-fn is_ours(f: &Value, ours: impl Fn(&str) -> bool) -> bool {
-    let in_section = f["section"]["id"].as_str().is_some_and(|s| !s.is_empty());
-    let label = f["label"].as_str().unwrap_or_default();
-    !in_section && f.get("purpose").is_none_or(Value::is_null) && !label.is_empty() && ours(label)
-}
-
-fn kept(item: &Value, ours: impl Fn(&str) -> bool) -> Kept {
-    let mut k = Kept::new();
-    for f in item["fields"].as_array().into_iter().flatten() {
-        if is_ours(f, &ours) {
-            let label = f["label"].as_str().unwrap_or_default();
-            let value = f["value"].as_str().map(String::from);
-            put(&mut k, label, f["type"] == "CONCEALED", value);
-        }
-    }
-    k
-}
-
-/// The item template's fields for `k`; each field's id is its label, so
-/// `op://<vault>/<title>/<label>` reads it.
-fn fields(k: &Kept) -> Vec<Value> {
-    k.iter()
-        .map(|(label, (concealed, v))| {
-            let kind = if *concealed { "CONCEALED" } else { "STRING" };
-            json!({ "id": label, "label": label, "type": kind, "value": v })
-        })
-        .collect()
 }
 
 fn on_path(cmd: &str) -> bool {
@@ -883,6 +747,20 @@ mod tests {
 
     fn calls(mem: &Memory) -> Vec<String> {
         mem.take_calls()
+    }
+
+    #[test]
+    fn a_value_sesame_cannot_read_is_an_error_naming_the_vault_item_and_field() {
+        let field = |label: &str, value: &str| json!({"id": label, "label": label, "type": "STRING", "value": value});
+        let mem = Memory::default();
+        mem.add(json!({"title": "sesame.x", "tags": [TAG],
+            "fields": [field("access_token", "a"), field("expires_at", "soon")]}));
+        let a = machine(&mem);
+        let e = a.locked(|| a.sync(None)).unwrap_err();
+        assert!(
+            e.starts_with("1Password vault `v`: sesame.x/expires_at: `soon`: "),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1129,24 +1007,5 @@ mod tests {
         a.save_token("x", &token("t-2")).unwrap();
         assert_eq!(calls(&mem), [format!("get {x}"), format!("edit {x}")]);
         assert_eq!(a.token("x").unwrap(), Some(token("t-2")));
-    }
-
-    #[test]
-    fn kept_reads_only_sesames_top_level_fields() {
-        let item = json!({"id": "i", "fields": [
-            {"id": "notesPlain", "label": "notesPlain", "purpose": "NOTES", "type": "STRING", "value": "n"},
-            {"id": "access_token", "label": "access_token", "type": "CONCEALED", "value": "a"},
-            {"id": "x", "label": "access_token", "type": "STRING", "value": "s", "section": {"id": "other"}},
-            {"id": "mine", "label": "mine", "type": "STRING", "value": "m"},
-            {"id": "scope", "label": "scope", "type": "STRING", "value": ""},
-        ]});
-        let k = kept(&item, is_provider_field);
-        assert_eq!(
-            k,
-            BTreeMap::from([("access_token".into(), (true, "a".into()))])
-        );
-        // And the template keeps the labels as ids.
-        assert_eq!(fields(&k)[0]["id"], "access_token");
-        assert_eq!(fields(&k)[0]["type"], "CONCEALED");
     }
 }
