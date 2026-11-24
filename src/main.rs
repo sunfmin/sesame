@@ -250,23 +250,19 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parse without the manual when the line needs none; `--help`, `-h`,
-/// `help [<topic>]` and a line clap refuses go through the manual, so every
-/// help answer and usage error is its text.
+/// Parse without the manual when the line parses; `--help`, `-h` and a line
+/// clap refuses go through the manual, so every help answer and usage error
+/// is its text.
 fn parse() -> Cli {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    match Cli::try_parse_from(&args) {
-        Ok(cli) if !matches!(cli.cmd, Cmd::Help { .. }) => cli,
-        _ => {
-            let command = help::manual()
-                .clap()
-                .expect("checked by the_manual_is_whole");
-            command
-                .try_get_matches_from(&args)
-                .and_then(|m| Cli::from_arg_matches(&m))
-                .unwrap_or_else(|e| e.exit())
-        }
-    }
+    Cli::try_parse().unwrap_or_else(|_| {
+        let command = help::manual()
+            .clap()
+            .expect("checked by the_manual_is_whole");
+        command
+            .try_get_matches()
+            .and_then(|m| Cli::from_arg_matches(&m))
+            .unwrap_or_else(|e| e.exit())
+    })
 }
 
 fn run(cli: Cli) -> Result<ExitCode, String> {
