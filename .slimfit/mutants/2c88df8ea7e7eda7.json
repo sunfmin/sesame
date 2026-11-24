@@ -1,0 +1,38 @@
+{
+  "tree": "d08c9de000a23e9488f4335e8ee455501a6077db+d1a93d191a94c7d5",
+  "picker": "codex:01a20eb2-76d6-7da0-9e32-6a9fdaa6e53e:default",
+  "author": "claude-code:2385705a-d4dd-5f3e-ad4f-90ccf863d5d3:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/refresh.rs:53:64: replace > with >= in decide",
+        "why": "The merged test checks cached and forced refreshes without checking a token whose lifetime exactly equals the requested minimum.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:339:35: replace match guard e.contains(VAULT_VAR) with false in Vault::failed",
+        "why": "The assertions cover write refusal diagnostics, so suppressing the diagnostic branch for errors that mention the vault environment variable could go unnoticed.",
+        "outcome": "killed",
+        "first_outcome": "survived"
+      },
+      {
+        "name": "src/store/vault.rs:435:31: replace match guard want.is_empty() && kept(&item.json, |l| !ours(l)).is_empty() with false in Vault::update_locked",
+        "why": "The merged case writes a nonempty token, so it can pass even if an update that leaves an item empty fails to remove it.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:261:22: replace || with && in Vault::sync",
+        "why": "The refused edit now runs after three refreshes and a clean sync, so it may miss a first-refresh case where exactly one side of the sync condition is true.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  },
+  "removed_tests": {
+    "rust": [
+      "tests/e2e.rs:1870: a_sync_whose_write_is_refused_keeps_the_token"
+    ]
+  }
+}
