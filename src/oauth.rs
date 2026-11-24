@@ -274,7 +274,7 @@ fn device_flow(
     open_browser: bool,
 ) -> Result<Token, String> {
     let (status, text) = post(wire::token_request(p, Grant::Device(scopes), client)?)?;
-    let d = wire::device_code(status, &text)?;
+    let d = wire::device_code(status, now(), &text)?;
     eprintln!(
         "To sign in, open {} and enter the code:\n\n  {}\n",
         d.verification_uri, d.user_code
@@ -284,18 +284,14 @@ fn device_flow(
         let _ = open::that_detached(d.page());
     }
 
-    let deadline = now() + d.expires_in;
     let mut interval = d.interval;
     loop {
         std::thread::sleep(Duration::from_secs(interval));
         let poll = wire::token_request(p, Grant::DeviceCode(&d.device_code), client)?;
         let (status, text) = post(poll)?;
-        match wire::device_poll(p, status, &text, interval, now())? {
+        match wire::device_poll(p, status, &text, interval, now(), d.expires_at)? {
             Poll::Token(t) => return Ok(t),
             Poll::Again(next) => interval = next,
-        }
-        if now() + interval > deadline {
-            return Err("the code expired before access was approved; run login again".into());
         }
     }
 }

@@ -239,7 +239,10 @@ pub struct DeviceCode {
     verification_uri_complete: Option<String>,
     /// Seconds the codes last.
     #[serde(default = "fifteen_minutes")]
-    pub expires_in: u64,
+    expires_in: u64,
+    /// When the codes expire, in seconds since the epoch.
+    #[serde(skip)]
+    pub expires_at: u64,
     /// Seconds to wait between polls.
     #[serde(default = "five_seconds")]
     pub interval: u64,
@@ -263,13 +266,18 @@ impl DeviceCode {
     }
 }
 
-/// Reads the device endpoint's answer.
-pub fn device_code(status: StatusCode, text: &str) -> Result<DeviceCode, String> {
+/// Reads the device endpoint's answer, received at `now`.
+pub fn device_code(status: StatusCode, now: u64, text: &str) -> Result<DeviceCode, String> {
     if !status.is_success() {
         return Err(format!("device endpoint answered {status}: {text}"));
     }
-    serde_json::from_str(text).map_err(|e| format!("device response: {e}: {text}"))
+    let mut d: DeviceCode =
+        serde_json::from_str(text).map_err(|e| format!("device response: {e}: {text}"))?;
+    d.expires_at = now + d.expires_in;
+    Ok(d)
 }
+
+const EXPIRED: &str = "the code expired before access was approved; run login again";
 
 /// What a poll of the token endpoint with a device code says.
 #[derive(Debug, PartialEq)]
@@ -281,38 +289,41 @@ pub enum Poll {
 }
 
 /// Reads a device-code poll's answer (RFC 8628 §3.5), polled every `interval`
-/// seconds so far. A pending or slowed answer may come as a 400 or, as
-/// GitHub's does, as a 200.
+/// seconds so far, for codes that expire at `expires_at`. A pending or slowed
+/// answer may come as a 400 or, as GitHub's does, as a 200; one whose next
+/// wait would outlast the codes is the codes' expiry.
 pub fn device_poll(
     p: &Provider,
     status: StatusCode,
     text: &str,
     interval: u64,
     now: u64,
+    expires_at: u64,
 ) -> Result<Poll, String> {
     let v: Value = serde_json::from_str(text).unwrap_or_default();
-    match v.get("error").and_then(|e| e.as_str()) {
-        None if status.is_success() => token_from(p, text, None, now).map(Poll::Token),
-        None => Err(format!("token endpoint answered {status}: {text}")),
-        Some("authorization_pending") => Ok(Poll::Again(interval)),
+    let next = match v.get("error").and_then(|e| e.as_str()) {
+        None if status.is_success() => return token_from(p, text, None, now).map(Poll::Token),
+        None => return Err(format!("token endpoint answered {status}: {text}")),
+        Some("authorization_pending") => interval,
         // The provider may name the new interval (GitHub does); else 5s more.
-        Some("slow_down") => Ok(Poll::Again(
-            v.get("interval")
-                .and_then(|i| i.as_u64())
-                .unwrap_or(interval + 5),
-        )),
-        Some("expired_token" | "token_expired") => {
-            Err("the code expired before access was approved; run login again".into())
-        }
-        Some("access_denied") => Err("access was denied on the provider's page".into()),
+        Some("slow_down") => v
+            .get("interval")
+            .and_then(|i| i.as_u64())
+            .unwrap_or(interval + 5),
+        Some("expired_token" | "token_expired") => return Err(EXPIRED.into()),
+        Some("access_denied") => return Err("access was denied on the provider's page".into()),
         Some(e) => {
             let detail = v
                 .get("error_description")
                 .and_then(|d| d.as_str())
                 .unwrap_or_default();
-            Err(format!("provider refused: {e} {detail}"))
+            return Err(format!("provider refused: {e} {detail}"));
         }
+    };
+    if now + next > expires_at {
+        return Err(EXPIRED.into());
     }
+    Ok(Poll::Again(next))
 }
 
 /// The account in `identity_url`'s 2xx answer: its `identity_field`, a JSON
@@ -865,7 +876,7 @@ mod tests {
     #[test]
     fn device_poll_answers() {
         let p = built_in("github");
-        let poll = |status, text: &str| device_poll(&p, status, text, 5, NOW);
+        let poll = |status, text: &str| device_poll(&p, status, text, 5, NOW, NOW + 60);
         let (ok, bad) = (StatusCode::OK, StatusCode::BAD_REQUEST);
         assert_eq!(
             poll(bad, r#"{"error":"authorization_pending"}"#),
@@ -897,6 +908,14 @@ mod tests {
             let e = poll(bad, text).unwrap_err();
             assert!(e.contains(want), "{text}: {e}");
         }
+        // Another wait would outlast the code: give up rather than poll late.
+        let pending = r#"{"error":"authorization_pending"}"#;
+        assert_eq!(
+            device_poll(&p, bad, pending, 5, NOW, NOW + 5),
+            Ok(Poll::Again(5))
+        );
+        let e = device_poll(&p, bad, pending, 5, NOW, NOW + 4).unwrap_err();
+        assert!(e.contains("the code expired"), "{e}");
     }
 
     #[test]
@@ -904,6 +923,7 @@ mod tests {
         let ok = StatusCode::OK;
         let d = device_code(
             ok,
+            NOW,
             r#"{"device_code":"dc","user_code":"WDJB-MJHT","verification_uri":"https://e.x/device","verification_uri_complete":"https://e.x/device?user_code=WDJB-MJHT","expires_in":600,"interval":2}"#,
         )
         .unwrap();
@@ -911,23 +931,24 @@ mod tests {
             (d.device_code.as_str(), d.user_code.as_str()),
             ("dc", "WDJB-MJHT")
         );
-        assert_eq!((d.expires_in, d.interval), (600, 2));
+        assert_eq!((d.expires_at, d.interval), (NOW + 600, 2));
         // The page with the code filled in, when the provider gives one.
         assert_eq!(d.page(), "https://e.x/device?user_code=WDJB-MJHT");
 
         // GitHub gives no complete URI, so the page is where the code is typed.
         let d = device_code(
             ok,
+            NOW,
             r#"{"device_code":"dc","user_code":"U","verification_uri":"https://e.x/device"}"#,
         )
         .unwrap();
         assert_eq!(d.page(), "https://e.x/device");
         // RFC 8628 §3.2's defaults: 5s between polls, and 15 min to approve.
-        assert_eq!((d.expires_in, d.interval), (900, 5));
+        assert_eq!((d.expires_at, d.interval), (NOW + 900, 5));
 
-        let e = device_code(StatusCode::BAD_REQUEST, "nope").unwrap_err();
+        let e = device_code(StatusCode::BAD_REQUEST, NOW, "nope").unwrap_err();
         assert_eq!(e, "device endpoint answered 400 Bad Request: nope");
-        let e = device_code(ok, r#"{"user_code":"U"}"#).unwrap_err();
+        let e = device_code(ok, NOW, r#"{"user_code":"U"}"#).unwrap_err();
         assert!(
             e.starts_with("device response: ") && e.ends_with(r#"{"user_code":"U"}"#),
             "{e}"
