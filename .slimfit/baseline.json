@@ -3,7 +3,7 @@
     "rust": {
       "prod_lines": 5633,
       "test_lines": 5092,
-      "tests": 107,
+      "tests": 106,
       "failures": 0,
       "test_seconds": 3.081,
       "covered_lines": 3817,
@@ -64,7 +64,7 @@
   "measured": {
     "rust": {
       "uncovered_lines": 167,
-      "test_seconds": 4.997
+      "test_seconds": 4.452
     }
   }
 }
