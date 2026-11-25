@@ -1,13 +1,13 @@
 {
   "suites": {
     "rust": {
-      "prod_lines": 5682,
-      "test_lines": 5109,
-      "tests": 108,
+      "prod_lines": 5688,
+      "test_lines": 5180,
+      "tests": 111,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3873,
-      "uncovered_lines": 152
+      "covered_lines": 3882,
+      "uncovered_lines": 147
     }
   },
   "loosened": [],
@@ -35,14 +35,6 @@
       "test": "sesame::bin/sesame::store::vault::tests::a_read_is_cached_once_per_lock_and_forgotten_when_the_lock_is_taken_again",
       "hash": "40bf25873ba669fe",
       "reason": "Asserts one get per lock and a fresh read on the next lock; no e2e test asserts call counts, and the in-memory seam can't fold into a process-level test"
-    },
-    {
-      "suite": "rust",
-      "test": "sesame::release::cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium",
-      "kind": "slow-test",
-      "hash": "f5ea87f589891c8a",
-      "seconds": 0.995,
-      "reason": "Runs the real packaging/release.sh cut four times (success, failed run, tag already on HEAD, tag on another commit) against stand-ins; profiled: no sleep or network, its time is the script's own ~30 process spawns per cut (pushing the tag to a bare origin ~60ms, ruby -c ~50ms, git/gh/cargo/lipo stand-ins ~10-20ms each), so a cheaper test would not run the real script"
     },
     {
       "suite": "rust",
@@ -82,8 +74,8 @@
   ],
   "measured": {
     "rust": {
-      "uncovered_lines": 152,
-      "test_seconds": 4.32
+      "uncovered_lines": 147,
+      "test_seconds": 5.155
     }
   }
 }
