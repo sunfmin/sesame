@@ -49,7 +49,7 @@ fn config_dir() -> PathBuf {
 
 pub enum Store {
     Sqlite(sqlite::Sqlite),
-    Vault(vault::Vault),
+    Vault(Box<vault::Vault>),
 }
 
 impl Store {
@@ -69,7 +69,7 @@ impl Store {
 
     fn open_with(current: bool) -> Result<Store, String> {
         match vault::Vault::from_env(current)? {
-            Some(v) => Ok(Store::Vault(v)),
+            Some(v) => Ok(Store::Vault(Box::new(v))),
             None => sqlite::Sqlite::open().map(Store::Sqlite),
         }
     }
