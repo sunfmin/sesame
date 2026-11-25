@@ -1,13 +1,13 @@
 {
   "suites": {
     "rust": {
-      "prod_lines": 5688,
-      "test_lines": 5180,
-      "tests": 111,
+      "prod_lines": 5682,
+      "test_lines": 5163,
+      "tests": 110,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3882,
-      "uncovered_lines": 147
+      "covered_lines": 3873,
+      "uncovered_lines": 152
     }
   },
   "loosened": [],
@@ -41,6 +41,18 @@
       "test": "sesame::bin/sesame::store::vault::item::tests::kept_reads_only_sesames_top_level_fields",
       "hash": "e011372def08d2a8",
       "reason": "A pure check of kept()/fields() on a literal item, no machine; nothing in an_item_left_empty_is_archived asserts kept()'s filtering, and with no shared setup a merge saves nothing (moved from store::vault::tests with the item layout, sesame#47)"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::connect::export_rebuilds_the_definition_in_an_empty_database",
+      "hash": "24ee1872e20f15bb",
+      "reason": "No assertion maps: a_fixed_port_is_one_providers_only checks only redirect-port conflicts, never provider show/export or the shell round-trip; both add a provider named acme with different ports, so folding one into the other changes what it checks and a merged test would hide which behaviour failed"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::connect::discover_falls_back_to_openid_configuration",
+      "hash": "22d94adc2de0a935",
+      "reason": "No assertion maps: discover_reads_rfc_8414_metadata serves different metadata at /.well-known/oauth-authorization-server and never checks the openid-configuration fallback under a path, client_secret_post chosen over basic, a missing device URL, or a metadata URL read as given; a merge would only stack both bodies and hide which discovery path failed"
     }
   ],
   "kept_files": [
@@ -74,8 +86,8 @@
   ],
   "measured": {
     "rust": {
-      "uncovered_lines": 147,
-      "test_seconds": 5.155
+      "uncovered_lines": 152,
+      "test_seconds": 5.545
     }
   }
 }

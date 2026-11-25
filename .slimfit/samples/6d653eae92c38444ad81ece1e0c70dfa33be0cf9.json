@@ -1,0 +1,29 @@
+{
+  "tip": "6d653eae92c38444ad81ece1e0c70dfa33be0cf9",
+  "from": "d08c9de000a23e9488f4335e8ee455501a6077db",
+  "pool": 66,
+  "drawn": {
+    "rust": [
+      {
+        "name": "src/wire.rs:267:26: replace + with - in device_code",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/wire.rs:315:19: replace > with >= in device_poll",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:494:9: replace Vault::delete_client -> Result<bool, String> with Ok(false)",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/item.rs:147:5: replace fields -> Vec<Value> with vec![]",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/item.rs:125:66: delete ! in is_ours",
+        "outcome": "killed"
+      }
+    ]
+  }
+}
