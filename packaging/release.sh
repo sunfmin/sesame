@@ -15,7 +15,13 @@
 #   release.sh cut <vX.Y.Z>   build, push the tag to origin, run the tap's
 #                             release.yml on it and wait for that run, bounded
 #                             (RELEASE_WAIT_LIMIT seconds from the cut's start,
-#                             default 2400); publishes nothing from this host
+#                             default 2400; RELEASE_POLL seconds between
+#                             polls, default 5 for the run to appear, 15 for
+#                             it to end); a `gh` poll that fails is logged and
+#                             tried again on the next poll. A cut that ends
+#                             early cancels the run it dispatched before it
+#                             takes its tag away; publishes nothing from this
+#                             host
 #   release.sh check-tag <vX.Y.Z>  exit 0 if cut would take the version, 2 if not
 #   release.sh dry            what the gate runs: build at the development form
 #                             X.Y.Z+<commits>.g<commit>[.dirty], check the
@@ -118,14 +124,14 @@ FORMULA
 
 # push_tag <tag>: origin has <tag> on HEAD. factorium's own tag step tags
 # HEAD after the cut and fails on a tag origin already holds, so a tag this
-# cut pushed is taken away again when the cut ends, however it ends.
+# cut pushed is taken away again when the cut ends, however it ends (end_cut).
 push_tag() {
     head=$(git rev-parse HEAD)
     # An annotated tag's peeled line (^{}) comes after it: the last line is the commit.
     there=$(git ls-remote origin "refs/tags/$1" "refs/tags/$1^{}" | tail -n1 | cut -f1)
     if [ -z "$there" ]; then
         git push --quiet origin "$head:refs/tags/$1"
-        trap 'git push --quiet origin ":refs/tags/$tag"' EXIT
+        pushed=yes
     elif [ "$there" != "$head" ]; then
         echo "release: origin's $1 is on $there, not HEAD ($head)" >&2
         exit 1
@@ -138,6 +144,22 @@ latest_run() {
     gh run list -R "$TAP" --workflow release.yml --event workflow_dispatch --limit 50 \
         --json databaseId,displayTitle \
         --jq "[.[] | select(.displayTitle == \"sesame $1\") | .databaseId] | max // empty"
+}
+
+# end_cut, on the cut's exit: a run it dispatched that has not completed is
+# cancelled first, so no run is left building a tag that is gone; then the
+# tag it pushed is taken away.
+end_cut() {
+    if [ "$dispatched" = yes ] && [ "$ended" != yes ]; then
+        [ -n "$run" ] || run=$(latest_run "$tag") || run=
+        if [ -n "$run" ] && [ "$run" != "$before" ]; then
+            gh run cancel "$run" -R "$TAP" >/dev/null ||
+                echo "release: could not cancel run $run: gh run cancel $run -R $TAP" >&2
+        else
+            echo "release: no release.yml run of sesame $tag in $TAP found to cancel" >&2
+        fi
+    fi
+    [ "$pushed" != yes ] || git push --quiet origin ":refs/tags/$tag"
 }
 
 case "${1:-}" in
@@ -175,29 +197,41 @@ check_tag "$2"
 tag=$2
 started=$(date +%s)
 limit=${RELEASE_WAIT_LIMIT:-2400}
+pushed= dispatched= ended= run= before=
+trap end_cut EXIT
 
 # Built here first: a tag goes out only on a commit that builds at its version.
 build "${tag#v}" "$DIST"
 before=$(latest_run "$tag")
 push_tag "$tag"
 gh workflow run release.yml -R "$TAP" -f repo=sesame -f "tag=$tag"
+dispatched=yes
 
-run=
 while :; do
-    run=$(latest_run "$tag")
-    [ -n "$run" ] && [ "$run" != "$before" ] && break
+    found=$(latest_run "$tag") || {
+        echo "release: gh run list failed; trying again" >&2
+        found=
+    }
+    [ -n "$found" ] && [ "$found" != "$before" ] && run=$found && break
     [ $(($(date +%s) - started)) -lt "$limit" ] || {
         echo "release: no release.yml run of sesame $tag in $TAP after ${limit}s" >&2
         exit 1
     }
-    sleep 5
+    sleep "${RELEASE_POLL:-5}"
 done
 echo "release: waiting for https://github.com/$TAP/actions/runs/$run"
 while :; do
-    state=$(gh run view "$run" -R "$TAP" --json status,conclusion --jq '.status + " " + .conclusion')
+    state=$(gh run view "$run" -R "$TAP" --json status,conclusion --jq '.status + " " + .conclusion') || {
+        echo "release: gh run view $run failed; trying again" >&2
+        state=
+    }
     case "$state" in
-    "completed success") break ;;
+    "completed success")
+        ended=yes
+        break
+        ;;
     completed*)
+        ended=yes
         echo "release: run $run of sesame $tag ended '$state'" >&2
         gh run view "$run" -R "$TAP" --log-failed >&2 || true
         exit 1
@@ -207,6 +241,6 @@ while :; do
         echo "release: run $run of sesame $tag still '$state' after ${limit}s: gh run view $run -R $TAP" >&2
         exit 1
     }
-    sleep 15
+    sleep "${RELEASE_POLL:-15}"
 done
 echo "release: sesame $tag is published ($(($(date +%s) - started))s)"
