@@ -52,7 +52,9 @@ fn check_tag_takes_only_a_version_tag() {
 
 /// A repo holding release.sh, with origin a bare repo, and fakes ahead on
 /// PATH: `gh workflow run` makes run <n+1>, which `gh run view` reports as
-/// the cut's RUN_ENDS.
+/// the cut's RUN_ENDS. After the dispatch, the first LIST_FAILS `gh run list`
+/// and the first VIEW_FAILS `gh run view` fail with HTTP 500; `gh run cancel`
+/// is recorded with the tag origin holds when it is called.
 struct Cut {
     dir: PathBuf,
     repo: PathBuf,
@@ -60,8 +62,8 @@ struct Cut {
 }
 
 impl Cut {
-    fn new() -> Cut {
-        let dir = tmp("cut");
+    fn new(name: &str) -> Cut {
+        let dir = tmp(name);
         let (bin, repo, origin) = (dir.join("bin"), dir.join("repo"), dir.join("origin.git"));
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(repo.join("packaging")).unwrap();
@@ -86,10 +88,14 @@ impl Cut {
         );
         script(
             &bin.join("gh"),
-            "#!/bin/sh\ns=$FAKE_GH\ncase \"$1 $2\" in\n\
+            "#!/bin/sh\ns=$FAKE_GH\n\
+             fail() { c=$(( $(cat $s.$1 2>/dev/null || echo 0) + 1 )); echo $c >$s.$1;\n\
+             [ $c -gt \"$2\" ] || { echo 'failed: HTTP 500' >&2; exit 1; }; }\n\
+             case \"$1 $2\" in\n\
              \"workflow run\") echo \"$*\" >>$s.calls; echo $(( $(cat $s.n) + 1 )) >$s.n ;;\n\
-             \"run list\") n=$(cat $s.n); [ \"$n\" = 0 ] || echo \"$n\" ;;\n\
-             \"run view\") case \"$*\" in *--log-failed*) echo \"the run's failed log\" ;; *) echo \"$RUN_ENDS\" ;; esac ;;\n\
+             \"run list\") n=$(cat $s.n); [ \"$n\" = 0 ] || { fail list \"${LIST_FAILS:-0}\"; echo \"$n\"; } ;;\n\
+             \"run view\") case \"$*\" in *--log-failed*) echo \"the run's failed log\" ;; *) fail view \"${VIEW_FAILS:-0}\"; echo \"$RUN_ENDS\" ;; esac ;;\n\
+             \"run cancel\") echo \"run cancel $3 tag=$(git --git-dir=\"${s%/gh}/origin.git\" tag --list v1.2.3)\" >>$s.calls ;;\n\
              esac\n",
         );
         // ADR 0003: only the tap signs. A cut that reached for a signing
@@ -130,7 +136,7 @@ impl Cut {
         Cut { dir, repo, origin }
     }
 
-    fn run(&self, ends: &str) -> Output {
+    fn run(&self, ends: &str, env: &[(&str, &str)]) -> Output {
         let path = format!(
             "{}:{}",
             self.dir.join("bin").display(),
@@ -148,6 +154,7 @@ impl Cut {
             .env("FAKE_GH", self.dir.join("gh"))
             .env("RELEASE_WAIT_LIMIT", "20")
             .env("RUN_ENDS", ends)
+            .envs(env.iter().copied())
             .output()
             .unwrap()
     }
@@ -159,8 +166,8 @@ impl Cut {
 
 #[test]
 fn cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium() {
-    let cut = Cut::new();
-    let out = cut.run("completed success");
+    let cut = Cut::new("cut");
+    let out = cut.run("completed success", &[]);
     assert!(out.status.success(), "{out:?}");
     let calls = std::fs::read_to_string(cut.dir.join("gh.calls")).unwrap();
     assert_eq!(
@@ -193,7 +200,7 @@ fn cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to
         "factorium's tag step would fail"
     );
 
-    let out = cut.run("completed failure");
+    let out = cut.run("completed failure", &[]);
     assert!(!out.status.success(), "a run that fails passes the cut");
     assert!(String::from_utf8_lossy(&out.stderr).contains("the run's failed log"));
     assert_eq!(
@@ -206,7 +213,7 @@ fn cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to
     // HEAD and leaves it; on another commit, it fails.
     let head = git(&cut.repo, &["rev-parse", "HEAD"]);
     git(&cut.origin, &["tag", "v1.2.3", &head]);
-    assert!(cut.run("completed success").status.success());
+    assert!(cut.run("completed success", &[]).status.success());
     assert_eq!(
         cut.tagged(),
         "v1.2.3",
@@ -226,8 +233,59 @@ fn cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to
             "two",
         ],
     );
-    let out = cut.run("completed success");
+    let out = cut.run("completed success", &[]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not HEAD"));
+    std::fs::remove_dir_all(&cut.dir).unwrap();
+}
+
+#[test]
+fn a_cut_polls_again_after_gh_fails() {
+    let cut = Cut::new("retry");
+    let out = cut.run(
+        "completed success",
+        &[
+            ("LIST_FAILS", "1"),
+            ("VIEW_FAILS", "2"),
+            ("RELEASE_POLL", "0"),
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("gh run list failed; trying again"),
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("gh run view 1 failed; trying again").count(),
+        2,
+        "{stderr}"
+    );
+    let calls = std::fs::read_to_string(cut.dir.join("gh.calls")).unwrap();
+    assert!(!calls.contains("run cancel"), "{calls}");
+    assert_eq!(cut.tagged(), "");
+    std::fs::remove_dir_all(&cut.dir).unwrap();
+}
+
+#[test]
+fn a_cut_past_its_limit_cancels_its_run_then_takes_its_tag_away() {
+    let cut = Cut::new("limit");
+    let out = cut.run(
+        "queued ",
+        &[("RELEASE_WAIT_LIMIT", "1"), ("RELEASE_POLL", "1")],
+    );
+    assert!(!out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("still 'queued '"));
+    let calls = std::fs::read_to_string(cut.dir.join("gh.calls")).unwrap();
+    assert_eq!(
+        calls.lines().last(),
+        Some("run cancel 1 tag=v1.2.3"),
+        "the run is cancelled while its tag is still on origin: {calls}"
+    );
+    assert_eq!(
+        cut.tagged(),
+        "",
+        "the tag of a failed cut is still on origin"
+    );
     std::fs::remove_dir_all(&cut.dir).unwrap();
 }
