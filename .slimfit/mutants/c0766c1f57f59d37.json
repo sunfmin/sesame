@@ -1,0 +1,33 @@
+{
+  "tree": "65150a83b2e76e0bc6d563becbd85a72315960aa+d1fba762150c532c",
+  "picker": "codex:01a21404-4109-7350-8c93-327cdc070d51:default",
+  "author": "claude-code:9fb34165-cf7b-51f7-8012-f9221ff29d8c:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store/vault.rs:85:9: replace Vault::from_env -> Result<Option<Vault>, String> with Ok(None)",
+        "why": "Tests that construct a vault with Vault::new can pass even if store selection always falls back to SQLite.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/copy.rs:103:9: replace LocalCopy::mark_synced -> Result<(), String> with Ok(())",
+        "why": "Sync can save all the expected rows while losing the timestamp that lets the next process skip a redundant vault listing.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/copy.rs:145:16: delete ! in LocalCopy::apply",
+        "why": "When a remote item drops its token, the inverted guard can leave the old token cached while ordinary token updates still overwrite it.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/copy.rs:143:64: replace == with != in LocalCopy::apply",
+        "why": "A sync with an unwritten token for one provider can misclassify another provider's token as unwritten and skip applying its remote update.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  }
+}

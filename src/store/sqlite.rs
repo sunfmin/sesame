@@ -152,7 +152,8 @@ impl Sqlite {
         })
     }
 
-    fn err(&self, e: rusqlite::Error) -> String {
+    /// `e`, named for this database, for a caller's own tables too.
+    pub fn err(&self, e: rusqlite::Error) -> String {
         format!("{}: {e}", self.path.display())
     }
 
