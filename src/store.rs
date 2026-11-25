@@ -10,6 +10,7 @@ mod vault;
 
 use crate::providers::Fields;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub use migrate::migrate;
@@ -38,13 +39,20 @@ pub struct Token {
 
 /// Where the store keeps its files: `$SESAME_CONFIG_DIR`, else `~/.config/sesame`.
 fn config_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("SESAME_CONFIG_DIR") {
-        return PathBuf::from(d);
+    config_dir_in(
+        std::env::var_os("SESAME_CONFIG_DIR"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// `config_dir`, given `$SESAME_CONFIG_DIR` (`named`) and `$HOME`.
+fn config_dir_in(named: Option<OsString>, home: Option<OsString>) -> PathBuf {
+    match named {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(home.unwrap_or_default())
+            .join(".config")
+            .join("sesame"),
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    home.join(".config").join("sesame")
 }
 
 pub enum Store {
@@ -182,5 +190,24 @@ impl Store {
             Store::Sqlite(s) => s.delete_provider_fields(provider),
             Store::Vault(v) => v.save_provider_fields(provider, &Fields::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config_dir_in;
+    use std::path::PathBuf;
+
+    #[test]
+    fn config_dir_is_the_named_dir_else_dot_config_sesame_under_home() {
+        assert_eq!(
+            config_dir_in(Some("/named".into()), Some("/home/p".into())),
+            PathBuf::from("/named")
+        );
+        assert_eq!(
+            config_dir_in(None, Some("/home/p".into())),
+            PathBuf::from("/home/p/.config/sesame")
+        );
+        assert_eq!(config_dir_in(None, None), PathBuf::from(".config/sesame"));
     }
 }

@@ -1,0 +1,15 @@
+{
+  "tree": "62c4077bcf1baa63450752816bb0da0f497e5729+d1fba762150c532c",
+  "picker": "codex:01a21400-8c87-7480-b12d-a09231f67126:default",
+  "author": "claude-code:cd02df9e-736c-56cf-8cd7-f2f4e85e9bec:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store.rs:42:5: replace config_dir -> PathBuf with Default::default()",
+        "why": "The added test calls config_dir_in directly and would still pass if config_dir ignored both environment variables and returned an empty path.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  }
+}
