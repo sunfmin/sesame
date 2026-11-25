@@ -44,7 +44,7 @@ impl LocalCopy {
     /// damaged, is dropped, and the next sync fills its successor.
     pub fn load(vault: &str, token: &str, dir: PathBuf) -> Result<(LocalCopy, bool), String> {
         let sealer = Sealer::new(token, &format!("sesame's copy of 1Password vault {vault}"));
-        let (rows, opened) = read(&sealer, &dir)?;
+        let (rows, opened) = read(vault, &sealer, &dir)?;
         let copy = LocalCopy {
             rows,
             sealer,
@@ -60,7 +60,7 @@ impl LocalCopy {
     pub fn lock(&mut self) -> Result<std::fs::File, String> {
         let file = lock_file(&self.dir)?;
         file.lock().map_err(|e| format!("locking: {e}"))?;
-        self.rows = read(&self.sealer, &self.dir)?.0;
+        self.rows = read(&self.vault, &self.sealer, &self.dir)?.0;
         Ok(file)
     }
 
@@ -89,10 +89,6 @@ impl LocalCopy {
         &self.rows
     }
 
-    fn err(&self, e: rusqlite::Error) -> String {
-        format!("sesame's copy of 1Password vault `{}`: {e}", self.vault)
-    }
-
     /// When the copy last synced, if it ever did.
     pub fn synced_at(&self) -> Result<Option<u64>, String> {
         self.rows
@@ -100,7 +96,7 @@ impl LocalCopy {
             .query_row("SELECT at FROM copy_synced", [], |r| r.get::<_, i64>(0))
             .optional()
             .map(|t| t.map(|t| t as u64))
-            .map_err(|e| self.err(e))
+            .map_err(|e| self.rows.err(e))
     }
 
     pub fn mark_synced(&self, at: u64) -> Result<(), String> {
@@ -108,7 +104,7 @@ impl LocalCopy {
         conn.execute_batch("DELETE FROM copy_synced")
             .and_then(|_| conn.execute("INSERT INTO copy_synced (at) VALUES (?1)", [at as i64]))
             .map(drop)
-            .map_err(|e| self.err(e))
+            .map_err(|e| self.rows.err(e))
     }
 
     /// Each item the copy holds rows of: title → (id, version).
@@ -117,13 +113,13 @@ impl LocalCopy {
             .rows
             .conn()
             .prepare("SELECT title, id, version FROM vault_items")
-            .map_err(|e| self.err(e))?;
+            .map_err(|e| self.rows.err(e))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok((r.get(0)?, (r.get(1)?, r.get::<_, i64>(2)? as u64)))
             })
-            .map_err(|e| self.err(e))?;
-        rows.collect::<Result<_, _>>().map_err(|e| self.err(e))
+            .map_err(|e| self.rows.err(e))?;
+        rows.collect::<Result<_, _>>().map_err(|e| self.rows.err(e))
     }
 
     /// Makes the rows of item `title` what `item` holds (none: the item is
@@ -172,7 +168,7 @@ impl LocalCopy {
             None => conn.execute("DELETE FROM vault_items WHERE title = ?1", [title]),
         }
         .map(drop)
-        .map_err(|e| self.err(e))
+        .map_err(|e| self.rows.err(e))
     }
 
     /// The providers whose token in the copy the vault does not hold yet.
@@ -181,9 +177,11 @@ impl LocalCopy {
             .rows
             .conn()
             .prepare("SELECT provider FROM unwritten_tokens")
-            .map_err(|e| self.err(e))?;
-        let rows = stmt.query_map([], |r| r.get(0)).map_err(|e| self.err(e))?;
-        rows.collect::<Result<_, _>>().map_err(|e| self.err(e))
+            .map_err(|e| self.rows.err(e))?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| self.rows.err(e))?;
+        rows.collect::<Result<_, _>>().map_err(|e| self.rows.err(e))
     }
 
     /// `provider`'s token in the copy, if the vault does not hold it yet.
@@ -210,27 +208,29 @@ impl LocalCopy {
             .conn()
             .execute(sql, [provider])
             .map(drop)
-            .map_err(|e| self.err(e))
+            .map_err(|e| self.rows.err(e))
     }
 }
 
-/// The copy on disk if it opens under this sealer (and whether it did),
-/// else an empty one.
-fn read(sealer: &Sealer, dir: &Path) -> Result<(Sqlite, bool), String> {
+/// Vault `vault`'s copy on disk if it opens under this sealer (and whether
+/// it did), else an empty one.
+fn read(vault: &str, sealer: &Sealer, dir: &Path) -> Result<(Sqlite, bool), String> {
     let image = std::fs::read(copy_path(dir))
         .ok()
         .and_then(|b| sealer.open(&b));
-    if let Some(copy) = image.and_then(|i| open_rows(Some(&i)).ok()) {
+    if let Some(copy) = image.and_then(|i| open_rows(vault, Some(&i)).ok()) {
         return Ok((copy, true));
     }
-    Ok((open_rows(None)?, false))
+    Ok((open_rows(vault, None)?, false))
 }
 
-fn open_rows(image: Option<&[u8]>) -> Result<Sqlite, String> {
-    let copy = Sqlite::in_memory("sesame's copy of the 1Password vault", image)?;
+/// Errors name the copy's vault.
+fn open_rows(vault: &str, image: Option<&[u8]>) -> Result<Sqlite, String> {
+    let name = format!("sesame's copy of 1Password vault `{vault}`");
+    let copy = Sqlite::in_memory(&name, image)?;
     copy.conn()
         .execute_batch(COPY_TABLES)
-        .map_err(|e| format!("sesame's copy of the 1Password vault: {e}"))?;
+        .map_err(|e| copy.err(e))?;
     Ok(copy)
 }
 
