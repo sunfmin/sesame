@@ -44,6 +44,15 @@
     },
     {
       "suite": "rust",
+      "test": "sesame::release::cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium",
+      "kind": "slow-test",
+      "hash": "08afdca8be1ffca0",
+      "seconds": 0.694,
+      "suite_seconds": 4.91,
+      "reason": "Its time is four real runs of packaging/release.sh cut (sh, real git ls-remote/push/rev-parse against a bare origin, ruby -c on the formula, ~93 commands and 0.73s wall per cut, no sleep reached), each checking a different end: success (formula, one dispatch, no signing, tag taken away), a failed run (log shown, tag taken away), a tag already on HEAD (left), a tag on another commit (refused). Faking git or ruby, or dropping a cut, would test less."
+    },
+    {
+      "suite": "rust",
       "test": "sesame::connect::export_rebuilds_the_definition_in_an_empty_database",
       "hash": "24ee1872e20f15bb",
       "reason": "No assertion maps: a_fixed_port_is_one_providers_only checks only redirect-port conflicts, never provider show/export or the shell round-trip; both add a provider named acme with different ports, so folding one into the other changes what it checks and a merged test would hide which behaviour failed"
