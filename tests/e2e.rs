@@ -492,6 +492,63 @@ fn https_paste_login_and_pasted_token() {
     );
 }
 
+/// The loopback redirect waits for this login's: a `/callback` with another
+/// state gets a 400 and the listener goes on; a silent connection is dropped;
+/// a provider's `error=` redirect is not shown as signed in.
+#[test]
+fn loopback_waits_for_its_own_redirect() {
+    let fake = FakeProvider::serve(|r| match r.target.as_str() {
+        "/token" => ("200 OK", r#"{"access_token":"tok-1"}"#.into()),
+        _ => ("404 Not Found", "{}".into()),
+    });
+    let m = Machine::new("loopback");
+    fake.add(&m, "hub", "", &[]);
+    assert!(
+        m.run(&["client", "hub", "--client-id", "cid", "--no-secret"])
+            .ok
+    );
+    let login = ["login", "hub", "--no-browser"];
+    let get = |u: &str| {
+        let r = reqwest::blocking::get(u).unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    };
+
+    // A stray /callback with another state, then the real redirect.
+    let mut stray = (0, String::new());
+    let out = m.login_landing(&login, |landed, _stdin| {
+        let (head, _) = landed.split_once("state=").unwrap();
+        stray = get(&format!("{head}state=stale"));
+        let (status, body) = get(&landed);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("Signed in"), "{body}");
+    });
+    assert!(out.ok, "{out}");
+    assert_eq!(stray.0, 400, "{}", stray.1);
+    assert!(!stray.1.contains("Signed in"), "{}", stray.1);
+    assert_eq!(m.run(&["token", "hub"]).text().trim(), "tok-1");
+
+    // A connection that sends nothing, then the real redirect.
+    let out = m.login_landing(&login, |landed, _stdin| {
+        let addr = url::Url::parse(&landed).unwrap();
+        let port = addr.port().unwrap();
+        let _silent = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (status, body) = get(&landed);
+        assert!(status == 200 && body.contains("Signed in"), "{body}");
+    });
+    assert!(out.ok, "{out}");
+
+    // The provider refused: the browser is told so, not "Signed in".
+    let mut page = (0, String::new());
+    let out = m.login_landing(&login, |landed, _stdin| {
+        let (head, _) = landed.split_once("code=").unwrap();
+        let state = param(&url::Url::parse(&landed).unwrap(), "state").unwrap();
+        page = get(&format!("{head}error=access_denied&state={state}"));
+    });
+    assert!(!out.ok && out.stderr.contains("provider refused"), "{out}");
+    assert!(!page.1.contains("Signed in"), "{}", page.1);
+    assert!(page.1.contains("refused"), "{}", page.1);
+}
+
 /// Two services of one provider: each login adds the service's scopes to those
 /// granted, on one shared token; `api <service>` uses the service's base; a 403
 /// for a missing scope names the login that adds it; names are one namespace.
