@@ -24,6 +24,8 @@ version = ["op", "--version"]
 compare = ["exit", "stdout"]
 normalise = [
     { pattern = '\[ERROR\] \d{4}/\d\d/\d\d \d\d:\d\d:\d\d', replace = "[ERROR] <date> <time>" },
+    # The run in the contract's item titles (tests/contract/scenario.sh);
+    # their tag is the fixed `sesame-contract`.
     { pattern = 'run\d+x\d+', replace = "run<n>" },
 ]
 # An edit whose item is gone: sesame's write of a token the provider has
@@ -89,6 +91,8 @@ version = ["op", "--version"]
 compare = ["exit", "stdout"]
 normalise = [
     { pattern = '\[ERROR\] \d{4}/\d\d/\d\d \d\d:\d\d:\d\d', replace = "[ERROR] <date> <time>" },
+    # The run in the contract's item titles (tests/contract/scenario.sh);
+    # their tag is the fixed `sesame-contract`.
     { pattern = 'run\d+x\d+', replace = "run<n>" },
 ]
 

@@ -5,10 +5,28 @@
 # Usage: <wrapper> <scenario>. Needs jq.
 set -u
 . "$root/tests/contract/vault.sh"
-# Titles and tags unique to this run, so leftovers of another run (a vault
-# keeps what a cut-short run made) never answer for this one. Normalised away.
+# Every item the contract makes carries the one tag `sesame-contract` (a tag
+# is an entry in 1Password's sidebar, so never one per run) and a title
+# unique to this run, `sesame-contract.<case>.$run`, so leftovers of another
+# run never answer for this one. The run is normalised away (truefit.toml).
 run="run$$x$(date +%s)"
-tag="sesame-contract-$run"
+tag="sesame-contract"
+
+# On exit, archives what this run made and still active, and what a run cut
+# short (killed) left over an hour ago, so the vault keeps none of them.
+# Silent: it changes neither the case's stdout nor its exit code.
+sweep() {
+    "$OP" item list --vault "$vault" --tags "$tag" --format json </dev/null 2>/dev/null |
+        jq -r --arg run "$run" --argjson now "$(date +%s)" '.[]?
+            | select((.title // "" | endswith("." + $run))
+                     or ((try (.created_at[0:19] + "Z" | fromdateiso8601) catch $now) < $now - 3600))
+            | .id' 2>/dev/null |
+        while read -r stale; do
+            "$OP" item delete "$stale" --vault "$vault" --archive </dev/null >/dev/null 2>&1
+        done
+}
+trap sweep EXIT
+trap 'exit 130' INT TERM HUP
 
 # What sesame reads of an item: id, title, version, tags (missing reads as
 # none), and its own fields: no section, no purpose, a label.
@@ -58,7 +76,7 @@ missing-item)
     ;;
 missing-vault)
     # A vault the service account cannot see: "isn't a vault".
-    call item list --vault "sesame-contract-missing-$run" --tags "$tag" --format json
+    call item list --vault "sesame-contract.missing.$run" --tags "$tag" --format json
     ;;
 create-get-list-archive)
     # A template from a stdin pipe; the item get and list print; archive:
@@ -67,7 +85,8 @@ create-get-list-archive)
     call item get "sesame-contract.item.$run" --vault "$vault" --format json
     printf '%s\n' "$out" | summary
     call item list --vault "$vault" --tags "$tag" --format json
-    printf '%s\n' "$out" | jq -c '[.[] | {title, id: (.id | type == "string"), version}]'
+    printf '%s\n' "$out" | jq -c --arg run "$run" \
+        '[.[] | select(.title | endswith("." + $run)) | {title, id: (.id | type == "string"), version}]'
     archive "$id"
     call item get "$id" --vault "$vault" --format json
     printf '%s\n' "$out" | jq -c '{state, version}'
