@@ -5,6 +5,7 @@ fast = "./gate.sh"
 fast_limit = 900
 slow = "./gate.sh"
 slow_limit = 900
+regenerated = [".docfit/baseline.json"]
 
 [cut]
 steps = ["packaging/release.sh cut $FACTORIUM_VERSION"]
@@ -12,12 +13,13 @@ formula = "sunfmin/tap/sesame"
 # The host's build, then the tap's run (release.sh waits at most 2400s).
 limit = 2700
 
-# slimfit's and truefit's tasks and a sample of landed changes' mutants, filed
-# as issues while the host is idle (SPEC §1.16). No steps: no check is too slow
-# for the gate. every/limit from the times measured on sesame#12 (its comment).
+# slimfit's, truefit's and docfit's tasks and a sample of landed changes'
+# mutants, filed as issues while the host is idle (SPEC §1.16). No steps: no
+# check is too slow for the gate. every/limit from the times measured on
+# sesame#12 (its comment).
 # The version lines come first: factorium reads the answers as one run of JSON
 # from the first `{` line, so a line between them would hide truefit's.
 [idle]
-tasks = "slimfit --version && truefit --version && slimfit next --all --sample 5 && truefit next --all"
+tasks = "slimfit --version && truefit --version && docfit --version && slimfit next --all --sample 5 && truefit next --all && docfit next --all"
 every = 86400
 limit = 1800
