@@ -1,0 +1,11 @@
+ignore = ["src/**"]
+
+# This repo's documents, each under its kind (`docfit check --help`).
+[documents]
+"CLAUDE.md" = "agent"
+"GLOSSARY.md" = "glossary"
+"README.md" = "readme"
+"docs/adr/0001-1password-vault-store.md" = "adr"
+"docs/adr/0002-1password-local-copy.md" = "adr"
+"docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md" = "adr"
+"skills/sesame/SKILL.md" = "skill"

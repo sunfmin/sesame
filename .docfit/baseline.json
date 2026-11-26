@@ -1,0 +1,50 @@
+{
+  "README.md": {
+    "bytes": 19221,
+    "local_refs": 1,
+    "measurements": 2,
+    "paragraph": 1270,
+    "pointers": [
+      "sesame.lock"
+    ]
+  },
+  "docs/adr/0001-1password-vault-store.md": {
+    "bytes": 5177,
+    "local_refs": 3,
+    "paragraph": 703,
+    "pointers": [
+      "ADR 0022",
+      "sesame.lock"
+    ]
+  },
+  "docs/adr/0002-1password-local-copy.md": {
+    "bytes": 7347,
+    "local_refs": 6,
+    "paragraph": 1065,
+    "pointers": [
+      "sesame.lock"
+    ]
+  },
+  "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md": {
+    "local_refs": 2,
+    "pointers": [
+      ".github/workflows/README.md",
+      "ADR 0013"
+    ]
+  },
+  "factorium.toml": {
+    "local_refs": 1
+  },
+  "rust-toolchain.toml": {
+    "local_refs": 1
+  },
+  "tests/e2e.rs": {
+    "local_refs": 1
+  },
+  "tests/support/fake_op.rs": {
+    "local_refs": 1
+  },
+  "truefit.toml": {
+    "local_refs": 1
+  }
+}
