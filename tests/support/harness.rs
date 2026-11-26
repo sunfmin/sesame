@@ -7,7 +7,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -174,6 +174,16 @@ impl<'v> Machine<'v> {
     /// Signs in with `args` where nothing answers the redirect: plays the
     /// browser up to it, and pastes `edit(<address it would end on>)`.
     pub fn login_pasting(&self, args: &[&str], edit: impl Fn(String) -> String) -> Out {
+        self.login_landing(args, |landed, mut stdin| {
+            writeln!(stdin, "{}", edit(landed)).unwrap();
+        })
+    }
+
+    /// Signs in with `args`, playing the browser up to the provider's
+    /// redirect and handing its address and login's stdin to `act`, which
+    /// plays the rest (a request to the loopback, a paste); stdin is closed
+    /// once `act` returns, and login is waited for.
+    pub fn login_landing(&self, args: &[&str], act: impl FnOnce(String, ChildStdin)) -> Out {
         let (before, mut login, mut err, auth_url) = self.start_login(args);
         let no_follow = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -181,9 +191,7 @@ impl<'v> Machine<'v> {
             .unwrap();
         let resp = no_follow.get(auth_url).send().unwrap();
         let landed = resp.headers()["location"].to_str().unwrap().to_string();
-        let mut stdin = login.stdin.take().unwrap();
-        writeln!(stdin, "{}", edit(landed)).unwrap();
-        drop(stdin);
+        act(landed, login.stdin.take().unwrap());
         self.finish_login(before, login, &mut err)
     }
 

@@ -199,7 +199,8 @@ fn loopback_flow(
     let tx2 = tx.clone();
     if let Some((listener, port)) = listener {
         let origin = format!("http://{}:{port}", p.redirect_host.as_str());
-        std::thread::spawn(move || listen(listener, &origin, tx));
+        let state = state.clone();
+        std::thread::spawn(move || listen(listener, &origin, &state, tx));
     }
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -241,28 +242,68 @@ fn loopback_flow(
 }
 
 /// Answers the browser's redirect to the loopback callback and sends its
-/// address, as `origin` and the path, to `tx`.
-fn listen(listener: TcpListener, origin: &str, tx: mpsc::Sender<String>) {
+/// address, as `origin` and the path, to `tx`. Only a redirect carrying this
+/// login's `state` ends the wait; any other request is answered and the
+/// listener goes on. A connection silent for `READ_TIMEOUT` is dropped.
+fn listen(listener: TcpListener, origin: &str, state: &str, tx: mpsc::Sender<String>) {
     for stream in listener.incoming().flatten() {
         let mut stream = stream;
+        let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
         let mut line = String::new();
         if BufReader::new(&stream).read_line(&mut line).is_err() {
             continue;
         }
         let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
-        if !target.starts_with("/callback") {
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
-            continue;
-        }
-        let body = "Signed in. You can close this tab and return to the terminal.";
+        let (status, body, done) = callback_answer(&target, state);
         let _ = write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-        let _ = tx.send(format!("{origin}{target}"));
-        return;
+        if done {
+            let _ = tx.send(format!("{origin}{target}"));
+            return;
+        }
     }
+}
+
+/// How long the loopback listener waits for a connection's request line.
+const READ_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The loopback's answer to a request for `target`, while waiting for the
+/// redirect carrying `state`: its status, its body, and whether it ends the
+/// wait.
+fn callback_answer(target: &str, state: &str) -> (&'static str, &'static str, bool) {
+    let Ok(u) = url::Url::parse(&format!("http://loopback{target}")) else {
+        return ("400 Bad Request", "", false);
+    };
+    if u.path() != "/callback" {
+        return ("404 Not Found", "", false);
+    }
+    let has = |k: &str| u.query_pairs().any(|(n, _)| n == k);
+    if !u.query_pairs().any(|(n, v)| n == "state" && v == state) {
+        return (
+            "400 Bad Request",
+            "This redirect is not from the login sesame is waiting for (its state differs). \
+             Finish signing in from the URL sesame printed.",
+            false,
+        );
+    }
+    if has("error") {
+        return (
+            "200 OK",
+            "The provider refused the sign-in. See the terminal for its reason.",
+            true,
+        );
+    }
+    if !has("code") {
+        return ("400 Bad Request", "This redirect carried no code.", false);
+    }
+    (
+        "200 OK",
+        "Signed in. You can close this tab and return to the terminal.",
+        true,
+    )
 }
 
 /// The device authorization grant (RFC 8628): the person enters a code on the
