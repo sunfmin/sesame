@@ -1,0 +1,6 @@
+{
+  "tree": "1c247e566b0eb80f15741b194c595e415272dd65+d1fba762150c532c",
+  "picker": "codex:01a2153d-3ddc-7e23-9d2a-44e8f57a0045:default",
+  "author": "claude-code:1d3d5eac-e915-5636-8017-edcb5c87fde2:opus",
+  "none": "The successful callback, stale-state rejection, silent connection, and provider refusal cases already distinguish every buildable candidate from the original behavior."
+}

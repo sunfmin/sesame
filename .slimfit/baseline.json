@@ -1,13 +1,13 @@
 {
   "suites": {
     "rust": {
-      "prod_lines": 5688,
-      "test_lines": 5180,
-      "tests": 111,
+      "prod_lines": 5750,
+      "test_lines": 5231,
+      "tests": 112,
       "failures": 0,
       "test_seconds": 3.081,
-      "covered_lines": 3882,
-      "uncovered_lines": 147
+      "covered_lines": 3937,
+      "uncovered_lines": 139
     }
   },
   "loosened": [],
@@ -82,21 +82,10 @@
       "reason": "providers.rs is the definition-in-force module: its interface is the Provider/Service/Target data types plus eight calls (all, find, find_handed, add, set, show, export, remove); behind them sit the layering of built-in definition and stored fields (effective), the reduction of stored fields to the person's own changes (own_changes), per-service merge and drop, the cross-provider namespace and fixed-port checks, and the one validation point (fields::check + Provider::check). ~200 of its 540 prod lines are the Provider type itself, whose field docs are the interface. Its 90-day churn is new Provider fields landing with each built-in (slack, figma, linear, hubspot, public client) and earlier deepenings that already moved logic out (wire.rs sesame#9, refresh sesame#8, config_dir and find_handed sesame#17). The field table (fields.rs) and the built-ins (built_in.rs) are its own submodules, used by callers only through it (guide.rs reads the table, tests read built_in). Tests drive effective, the private one-place validation seam, which is the module's internal seam, not a reach past it. Deletion test: deleting it spreads layering and validation across every command; splitting the type out would only move lines."
     }
   ],
-  "kept_spans": [
-    {
-      "suite": "rust",
-      "file": "src/oauth.rs",
-      "start": 284,
-      "end": 284,
-      "function": "device_flow",
-      "hash": "68ceac83c7e92eba",
-      "reason": "Only opens the person's real browser (open::that_detached on the host); which page it opens is decided by wire::DeviceCode::page, tested in wire::tests::device_codes. A fast test could only launch a browser, asserting nothing"
-    }
-  ],
   "measured": {
     "rust": {
-      "uncovered_lines": 147,
-      "test_seconds": 5.155
+      "uncovered_lines": 139,
+      "test_seconds": 4.926
     }
   }
 }
