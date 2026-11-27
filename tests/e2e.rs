@@ -1350,6 +1350,9 @@ fn one_password_vault_store() {
         "{out}"
     );
     assert_eq!(vault.read("sesame.hub", "access_token"), "refreshed-1");
+    // Each write is a new version of the item.
+    let version = vault.item("sesame.hub").unwrap()["version"].as_u64();
+    assert!(version > Some(1), "{version:?}");
 
     // The loopback flow (`--browser`), the test playing the browser.
     m.login_in_browser(&["login", "hub", "--browser", "--no-browser"]);
@@ -1820,6 +1823,11 @@ fn one_password_local_copy() {
     assert!(out.ok, "{out}");
     let item = vault.item("sesame.hub").unwrap();
     assert!(item.to_string().contains("cid-3"), "{item}");
+    // A new id, no other item's.
+    let mut ids: Vec<_> = vault.items().iter().map(|i| i["id"].to_string()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), vault.items().len(), "{ids:?}");
 }
 
 /// `hub`, a provider that rotates its refresh token, logged in on a machine
