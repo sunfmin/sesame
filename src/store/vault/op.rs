@@ -1,212 +1,159 @@
 //! How the vault store talks to 1Password: the item requests it makes
-//! (`Op`), and `OpCli`, the `op` CLI that answers them, the only code in
-//! sesame that spawns it. The tests answer them in memory (`Memory`).
-use super::{TOKEN_VAR, VAULT_VAR};
-use serde_json::Value;
-use std::io::Write;
-use std::process::{Command, Stdio};
+//! (`Op`), and `Opcore`, opcore's Client that answers them, signed in on the
+//! first request only. The tests answer them in memory (`Memory`).
+use opcore::core::{Core, Wasm};
+use opcore::{Client, Item, ItemParams, Listed};
+use std::cell::{RefCell, RefMut};
 
-/// An item as `op item get --format json` prints it.
-#[derive(Clone, Debug)]
-pub struct Item {
-    pub id: String,
-    pub json: Value,
-}
-
-/// One item of a listing.
-pub struct Listed {
-    pub title: String,
-    pub id: String,
-    pub version: u64,
-}
-
+#[derive(Debug)]
 pub enum OpError {
     /// The item does not exist.
     NoItem,
     Failed(String),
 }
 
-/// The item requests the vault store makes, each one request to 1Password.
-pub trait Op: Send + Sync {
-    /// The items tagged `tag`.
+impl From<opcore::Error> for OpError {
+    fn from(e: opcore::Error) -> OpError {
+        match e {
+            opcore::Error::NoItem(_) => OpError::NoItem,
+            e => OpError::Failed(e.to_string()),
+        }
+    }
+}
+
+/// The item requests the vault store makes, each one request to 1Password,
+/// none of which spends a read of the Budget but a write's own.
+pub trait Op {
+    /// The active items tagged `tag`.
     fn list(&self, tag: &str) -> Result<Vec<Listed>, OpError>;
-    /// The item `query` (an id or a title) names; an archived one is none.
-    fn get(&self, query: &str) -> Result<Item, OpError>;
-    /// Creates an item from `template`; the item, if 1Password printed it.
-    fn create(&self, template: &Value) -> Result<Option<Item>, OpError>;
-    /// Replaces item `id` with `template`; the item, if 1Password printed it.
-    fn edit(&self, id: &str, template: &Value) -> Result<Option<Item>, OpError>;
+    /// The items `ids`, in order, each none if the vault has no active one.
+    fn get_all(&self, ids: &[&str]) -> Result<Vec<Option<Item>>, OpError>;
+    /// Creates an item from `params`; the item 1Password answered.
+    fn create(&self, params: &ItemParams) -> Result<Item, OpError>;
+    /// Replaces item `id`'s title, category, fields, sections, notes and
+    /// tags with `params`'; the item 1Password answered.
+    fn edit(&self, id: &str, params: &ItemParams) -> Result<Item, OpError>;
     /// Archives item `id` (it can be restored in 1Password).
     fn archive(&self, id: &str) -> Result<(), OpError>;
 }
 
-/// The `op` CLI, as a service account, on vault `vault`: values reach it only
-/// on its stdin, the token only in its environment.
-pub struct OpCli {
-    pub vault: String,
-    pub token: String,
+type SignIn<C> = Box<dyn Fn() -> Result<Client<C>, opcore::Error>>;
+
+/// opcore's Client on one vault, signed in on the first request (a sign-in
+/// is seconds): a command that answers from the copy never signs in.
+pub struct Opcore<C: Core = Wasm> {
+    sign_in: SignIn<C>,
+    client: RefCell<Option<Client<C>>>,
 }
 
-impl OpCli {
-    /// Runs `op` with `args`, `input` on its stdin, the token in its
-    /// environment; its stdout.
-    fn run(&self, args: &[&str], input: Option<&[u8]>) -> Result<String, OpError> {
-        let mut child = Command::new("op")
-            .args(args)
-            .env(TOKEN_VAR, &self.token)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| OpError::Failed(format!("running `op`: {e}")))?;
-        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
-            // op takes an item template from stdin only when it is a pipe.
-            stdin
-                .write_all(input)
-                .map_err(|e| OpError::Failed(format!("writing to `op`: {e}")))?;
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| OpError::Failed(format!("running `op`: {e}")))?;
-        if out.status.success() {
-            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-        }
-        let err = op_message(&String::from_utf8_lossy(&out.stderr));
-        if err.contains("isn't an item") {
-            return Err(OpError::NoItem);
-        }
-        if err.contains("isn't a vault") {
-            return Err(OpError::Failed(format!(
-                "the service account cannot read the 1Password vault `{}` ({VAULT_VAR}): \
-                 check its name and that the service account has access to it ({err})",
-                self.vault
-            )));
-        }
-        Err(OpError::Failed(err))
-    }
-
-    /// A create or edit, the item's template on stdin.
-    fn write(&self, args: &[&str], template: &Value) -> Result<Option<Item>, OpError> {
-        let out = self.run(args, Some(template.to_string().as_bytes()))?;
-        Ok(parse_item(&out).ok())
+impl Opcore<Wasm> {
+    /// The real Core, as service account `token` on vault `vault`.
+    pub fn new(token: &str, vault: &str) -> Opcore<Wasm> {
+        let (t, v) = (token.to_string(), vault.to_string());
+        Opcore::with(Box::new(move || Client::sign_in(&t, &v)))
     }
 }
 
-impl Op for OpCli {
+impl<C: Core> Opcore<C> {
+    pub fn with(sign_in: SignIn<C>) -> Opcore<C> {
+        Opcore {
+            sign_in,
+            client: RefCell::new(None),
+        }
+    }
+
+    /// The Client, signed in first if this is the first request.
+    fn client(&self) -> Result<RefMut<'_, Client<C>>, OpError> {
+        let mut slot = self.client.borrow_mut();
+        if slot.is_none() {
+            let signed_in =
+                (self.sign_in)().map_err(|e| OpError::Failed(format!("signing in: {e}")))?;
+            *slot = Some(signed_in);
+        }
+        Ok(RefMut::map(slot, |c| {
+            c.as_mut().unwrap_or_else(|| unreachable!("signed in above"))
+        }))
+    }
+}
+
+impl<C: Core> Op for Opcore<C> {
     fn list(&self, tag: &str) -> Result<Vec<Listed>, OpError> {
-        let args = [
-            "item",
-            "list",
-            "--vault",
-            &self.vault,
-            "--tags",
-            tag,
-            "--format",
-            "json",
-        ];
-        let out = self.run(&args, None)?;
-        let items: Vec<Value> =
-            serde_json::from_str(&out).map_err(|e| OpError::Failed(e.to_string()))?;
-        Ok(items
-            .iter()
-            .filter_map(|i| {
-                Some(Listed {
-                    title: i["title"].as_str()?.into(),
-                    id: i["id"].as_str()?.into(),
-                    version: i["version"].as_u64().unwrap_or(0),
-                })
-            })
-            .collect())
+        Ok(self.client()?.list(tag)?)
     }
 
-    fn get(&self, query: &str) -> Result<Item, OpError> {
-        let args = [
-            "item",
-            "get",
-            query,
-            "--vault",
-            &self.vault,
-            "--format",
-            "json",
-        ];
-        let item = parse_item(&self.run(&args, None)?).map_err(OpError::Failed)?;
-        // op still answers an archived item's id (not its title, nor a
-        // list), and refuses an edit of it.
-        if item.json["state"] == "ARCHIVED" {
-            return Err(OpError::NoItem);
+    /// One `get_all`; an id the vault lacks fails it whole, so it is asked
+    /// again without that id (only when an item went since it was listed).
+    fn get_all(&self, ids: &[&str]) -> Result<Vec<Option<Item>>, OpError> {
+        let mut got: Vec<Option<Item>> = vec![None; ids.len()];
+        let mut left: Vec<usize> = (0..ids.len()).collect();
+        while !left.is_empty() {
+            let asked: Vec<&str> = left.iter().map(|&i| ids[i]).collect();
+            match self.client()?.get_all(&asked) {
+                Ok(items) => {
+                    for (&i, item) in left.iter().zip(items) {
+                        got[i] = Some(item);
+                    }
+                    break;
+                }
+                Err(opcore::Error::NoItem(gone)) => {
+                    let before = left.len();
+                    left.retain(|&i| ids[i] != gone);
+                    if left.len() == before {
+                        return Err(OpError::Failed(format!("no item `{gone}`, not asked for")));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
-        Ok(item)
+        Ok(got)
     }
 
-    fn create(&self, template: &Value) -> Result<Option<Item>, OpError> {
-        let args = ["item", "create", "--vault", &self.vault, "--format", "json"];
-        self.write(&args, template)
+    fn create(&self, params: &ItemParams) -> Result<Item, OpError> {
+        let mut made = self.client()?.create_all(std::slice::from_ref(params))?;
+        made.pop()
+            .ok_or_else(|| OpError::Failed("1Password answered no item".into()))
     }
 
-    fn edit(&self, id: &str, template: &Value) -> Result<Option<Item>, OpError> {
-        // Without `tags` an edit keeps the item's (though its answer shows
-        // none); without a category it keeps its own. Tags come back sorted.
-        let args = [
-            "item",
-            "edit",
-            id,
-            "--vault",
-            &self.vault,
-            "--format",
-            "json",
-        ];
-        self.write(&args, template)
+    fn edit(&self, id: &str, params: &ItemParams) -> Result<Item, OpError> {
+        Ok(self.client()?.edit(id, params)?)
     }
 
     fn archive(&self, id: &str) -> Result<(), OpError> {
-        let args = ["item", "delete", id, "--vault", &self.vault, "--archive"];
-        self.run(&args, None).map(drop)
+        Ok(self.client()?.archive_all(&[id])?)
     }
 }
 
-fn parse_item(out: &str) -> Result<Item, String> {
-    let json: Value = serde_json::from_str(out).map_err(|e| format!("op printed no item: {e}"))?;
-    let id = json["id"]
-        .as_str()
-        .ok_or("op printed an item without an id")?
-        .to_string();
-    Ok(Item { id, json })
-}
-
-/// op's error without its `[ERROR] <date> <time> ` prefix.
-fn op_message(stderr: &str) -> String {
-    let s = stderr.trim();
-    match s.strip_prefix("[ERROR] ") {
-        Some(rest) => rest.splitn(3, ' ').nth(2).unwrap_or(rest).to_string(),
-        None => s.to_string(),
-    }
-}
-
-/// A vault in memory, answering as `op` does where sesame depends on it (an
-/// edit without `tags` keeps them), and recording each request as one line:
-/// `list <tag>`, `get <query>`, `create <title>`, `edit <id>`, `archive <id>`.
+/// A vault in memory, answering as opcore does where sesame depends on it,
+/// and recording each request as one line: `list <tag>`, `get_all <id>…`,
+/// `create <title>`, `edit <id>`, `archive <id>`.
 #[cfg(test)]
 #[derive(Clone, Default)]
-pub struct Memory(std::sync::Arc<std::sync::Mutex<MemoryState>>);
+pub struct Memory(std::rc::Rc<RefCell<MemoryState>>);
 
 #[cfg(test)]
 #[derive(Default)]
 pub struct MemoryState {
-    pub items: Vec<Value>,
+    pub items: Vec<Item>,
     pub calls: Vec<String>,
     /// Ids a listing leaves out, as 1Password may a new item.
     pub unlisted: Vec<String>,
     next_id: u64,
+    clock: u64,
+}
+
+#[cfg(test)]
+impl MemoryState {
+    /// A new `updatedAt`, as each write gets.
+    fn tick(&mut self) -> String {
+        self.clock += 1;
+        format!("t{}", self.clock)
+    }
 }
 
 #[cfg(test)]
 impl Memory {
-    pub fn state(&self) -> std::sync::MutexGuard<'_, MemoryState> {
-        self.0.lock().unwrap()
+    pub fn state(&self) -> std::cell::RefMut<'_, MemoryState> {
+        self.0.borrow_mut()
     }
 
     /// The requests made since the last `take_calls`.
@@ -215,34 +162,25 @@ impl Memory {
     }
 
     /// The item titled `title`, as 1Password holds it.
-    pub fn item(&self, title: &str) -> Option<Value> {
-        self.state()
-            .items
-            .iter()
-            .find(|i| i["title"] == title)
-            .cloned()
+    pub fn item(&self, title: &str) -> Option<Item> {
+        self.state().items.iter().find(|i| i.title == title).cloned()
     }
 
     /// Changes item `title` as another machine would: a new version.
-    pub fn change(&self, title: &str, f: impl FnOnce(&mut Value)) {
+    pub fn change(&self, title: &str, f: impl FnOnce(&mut Item)) {
         let mut s = self.state();
-        let item = s.items.iter_mut().find(|i| i["title"] == title).unwrap();
+        let at = s.tick();
+        let item = s.items.iter_mut().find(|i| i.title == title).unwrap();
         f(item);
-        item["version"] = (item["version"].as_u64().unwrap() + 1).into();
+        item.version += 1;
+        item.updated_at = at;
     }
 
     /// Creates an item as another machine would; its id.
-    pub fn add(&self, template: Value) -> String {
-        let item = self.create(&template).ok().flatten().unwrap();
+    pub fn add(&self, params: ItemParams) -> String {
+        let item = self.create(&params).ok().unwrap();
         self.state().calls.pop();
         item.id
-    }
-
-    fn find(s: &MemoryState, query: &str) -> Result<usize, OpError> {
-        s.items
-            .iter()
-            .position(|i| i["id"] == query || i["title"] == query)
-            .ok_or(OpError::NoItem)
     }
 }
 
@@ -253,82 +191,77 @@ impl Op for Memory {
         s.calls.push(format!("list {tag}"));
         Ok(s.items
             .iter()
-            .filter(|i| i["tags"].as_array().unwrap().iter().any(|t| t == tag))
-            .filter(|i| !s.unlisted.iter().any(|u| i["id"] == *u))
+            .filter(|i| i.tags.iter().any(|t| t == tag))
+            .filter(|i| !s.unlisted.contains(&i.id))
             .map(|i| Listed {
-                title: i["title"].as_str().unwrap().into(),
-                id: i["id"].as_str().unwrap().into(),
-                version: i["version"].as_u64().unwrap(),
+                id: i.id.clone(),
+                title: i.title.clone(),
+                tags: i.tags.clone(),
+                updated_at: i.updated_at.clone(),
             })
             .collect())
     }
 
-    fn get(&self, query: &str) -> Result<Item, OpError> {
+    fn get_all(&self, ids: &[&str]) -> Result<Vec<Option<Item>>, OpError> {
         let mut s = self.state();
-        s.calls.push(format!("get {query}"));
-        let i = Memory::find(&s, query)?;
-        let json = s.items[i].clone();
-        Ok(Item {
-            id: json["id"].as_str().unwrap().into(),
-            json,
-        })
+        s.calls.push(format!("get_all {}", ids.join(" ")));
+        Ok(ids
+            .iter()
+            .map(|id| s.items.iter().find(|i| i.id == *id).cloned())
+            .collect())
     }
 
-    fn create(&self, template: &Value) -> Result<Option<Item>, OpError> {
+    fn create(&self, params: &ItemParams) -> Result<Item, OpError> {
         let mut s = self.state();
-        s.calls
-            .push(format!("create {}", template["title"].as_str().unwrap()));
+        s.calls.push(format!("create {}", params.title));
         s.next_id += 1;
-        let id = format!("id{}", s.next_id);
-        let mut json = template.clone();
-        json["id"] = id.clone().into();
-        json["version"] = 1.into();
-        if json.get("tags").is_none() {
-            json["tags"] = serde_json::json!([]);
-        }
-        s.items.push(json.clone());
-        Ok(Some(Item { id, json }))
+        let item = Item {
+            id: format!("id{}", s.next_id),
+            version: 1,
+            updated_at: s.tick(),
+            ..from_params(params)
+        };
+        s.items.push(item.clone());
+        Ok(item)
     }
 
-    fn edit(&self, id: &str, template: &Value) -> Result<Option<Item>, OpError> {
+    fn edit(&self, id: &str, params: &ItemParams) -> Result<Item, OpError> {
         let mut s = self.state();
         s.calls.push(format!("edit {id}"));
-        let i = Memory::find(&s, id)?;
-        let item = &mut s.items[i];
-        for k in ["title", "fields", "sections", "tags"] {
-            if let Some(v) = template.get(k) {
-                item[k] = v.clone();
-            }
-        }
-        item["version"] = (item["version"].as_u64().unwrap() + 1).into();
-        let json = item.clone();
-        Ok(Some(Item {
-            id: id.into(),
-            json,
-        }))
+        let at = s.tick();
+        let item = s
+            .items
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or(OpError::NoItem)?;
+        *item = Item {
+            id: item.id.clone(),
+            version: item.version + 1,
+            updated_at: at,
+            kept: item.kept.clone(),
+            ..from_params(params)
+        };
+        Ok(item.clone())
     }
 
     fn archive(&self, id: &str) -> Result<(), OpError> {
         let mut s = self.state();
         s.calls.push(format!("archive {id}"));
-        let i = Memory::find(&s, id)?;
-        s.items.remove(i);
+        let at = s.items.iter().position(|i| i.id == id).ok_or(OpError::NoItem)?;
+        s.items.remove(at);
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn op_message_drops_the_prefix() {
-        assert_eq!(
-            op_message(
-                "[ERROR] 2026/11/20 10:00:00 \"sesame.x\" isn't an item in the \"v\" vault.\n"
-            ),
-            "\"sesame.x\" isn't an item in the \"v\" vault."
-        );
-        assert_eq!(op_message("plain\n"), "plain");
+fn from_params(p: &ItemParams) -> Item {
+    Item {
+        title: p.title.clone(),
+        category: p.category,
+        tags: p.tags.clone(),
+        notes: p.notes.clone(),
+        fields: p.fields.clone(),
+        sections: p.sections.clone(),
+        ..Default::default()
     }
 }

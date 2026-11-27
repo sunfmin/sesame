@@ -1,13 +1,12 @@
 //! The local copy (docs/adr/0002): `sesame.db`'s tables in memory, plus each
-//! item's id and `version` at the last sync, when it synced, and the
+//! item as the last sync or write had it, when it synced, and the
 //! providers whose token the vault does not hold yet. On disk only sealed,
 //! under a key derived from the service account token, at
 //! `<config_dir>/1password-copy`, beside the lock that keeps two processes
 //! here from overwriting each other's copy.
 use super::item::{self, is_provider_field, kept};
-use super::op::Item;
+use opcore::{Item, Sealer};
 use super::{DEFINITIONS, Token};
-use crate::store::sealed::Sealer;
 use crate::store::sqlite::Sqlite;
 use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeMap;
@@ -16,13 +15,16 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// The copy's own tables, beside `sesame.db`'s: which item each provider's
-/// rows came from and its version then, when the copy last synced, and the
-/// providers whose token row the vault does not hold yet.
+/// rows came from, its version then and the whole item (JSON, as opcore
+/// gives it; none in a copy sesame made before it kept them), when the copy
+/// last synced, and the providers whose token row the vault does not hold
+/// yet.
 const COPY_TABLES: &str = "
     CREATE TABLE IF NOT EXISTS vault_items (
         title TEXT PRIMARY KEY,
         id TEXT NOT NULL,
-        version INTEGER NOT NULL
+        version INTEGER NOT NULL,
+        item TEXT
     );
     CREATE TABLE IF NOT EXISTS copy_synced (at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS unwritten_tokens (provider TEXT PRIMARY KEY);
@@ -107,23 +109,26 @@ impl LocalCopy {
             .map_err(|e| self.rows.err(e))
     }
 
-    /// Each item the copy holds rows of: title → (id, version).
-    pub fn items(&self) -> Result<BTreeMap<String, (String, u64)>, String> {
+    /// Each item the copy holds rows of: title → (id, the item, if kept and
+    /// it still reads).
+    pub fn items(&self) -> Result<BTreeMap<String, (String, Option<Item>)>, String> {
         let mut stmt = self
             .rows
             .conn()
-            .prepare("SELECT title, id, version FROM vault_items")
+            .prepare("SELECT title, id, item FROM vault_items")
             .map_err(|e| self.rows.err(e))?;
         let rows = stmt
             .query_map([], |r| {
-                Ok((r.get(0)?, (r.get(1)?, r.get::<_, i64>(2)? as u64)))
+                let item: Option<String> = r.get(2)?;
+                let item = item.and_then(|j| serde_json::from_str(&j).ok());
+                Ok((r.get(0)?, (r.get(1)?, item)))
             })
             .map_err(|e| self.rows.err(e))?;
         rows.collect::<Result<_, _>>().map_err(|e| self.rows.err(e))
     }
 
     /// Makes the rows of item `title` what `item` holds (none: the item is
-    /// gone), and records its id and version. An unwritten token stays as
+    /// gone), and keeps the item. An unwritten token stays as
     /// it is; an item that is not sesame's changes nothing.
     pub fn apply(&self, title: &str, item: Option<&Item>) -> Result<(), String> {
         let copy = &self.rows;
@@ -134,7 +139,7 @@ impl LocalCopy {
             }
             if let Some(item) = item {
                 for (provider, fields) in
-                    item::definitions(&kept(&item.json, |_| true)).map_err(bad)?
+                    item::definitions(&kept(item, |_| true)).map_err(bad)?
                 {
                     copy.save_provider_fields(&provider, &fields)?;
                 }
@@ -146,7 +151,7 @@ impl LocalCopy {
                 copy.delete_token(provider)?;
             }
             if let Some(item) = item {
-                let k = kept(&item.json, is_provider_field);
+                let k = kept(item, is_provider_field);
                 if let Some(c) = item::client_of(&k) {
                     copy.save_client(provider, &c)?;
                 }
@@ -162,8 +167,14 @@ impl LocalCopy {
         let conn = copy.conn();
         match item {
             Some(item) => conn.execute(
-                "INSERT OR REPLACE INTO vault_items (title, id, version) VALUES (?1, ?2, ?3)",
-                params![title, item.id, item.json["version"].as_i64().unwrap_or(0)],
+                "INSERT OR REPLACE INTO vault_items (title, id, version, item) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    title,
+                    item.id,
+                    item.version,
+                    serde_json::to_string(item).map_err(|e| e.to_string())?
+                ],
             ),
             None => conn.execute("DELETE FROM vault_items WHERE title = ?1", [title]),
         }
@@ -231,6 +242,22 @@ fn open_rows(vault: &str, image: Option<&[u8]>) -> Result<Sqlite, String> {
     copy.conn()
         .execute_batch(COPY_TABLES)
         .map_err(|e| copy.err(e))?;
+    // A copy from before items were kept: its rows stay, its items are read
+    // at the next sync.
+    let has_item: bool = copy
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('vault_items') WHERE name = 'item'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .map_err(|e| copy.err(e))?;
+    if !has_item {
+        copy.conn()
+            .execute_batch("ALTER TABLE vault_items ADD COLUMN item TEXT")
+            .map_err(|e| copy.err(e))?;
+    }
     Ok(copy)
 }
 
