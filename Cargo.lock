@@ -988,7 +988,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "opcore"
 version = "0.1.0"
-source = "git+https://github.com/sunfmin/opcore?rev=c8697655563b47147ea3f074338a12d7d7479ea3#c8697655563b47147ea3f074338a12d7d7479ea3"
+source = "git+https://github.com/sunfmin/opcore?rev=4924a098d1392fa6919153e6aa697839d045bb53#4924a098d1392fa6919153e6aa697839d045bb53"
 dependencies = [
  "chacha20poly1305",
  "graviola",
