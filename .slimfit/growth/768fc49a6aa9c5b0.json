@@ -1,0 +1,10 @@
+{
+  "tree": "f52eb6b3cda5ae93d76cefe9b123bbe94b2fc70c+d1fba762150c532c",
+  "lines": 87,
+  "serves": "sesame#59",
+  "considered": "opcore's Copy in place of sesame's own copy (the issue keeps sesame's copy, ADR 0002); opcore's test stand-in Core (in its tests/, not exported) in place of src/store/vault/stand_in.rs; Memory alone for the binary tests (it cannot reach a separate process)",
+  "reviewer": "codex:01a21c9b-3088-73e0-983b-c92065c6bdb8:default",
+  "author": "claude-code:bae0f184-e55c-5bac-9c0a-52a4f813e772:opus",
+  "cut": "In src/store/vault.rs, drop the post-write listing update because current and sync already consult the per-lock item cache, retain and extend the owned item's fields in place when editing, move its tags, sections and notes into ItemParams, and inline the one-use kept_of test helper. In tests/support/harness.rs, drop Out.calls and use methods.len() or methods.is_empty() in tests/e2e.rs.",
+  "answer": "All made: the listing update is gone (items holds what was written), the edit moves the item's fields, tags, sections and notes into ItemParams, kept_of is inlined, Out.calls is gone (methods.len() / is_empty()). What remains is the stand-in Core (about 170 lines) the binary tests need in place of the 244-line fake op, and the copy keeping whole items for writes that read nothing."
+}
