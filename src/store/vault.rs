@@ -78,8 +78,8 @@ pub struct Vault {
     /// no such item. Cleared on taking the lock, so a read-then-write sees
     /// other processes' writes.
     items: Mutex<BTreeMap<String, Option<Item>>>,
-    /// The vault's listing under the lock, kept up with this process's
-    /// writes; cleared with `items`.
+    /// The vault's listing under the lock (what this process wrote since is
+    /// in `items`); cleared with `items`.
     listing: Mutex<Option<Listing>>,
     /// Whether this vault holds the lock (a nested `locked` runs inside it).
     held: AtomicBool,
@@ -326,12 +326,6 @@ impl Vault {
                 .map_err(|e| self.failed(&format!("writing `{title}`"), e))?
         };
         self.items().insert(title.into(), written.clone());
-        if let Some(listing) = self.listing_slot().as_mut() {
-            match &written {
-                Some(i) => listing.insert(title.into(), (i.id.clone(), i.updated_at.clone())),
-                None => listing.remove(title),
-            };
-        }
         let mut copy = self.copy();
         copy.set_unwritten(provider, false)?;
         copy.apply(title, written.as_ref())?;
@@ -348,7 +342,7 @@ impl Vault {
         want: &Kept,
         ours: impl Fn(&str) -> bool,
     ) -> Result<Option<Item>, OpError> {
-        let Some(item) = current else {
+        let Some(mut item) = current else {
             let params = ItemParams {
                 title: title.into(),
                 category: Category::SecureNote,
@@ -362,24 +356,18 @@ impl Vault {
             // Archived, not deleted: it can be restored in 1Password.
             return self.op.archive(&item.id).map(|()| None);
         }
-        let mut tags = item.tags.clone();
-        if !tags.iter().any(|t| t == TAG) {
-            tags.push(TAG.into());
+        if !item.tags.iter().any(|t| t == TAG) {
+            item.tags.push(TAG.into());
         }
-        let mut fields: Vec<_> = item
-            .fields
-            .iter()
-            .filter(|f| !item::is_ours(f, &ours))
-            .cloned()
-            .collect();
-        fields.extend(item::fields(want));
+        item.fields.retain(|f| !item::is_ours(f, &ours));
+        item.fields.extend(item::fields(want));
         let params = ItemParams {
             title: title.into(),
             category: item.category,
-            fields,
-            sections: item.sections.clone(),
-            notes: item.notes.clone(),
-            tags,
+            fields: item.fields,
+            sections: item.sections,
+            notes: item.notes,
+            tags: item.tags,
         };
         self.op.edit(&item.id, &params).map(Some)
     }
@@ -950,13 +938,9 @@ mod tests {
             ]
         );
         let vault_x = mem.item("sesame.x").unwrap();
-        let k = kept_of(&vault_x);
+        let k = item::kept(&vault_x, is_provider_field);
         assert_eq!(item::token_of(&k).unwrap(), Some(kept));
         assert!(a.copy().unwritten().unwrap().is_empty());
-    }
-
-    fn kept_of(i: &Item) -> Kept {
-        kept(i, is_provider_field)
     }
 
     #[test]

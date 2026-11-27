@@ -39,7 +39,6 @@ pub struct Out {
     pub ok: bool,
     pub stdout: String,
     pub stderr: String,
-    pub calls: usize,
     pub writes: usize,
     /// The Core methods called, in order.
     pub methods: Vec<String>,
@@ -246,7 +245,6 @@ impl<'v> Machine<'v> {
             ok,
             stdout,
             stderr,
-            calls: calls.len(),
             writes: calls.iter().filter(|m| is_write(m)).count(),
             methods: calls,
         }

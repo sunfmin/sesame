@@ -1702,7 +1702,7 @@ fn one_password_local_copy() {
     ] {
         let out = a.run(args);
         assert!(out.ok, "{out}");
-        assert_eq!((out.calls, out.writes), (0, 0), "{args:?}");
+        assert_eq!((out.methods.len(), out.writes), (0, 0), "{args:?}");
     }
     assert_eq!(a.run(&["token", "hub"]).text().trim(), "refreshed-1");
 
@@ -1711,7 +1711,7 @@ fn one_password_local_copy() {
     let out = b.run(&["token", "hub"]);
     assert!(out.ok && out.text().trim() == "refreshed-1", "{out}");
     assert_eq!((out.writes, refresh_bodies().len()), (0, 1));
-    assert_eq!(b.run(&["api", "hub", "/me"]).calls, 0);
+    assert_eq!(b.run(&["api", "hub", "/me"]).methods.len(), 0);
 
     // A changes the provider's fields and client. B goes on with its copy
     // until its next refresh, which reads both and refreshes with A's client.
@@ -1724,7 +1724,7 @@ fn one_password_local_copy() {
     assert!(out.ok, "{out}");
     let out = b.run(&["provider", "show", "hub"]);
     assert!(
-        out.ok && out.text().contains("first") && out.calls == 0,
+        out.ok && out.text().contains("first") && out.methods.is_empty(),
         "{out}"
     );
     let out = b.run(&["token", "hub", "--min-life", "7200"]);
@@ -1733,7 +1733,7 @@ fn one_password_local_copy() {
     assert!(last.contains("client_id=cid-2"), "{last}");
     let out = b.run(&["provider", "show", "hub"]);
     assert!(
-        out.ok && out.text().contains("second") && out.calls == 0,
+        out.ok && out.text().contains("second") && out.methods.is_empty(),
         "{out}"
     );
 
@@ -1773,10 +1773,10 @@ fn one_password_local_copy() {
     let other = "ops_another-service-account";
     let out = as_sa(&a, other, &["token", "hub"]);
     assert!(
-        out.ok && out.text().trim() == "refreshed-2" && out.calls > 0,
+        out.ok && out.text().trim() == "refreshed-2" && !out.methods.is_empty(),
         "{out}"
     );
-    assert_eq!(as_sa(&a, other, &["token", "hub"]).calls, 0);
+    assert_eq!(as_sa(&a, other, &["token", "hub"]).methods.len(), 0);
     // And a damaged copy the same.
     let copy = a.config().join("1password-copy");
     let mut bytes = std::fs::read(&copy).unwrap();
@@ -1784,7 +1784,7 @@ fn one_password_local_copy() {
     std::fs::write(&copy, bytes).unwrap();
     let out = as_sa(&a, other, &["token", "hub"]);
     assert!(
-        out.ok && out.text().trim() == "refreshed-2" && out.calls > 0,
+        out.ok && out.text().trim() == "refreshed-2" && !out.methods.is_empty(),
         "{out}"
     );
 
@@ -1890,7 +1890,7 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
     // The next command finds it here, with no 1Password call.
     let out = refusing(&["token", "hub"]);
     assert!(out.ok && out.stdout.trim() == "access-1", "{out}");
-    assert_eq!(out.calls, 0, "{out}");
+    assert!(out.methods.is_empty(), "{out}");
 
     // Refreshed again, still refused: with refresh-1, the one the provider
     // honours now, not the vault's refresh-0.
