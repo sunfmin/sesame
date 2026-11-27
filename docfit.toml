@@ -8,4 +8,5 @@ ignore = ["src/**"]
 "docs/adr/0001-1password-vault-store.md" = "adr"
 "docs/adr/0002-1password-local-copy.md" = "adr"
 "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md" = "adr"
+"docs/adr/0004-1password-through-opcore.md" = "adr"
 "skills/sesame/SKILL.md" = "skill"

@@ -32,15 +32,16 @@ impl Drop for Scratch {
     }
 }
 
-/// What a command did. With a vault attached, also the `op` calls it made and
-/// how many of them wrote.
+/// What a command did. With a vault attached, also the 1Password Core calls
+/// it made (`init_client` the sign-in), and how many of them wrote.
 #[derive(Debug)]
 pub struct Out {
     pub ok: bool,
     pub stdout: String,
     pub stderr: String,
-    pub calls: usize,
     pub writes: usize,
+    /// The Core methods called, in order.
+    pub methods: Vec<String>,
 }
 
 impl Out {
@@ -244,14 +245,15 @@ impl<'v> Machine<'v> {
             ok,
             stdout,
             stderr,
-            calls: calls.len(),
-            writes: calls.iter().filter(|(a, _)| is_write(a)).count(),
+            writes: calls.iter().filter(|m| is_write(m)).count(),
+            methods: calls,
         }
     }
 }
 
-fn is_write(argv: &[String]) -> bool {
-    argv.len() > 1 && ["create", "edit", "delete"].contains(&argv[1].as_str())
+/// The Core's writes, as the stand-in logs them.
+fn is_write(method: &str) -> bool {
+    ["ItemsCreateAll", "ItemsPut", "ItemsArchive"].contains(&method)
 }
 
 /// The query parameter `k` of `u`.
@@ -430,12 +432,12 @@ impl FakeProvider {
     }
 }
 
-/// A 1Password vault for a test: the fake `op` (tests/support/fake_op.rs) on
-/// a PATH of its own, its items and call log in a scratch dir.
+/// A 1Password vault for a test: sesame's stand-in for 1Password's Core
+/// (src/store/vault/stand_in.rs, in a debug build only), its items and call
+/// log in a scratch dir.
 pub struct FakeVault {
     _scratch: Scratch,
     dir: PathBuf,
-    bin: PathBuf,
 }
 
 pub const VAULT: &str = "scratch";
@@ -444,25 +446,11 @@ pub const SA_TOKEN: &str = "ops_service-account-secret";
 impl FakeVault {
     pub fn new() -> FakeVault {
         let scratch = Scratch::new("vault");
-        let dir = scratch.0.join("op");
-        let bin = scratch.0.join("bin");
+        let dir = scratch.0.join("1password");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::create_dir_all(&bin).unwrap();
-        // cargo test builds the example next to sesame, in target/<profile>/examples.
-        let fake = Path::new(env!("CARGO_BIN_EXE_sesame"))
-            .parent()
-            .unwrap()
-            .join("examples/fake-op");
-        assert!(
-            fake.exists(),
-            "{} missing: run `cargo test`",
-            fake.display()
-        );
-        std::os::unix::fs::symlink(&fake, bin.join("op")).unwrap();
         FakeVault {
             _scratch: scratch,
             dir,
-            bin,
         }
     }
 
@@ -470,91 +458,77 @@ impl FakeVault {
     fn env<'a>(&self, c: &'a mut Command) -> &'a mut Command {
         c.env("SESAME_1PASSWORD_VAULT", VAULT)
             .env("OP_SERVICE_ACCOUNT_TOKEN", SA_TOKEN)
-            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
-            .env("FAKE_OP_DIR", &self.dir)
-            .env("FAKE_OP_TOKEN", SA_TOKEN)
-            .env("FAKE_OP_VAULT", VAULT)
+            .env("SESAME_STAND_IN_DIR", &self.dir)
+            .env("SESAME_STAND_IN_TOKEN", SA_TOKEN)
     }
 
-    /// Every `op` call so far: its argv, and whether it had the token.
-    pub fn calls(&self) -> Vec<(Vec<String>, bool)> {
+    /// Every Core method called so far.
+    pub fn calls(&self) -> Vec<String> {
         std::fs::read_to_string(self.dir.join("calls.log"))
             .unwrap_or_default()
             .lines()
-            .map(|l| {
-                let v: serde_json::Value = serde_json::from_str(l).unwrap();
-                let argv = v["argv"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|a| a.as_str().unwrap().to_string())
-                    .collect();
-                (argv, v["token"].as_bool().unwrap())
-            })
+            .map(String::from)
             .collect()
     }
 
-    /// How many `op` calls so far wrote.
+    /// How many calls so far wrote.
     pub fn writes(&self) -> usize {
-        self.calls().iter().filter(|(a, _)| is_write(a)).count()
+        self.calls().iter().filter(|m| is_write(m)).count()
     }
 
-    /// The items not archived.
+    /// The items not archived, as the Core gives them.
     pub fn items(&self) -> Vec<serde_json::Value> {
         std::fs::read(self.dir.join("items.json"))
-            .map(|b| serde_json::from_slice::<Vec<serde_json::Value>>(&b).unwrap())
+            .map(|b| serde_json::from_slice(&b).unwrap())
             .unwrap_or_default()
-            .into_iter()
-            .filter(|i| i["state"] != "ARCHIVED")
-            .collect()
     }
 
     pub fn item(&self, title: &str) -> Option<serde_json::Value> {
         self.items().into_iter().find(|i| i["title"] == title)
     }
 
-    /// `op <args>` with `input` on stdin, as a person would run it; it must
-    /// succeed. Returns its stdout.
-    pub fn op(&self, args: &[&str], input: &str) -> String {
-        let mut c = Command::new(self.bin.join("op"));
-        self.env(&mut c);
-        let mut child = c
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    /// Puts `item` (the Core's form, without id or version) in the vault, as
+    /// another machine would.
+    pub fn add(&self, mut item: serde_json::Value) {
+        let mut items = self.items();
+        item["id"] = format!("{:0>26}", items.len() + 100).into();
+        item["version"] = 1.into();
+        item["createdAt"] = "elsewhere".into();
+        item["updatedAt"] = "elsewhere".into();
+        item["vaultId"] = "v1".into();
+        for k in ["sections", "websites", "files"] {
+            item[k] = serde_json::json!([]);
+        }
+        item["notes"] = "".into();
+        items.push(item);
+        std::fs::write(
+            self.dir.join("items.json"),
+            serde_json::to_vec(&items).unwrap(),
+        )
+        .unwrap();
     }
 
-    /// `op read op://<vault>/<title>/<field>`.
-    pub fn read(&self, reference: &str) -> String {
-        self.op(&["read", reference], "")
+    /// The value of field `label` of item `title` (`op read
+    /// op://<vault>/<title>/<label>`).
+    pub fn read(&self, title: &str, label: &str) -> String {
+        let item = self
+            .item(title)
+            .unwrap_or_else(|| panic!("no item {title}"));
+        field(&item, label)
+            .unwrap_or_else(|| panic!("no {title}/{label}"))
+            .1
     }
 }
 
-/// The field `label` of an item: (type, value).
+/// The top-level field titled `label` of an item: (type, value).
 pub fn field(item: &serde_json::Value, label: &str) -> Option<(String, String)> {
     item["fields"]
         .as_array()?
         .iter()
-        .find(|f| f["label"] == label)
+        .find(|f| f["title"] == label && f["sectionId"].as_str().unwrap_or_default().is_empty())
         .map(|f| {
             (
-                f["type"].as_str().unwrap().to_string(),
+                f["fieldType"].as_str().unwrap().to_string(),
                 f["value"].as_str().unwrap().to_string(),
             )
         })

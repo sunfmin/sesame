@@ -1,0 +1,34 @@
+{
+  "tree": "f52eb6b3cda5ae93d76cefe9b123bbe94b2fc70c+d1fba762150c532c",
+  "picker": "codex:01a21c9b-1e29-7261-bf3b-3f6c0ffacc75:default",
+  "author": "claude-code:bae0f184-e55c-5bac-9c0a-52a4f813e772:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store/vault.rs:359:40: replace == with != in Vault::write",
+        "why": "The mixed-tag edit fixture already includes `sesame`, so either comparison leaves it unchanged. An edit of an item whose `sesame` tag was removed would expose the difference.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/stand_in.rs:94:45: replace + with - in Stand::answer",
+        "why": "Subtracting archived items can reuse an earlier ID. The archive-and-recreate flow may verify the new login without comparing the two IDs.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/stand_in.rs:122:68: replace + with * in Stand::answer",
+        "why": "The stand-in would stop advancing versions on edit, but it would still advance `updatedAt`, which is what the sync tests use to detect changes.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  },
+  "removed_tests": {
+    "rust": [
+      "src/store/sealed.rs:71: opens_only_under_the_same_secret_and_context",
+      "src/store/vault/op.rs:325: op_message_drops_the_prefix"
+    ]
+  },
+  "added_lines": 403
+}

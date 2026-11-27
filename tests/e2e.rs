@@ -3,7 +3,7 @@
 #[path = "support/harness.rs"]
 mod harness;
 
-use harness::{FakeProvider, FakeVault, Machine, SA_TOKEN, VAULT, field, param};
+use harness::{FakeProvider, FakeVault, Machine, SA_TOKEN, field, param};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1246,10 +1246,10 @@ fn built_in_public_client() {
 }
 
 /// With `SESAME_1PASSWORD_VAULT` set, every command keeps its clients, tokens
-/// and provider fields in the vault, through a real `op` process: nothing
-/// secret under the config dir, no secret or service account token in any
-/// `op` argv, the token in every `op`'s environment. What the vault store
-/// reads and writes, call by call, is `store::vault`'s tests.
+/// and provider fields in the vault, through opcore (on the stand-in Core):
+/// the items laid out as ADR 0001 says, and nothing secret under the config
+/// dir. What the vault store reads and writes, call by call, is
+/// `store::vault`'s tests.
 #[test]
 fn one_password_vault_store() {
     let mut refreshes = 0;
@@ -1326,18 +1326,18 @@ fn one_password_vault_store() {
     );
     let item = vault.item("sesame.hub").expect("the provider's item");
     assert_eq!(item["tags"], serde_json::json!(["sesame"]));
-    assert_eq!(item["category"], "SECURE_NOTE");
+    assert_eq!(item["category"], "SecureNote");
     for (label, kind) in [
-        ("client_id", "STRING"),
-        ("client_secret", "CONCEALED"),
-        ("access_token", "CONCEALED"),
-        ("refresh_token", "CONCEALED"),
-        ("account", "STRING"),
+        ("client_id", "Text"),
+        ("client_secret", "Concealed"),
+        ("access_token", "Concealed"),
+        ("refresh_token", "Concealed"),
+        ("account", "Text"),
     ] {
         assert_eq!(field(&item, label).unwrap().0, kind, "{label}");
     }
     assert_eq!(
-        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
+        vault.read("sesame.hub", "refresh_token"),
         "refresh-secret-1"
     );
 
@@ -1349,10 +1349,10 @@ fn one_password_vault_store() {
         out.ok && out.text().contains(r#""access_token":"refreshed-1""#),
         "{out}"
     );
-    assert_eq!(
-        vault.read(&format!("op://{VAULT}/sesame.hub/access_token")),
-        "refreshed-1"
-    );
+    assert_eq!(vault.read("sesame.hub", "access_token"), "refreshed-1");
+    // Each write is a new version of the item.
+    let version = vault.item("sesame.hub").unwrap()["version"].as_u64();
+    assert!(version > Some(1), "{version:?}");
 
     // The loopback flow (`--browser`), the test playing the browser.
     m.login_in_browser(&["login", "hub", "--browser", "--no-browser"]);
@@ -1389,16 +1389,7 @@ fn one_password_vault_store() {
             assert!(!text.contains(s), "{} holds {s}", path.display());
         }
     }
-    // Nor any `op` argv; every call had the service account token, in its environment.
-    let calls = vault.calls();
-    for (argv, had_token) in &calls {
-        assert!(had_token, "{argv:?}");
-        for s in secrets {
-            assert!(!argv.iter().any(|a| a.contains(s)), "{s} in {argv:?}");
-        }
-    }
-
-    // Nothing of sesame's left in the item: `op` archives it.
+    // Nothing of sesame's left in the item: it is archived.
     for args in [&["client", "hub", "--reset"][..], &["logout", "hub"]] {
         let out = m.run(args);
         assert!(out.ok, "{out}");
@@ -1428,25 +1419,20 @@ fn one_password_vault_errors() {
         "{err}"
     );
     let err = sesame(&|c| {
-        c.env("PATH", "/usr/bin:/bin");
-    });
-    assert!(err.contains("`op` is not on PATH"), "{err}");
-    let err = sesame(&|c| {
         c.env("SESAME_1PASSWORD_VAULT", "elsewhere");
     });
     assert!(
-        err.contains("cannot read the 1Password vault `elsewhere`") && err.lines().count() == 1,
+        err.contains("cannot read a vault titled `elsewhere`") && err.lines().count() == 1,
         "{err}"
     );
-    // The message already names the vault: it is not wrapped in another
-    // `1Password vault `elsewhere`: …` prefix.
+    // The vault is named once.
     assert_eq!(
         err.matches("1Password vault `elsewhere`").count(),
         1,
         "{err}"
     );
     let err = sesame(&|c| {
-        c.env("FAKE_OP_TOKEN", "another");
+        c.env("SESAME_STAND_IN_TOKEN", "another");
     });
     assert!(err.contains("authentication failed"), "{err}");
     assert!(!m.config().join("sesame.db").exists());
@@ -1546,20 +1532,17 @@ fn one_password_vault_migrate() {
     // The vault already holds another client for `cli`.
     let other = serde_json::json!({
         "title": "sesame.cli",
-        "category": "SECURE_NOTE",
+        "category": "SecureNote",
         "tags": ["sesame"],
-        "fields": [{"label": "client_id", "type": "STRING", "value": "other-id"}],
+        "fields": [{"id": "client_id", "title": "client_id", "fieldType": "Text", "value": "other-id"}],
     });
-    vault.op(
-        &["item", "create", "--vault", VAULT, "--format", "json"],
-        &other.to_string(),
-    );
+    vault.add(other);
     let conflicting = vault.item("sesame.cli").unwrap();
 
     // Cut short by the budget after one write: says so, keeps sesame.db.
     let budget = (vault.writes() + 1).to_string();
     let (ok, out, wrote) = migrate(&|c| {
-        c.env("FAKE_OP_MAX_WRITES", &budget);
+        c.env("SESAME_STAND_IN_MAX_WRITES", &budget);
     });
     assert!(!ok && out.contains("sesame store migrate` again"), "{out}");
     // One write made, the next refused.
@@ -1617,9 +1600,9 @@ fn one_password_vault_migrate() {
         }
     }
     let item = vault.item("sesame.hub").unwrap();
-    assert_eq!(field(&item, "client_secret").unwrap().0, "CONCEALED");
+    assert_eq!(field(&item, "client_secret").unwrap().0, "Concealed");
     assert_eq!(
-        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
+        vault.read("sesame.hub", "refresh_token"),
         "refresh-secret-1"
     );
     let out = m.run(&["token", "hub"]);
@@ -1637,7 +1620,7 @@ fn one_password_vault_migrate() {
 }
 
 /// The vault's local copy (docs/adr/0002), across two machines: a call with a
-/// valid token makes no `op` call at all, provider resolution included; the
+/// valid token makes no 1Password call at all, no sign-in, provider resolution included; the
 /// copy on disk holds no secret in plaintext and opens only under the service
 /// account token that sealed it; and what one machine writes reaches another
 /// at that one's next refresh, without it refreshing again. Which items a
@@ -1675,7 +1658,7 @@ fn one_password_local_copy() {
     let as_sa = |m: &Machine, sa: &str, args: &[&str]| {
         let mut c = m.cmd(args);
         c.env("OP_SERVICE_ACCOUNT_TOKEN", sa)
-            .env("FAKE_OP_TOKEN", sa);
+            .env("SESAME_STAND_IN_TOKEN", sa);
         m.output(c, "")
     };
     let refresh_bodies = || {
@@ -1711,7 +1694,7 @@ fn one_password_local_copy() {
     assert!(out.ok && out.text().contains("first"), "{out}");
 
     // A's login token is expiring: the first call refreshes, the next makes
-    // no `op` call at all.
+    // no Core call at all, the sign-in included.
     let out = a.run(&["api", "hub", "/me"]);
     assert!(out.ok && out.text().contains("octo"), "{out}");
     assert_eq!(refresh_bodies().len(), 1);
@@ -1722,7 +1705,7 @@ fn one_password_local_copy() {
     ] {
         let out = a.run(args);
         assert!(out.ok, "{out}");
-        assert_eq!((out.calls, out.writes), (0, 0), "{args:?}");
+        assert_eq!((out.methods.len(), out.writes), (0, 0), "{args:?}");
     }
     assert_eq!(a.run(&["token", "hub"]).text().trim(), "refreshed-1");
 
@@ -1731,7 +1714,7 @@ fn one_password_local_copy() {
     let out = b.run(&["token", "hub"]);
     assert!(out.ok && out.text().trim() == "refreshed-1", "{out}");
     assert_eq!((out.writes, refresh_bodies().len()), (0, 1));
-    assert_eq!(b.run(&["api", "hub", "/me"]).calls, 0);
+    assert_eq!(b.run(&["api", "hub", "/me"]).methods.len(), 0);
 
     // A changes the provider's fields and client. B goes on with its copy
     // until its next refresh, which reads both and refreshes with A's client.
@@ -1744,7 +1727,7 @@ fn one_password_local_copy() {
     assert!(out.ok, "{out}");
     let out = b.run(&["provider", "show", "hub"]);
     assert!(
-        out.ok && out.text().contains("first") && out.calls == 0,
+        out.ok && out.text().contains("first") && out.methods.is_empty(),
         "{out}"
     );
     let out = b.run(&["token", "hub", "--min-life", "7200"]);
@@ -1753,7 +1736,7 @@ fn one_password_local_copy() {
     assert!(last.contains("client_id=cid-2"), "{last}");
     let out = b.run(&["provider", "show", "hub"]);
     assert!(
-        out.ok && out.text().contains("second") && out.calls == 0,
+        out.ok && out.text().contains("second") && out.methods.is_empty(),
         "{out}"
     );
 
@@ -1793,10 +1776,10 @@ fn one_password_local_copy() {
     let other = "ops_another-service-account";
     let out = as_sa(&a, other, &["token", "hub"]);
     assert!(
-        out.ok && out.text().trim() == "refreshed-2" && out.calls > 0,
+        out.ok && out.text().trim() == "refreshed-2" && !out.methods.is_empty(),
         "{out}"
     );
-    assert_eq!(as_sa(&a, other, &["token", "hub"]).calls, 0);
+    assert_eq!(as_sa(&a, other, &["token", "hub"]).methods.len(), 0);
     // And a damaged copy the same.
     let copy = a.config().join("1password-copy");
     let mut bytes = std::fs::read(&copy).unwrap();
@@ -1804,7 +1787,7 @@ fn one_password_local_copy() {
     std::fs::write(&copy, bytes).unwrap();
     let out = as_sa(&a, other, &["token", "hub"]);
     assert!(
-        out.ok && out.text().trim() == "refreshed-2" && out.calls > 0,
+        out.ok && out.text().trim() == "refreshed-2" && !out.methods.is_empty(),
         "{out}"
     );
 
@@ -1820,8 +1803,13 @@ fn one_password_local_copy() {
     assert!(out.ok && hub.contains("not logged in"), "{out}");
     let out = b.run(&["token", "hub"]);
     assert!(!out.ok && out.text().contains("not logged in"), "{out}");
-    // Not logged in: it looked in the vault (another machine may have).
-    assert_eq!(out.calls, 2);
+    // Not logged in: it looked in the vault (another machine may have): a
+    // sign-in, a list and one get_all.
+    assert_eq!(
+        out.methods,
+        ["init_client", "VaultsList", "ItemsList", "ItemsGetAll"],
+        "{out}"
+    );
 
     // An item archived elsewhere is gone here too, though op still answers
     // its id (archived, and refuses an edit of it): B writes a new one.
@@ -1835,6 +1823,11 @@ fn one_password_local_copy() {
     assert!(out.ok, "{out}");
     let item = vault.item("sesame.hub").unwrap();
     assert!(item.to_string().contains("cid-3"), "{item}");
+    // A new id, no other item's.
+    let mut ids: Vec<_> = vault.items().iter().map(|i| i["id"].to_string()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), vault.items().len(), "{ids:?}");
 }
 
 /// `hub`, a provider that rotates its refresh token, logged in on a machine
@@ -1890,7 +1883,7 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
     // Every write is refused: the budget is spent (the fault `over-budget`).
     let refusing = |args: &[&str]| {
         let mut c = m.cmd(args);
-        c.env("FAKE_OP_FAULT", "over-budget");
+        c.env("SESAME_STAND_IN_FAULT", "over-budget");
         m.output(c, "")
     };
 
@@ -1902,10 +1895,10 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
         "{out}"
     );
     assert_eq!(fake.refreshes().len(), 1);
-    // The next command finds it here, with no `op` call.
+    // The next command finds it here, with no 1Password call.
     let out = refusing(&["token", "hub"]);
     assert!(out.ok && out.stdout.trim() == "access-1", "{out}");
-    assert_eq!(out.calls, 0, "{out}");
+    assert!(out.methods.is_empty(), "{out}");
 
     // Refreshed again, still refused: with refresh-1, the one the provider
     // honours now, not the vault's refresh-0.
@@ -1918,10 +1911,7 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
     let out = m.run(&["token", "hub", "--min-life", "7200"]);
     assert!(out.ok && out.stdout.trim() == "access-3", "{out}");
     assert!(!out.stderr.contains("could not write"), "{out}");
-    assert_eq!(
-        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
-        "refresh-3"
-    );
+    assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-3");
     // Written: nothing is pending, so the next sync writes nothing.
     let out = m.run(&["providers"]);
     assert!(out.ok && out.writes == 0, "{out}");
@@ -1931,12 +1921,15 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
     // the refresh still answers it.
     let gone = |args: &[&str]| {
         let mut c = m.cmd(args);
-        c.env("FAKE_OP_FAULT", "edit-gone");
+        c.env("SESAME_STAND_IN_FAULT", "put-refused");
         m.output(c, "")
     };
     let out = gone(&["token", "hub", "--min-life", "7200"]);
     assert!(out.ok && out.stdout.trim() == "access-4", "{out}");
-    assert!(out.stderr.contains("could not find item to edit"), "{out}");
+    assert!(
+        out.stderr.contains("the item to put is not in the vault"),
+        "{out}"
+    );
     // A sync tries the kept token first, is refused, keeps it and goes on.
     let out = gone(&["providers"]);
     assert!(out.ok && out.text().contains("hub"), "{out}");
@@ -1944,18 +1937,12 @@ fn a_refreshed_token_the_vault_refuses_is_kept() {
         out.writes == 1 && out.stderr.contains("could not write"),
         "{out}"
     );
-    assert_eq!(
-        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
-        "refresh-3"
-    );
+    assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-3");
     // The first sync whose write goes through writes it.
     let out = m.run(&["providers"]);
     assert!(out.ok && out.writes == 1, "{out}");
     assert!(!out.stderr.contains("could not write"), "{out}");
-    assert_eq!(
-        vault.read(&format!("op://{VAULT}/sesame.hub/refresh_token")),
-        "refresh-4"
-    );
+    assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-4");
     let out = m.run(&["token", "hub"]);
     assert!(out.ok && out.stdout.trim() == "access-4", "{out}");
     assert_eq!(fake.refreshes().len(), 4);

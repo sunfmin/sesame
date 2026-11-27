@@ -1,5 +1,7 @@
 # A 1Password vault as an opt-in store, selected by the environment
 
+Status: the `op` part superseded by ADR 0004 (opcore).
+
 sesame#1. With `SESAME_1PASSWORD_VAULT=<vault>` set, sesame keeps everything
 `sesame.db` holds (clients, tokens, the person's provider fields) in a
 1Password vault, read and written by `op` as a service account
@@ -72,8 +74,7 @@ sync), ~2 s per `op` call (mytokens ADR 0022, measured).
 
 ## Consequences
 
-- Tested against a fake `op` (`tests/support/fake_op.rs`, an example cargo
-  builds for the tests) in `tests/e2e.rs`: every command, no secret under the
+- Tested against a fake `op` in `tests/e2e.rs`: every command, no secret under the
   config dir or in any `op` argv, call and write counts, the three errors.
 - **Not checked against real 1Password** when this was written: the machine
   had no `op` and no scratch vault profile (`mytokens env sesame-scratch`).

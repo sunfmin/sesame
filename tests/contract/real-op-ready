@@ -1,8 +1,0 @@
-#!/bin/sh
-# Whether the real run may run here: `op` signed in as a service account
-# that sees the contract's vault and nothing else, so no case can touch an
-# item of the owner's own vaults.
-. "$(dirname "$0")/vault.sh"
-[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || { echo "OP_SERVICE_ACCOUNT_TOKEN is not set" >&2; exit 1; }
-vaults=$(op vault list --format json | jq -r '.[].name') || exit 1
-[ "$vaults" = "$vault" ] || { echo "the service account sees vaults other than \`$vault\`: $vaults" >&2; exit 1; }

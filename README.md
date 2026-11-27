@@ -173,8 +173,8 @@ sesame logout jira                            # forgets the local token only
 
 With `SESAME_1PASSWORD_VAULT=<vault>` in the environment, sesame keeps
 everything `sesame.db` would hold (clients, tokens, your provider fields) in
-that 1Password vault instead, read and written by the 1Password CLI `op` as a
-**service account**, whose token is `OP_SERVICE_ACCOUNT_TOKEN`. Every machine
+that 1Password vault instead, reached through opcore (1Password's SDK core,
+built in: no `op` needed) as a **service account**, whose token is `OP_SERVICE_ACCOUNT_TOKEN`. Every machine
 with the same two variables uses the same logins; on disk there is only an
 encrypted copy of the vault's sesame items (below) and an empty lock file,
 `sesame.lock`. Unset, sesame uses
@@ -216,7 +216,7 @@ Switching it on, end to end:
    works from the vault. Without `SESAME_1PASSWORD_VAULT` it refuses, saying
    what to set.
 
-- The vault named but the token missing, `op` not on PATH, or a vault the
+- The vault named but the token missing, or a vault the
   service account cannot read: sesame stops with an error saying which. It
   never falls back to `sesame.db`.
 - **The items.** `sesame.<provider>` holds that provider's client and token, one
@@ -235,12 +235,13 @@ Switching it on, end to end:
   encrypted (XChaCha20-Poly1305, the key derived from
   `OP_SERVICE_ACCOUNT_TOKEN`): without the token it reads as nothing, and with
   it the vault could be read anyway. sesame reads from the copy, so a call
-  whose token is still valid makes **no** `op` call and takes milliseconds.
+  whose token is still valid makes **no** 1Password request, not even a
+  sign-in, and takes milliseconds.
   Writes (`login`, `client`, `provider add/set/rm`, `logout`, a refresh) go
   to the vault first, then the copy. A copy that does not open (the token
   changed, the file damaged) is dropped and rebuilt from the vault.
 - **How fresh the copy is.** Before refreshing a token sesame syncs: it lists
-  the vault once and reads only the items whose version moved, so a token
+  the vault once and reads, in one batch, only the items that changed, so a token
   another machine already refreshed is used without refreshing again, and
   another machine's `client`, `provider set` or `logout` arrives too. It also
   syncs when the copy is an hour old (for tokens that never expire), on
@@ -249,16 +250,16 @@ Switching it on, end to end:
   hour.
 - **The budget.** A service account may read 1000 times and write 100 times an
   hour, and the account makes 1000 requests a day in all (shared with
-  mytokens' vault sync, `op service-account ratelimit`); each `op` call takes
-  about a second. Measured against a real vault (sesame#4): a call with a
-  valid token, 0.03 s and no request; a refreshing call, 3.6 s (a list, a
-  read, a write) and 2 requests on the account's daily count. **Per day**, a
-  machine spends about 2 requests per refresh: a provider with hour-long
-  tokens used all day long is ~24 refreshes, ~50 requests; one whose token
-  does not expire, at most 24 hourly syncs. Calls in between are free, however
-  many. (Before the copy, every `sesame api` cost two reads: 500 calls a day
-  would have spent the account's whole budget.) Secrets reach `op` only on
-  its stdin and the token only in its environment, never on its command line.
+  mytokens' vault sync, `op service-account ratelimit`). A process that must
+  reach the vault signs in first, which takes seconds and spends one read;
+  listing and batch reads spend none, a write two reads and one write. So a
+  call with a valid token makes no request; a refreshing call spends a
+  sign-in, a list, one batch read and one write (4 requests on the account's
+  daily count); `sesame providers`, a sign-in and a list. ADR 0004 holds the
+  measured times. **Per day**, a machine spends about 4 requests per
+  refresh: a provider with hour-long tokens used all day long is ~24
+  refreshes, ~100 requests; one whose token does not expire, at most 24
+  hourly syncs. Calls in between are free, however many.
 - **One machine refreshes each provider.** Two processes on one machine take
   turns (the lock file), but 1Password has no lock across machines: where a
   provider's refresh hands out a new refresh token, two machines refreshing
@@ -280,11 +281,8 @@ definition, so a provider you add can carry its own:
 
 ## Development
 
-`./gate.sh` — fmt, clippy, tests, and the `op` stand-in's truefit contract
-(`truefit.toml`). Its real run, `truefit contract --real op` outside the gate,
-signs in as mytokens profile `sesame-scratch` (a service account that sees only
-the vault `sesame-scratch`):
-`(eval "$(mytokens env sesame-scratch)"; cargo build --example fake-op && truefit contract --real op)`.
+`./gate.sh` — fmt, docfit, clippy, tests and the release dry run. The tests
+reach 1Password only through a stand-in Core (`src/store/vault/stand_in.rs`).
 `tests/e2e.rs` runs the whole flow against a fake provider on
 127.0.0.1.
 
