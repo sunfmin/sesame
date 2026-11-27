@@ -190,7 +190,13 @@ mod tests {
         );
         // And the fields keep the titles as ids, top level.
         let f = &fields(&k)[0];
-        assert_eq!((f.id.as_str(), f.title.as_str()), ("access_token", "access_token"));
-        assert_eq!((f.field_type, f.section_id.as_deref()), (FieldType::Concealed, None));
+        assert_eq!(
+            (f.id.as_str(), f.title.as_str()),
+            ("access_token", "access_token")
+        );
+        assert_eq!(
+            (f.field_type, f.section_id.as_deref()),
+            (FieldType::Concealed, None)
+        );
     }
 }

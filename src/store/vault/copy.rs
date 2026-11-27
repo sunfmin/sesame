@@ -5,9 +5,9 @@
 //! `<config_dir>/1password-copy`, beside the lock that keeps two processes
 //! here from overwriting each other's copy.
 use super::item::{self, is_provider_field, kept};
-use opcore::{Item, Sealer};
 use super::{DEFINITIONS, Token};
 use crate::store::sqlite::Sqlite;
+use opcore::{Item, Sealer};
 use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -138,9 +138,7 @@ impl LocalCopy {
                 copy.delete_provider_fields(&provider)?;
             }
             if let Some(item) = item {
-                for (provider, fields) in
-                    item::definitions(&kept(item, |_| true)).map_err(bad)?
-                {
+                for (provider, fields) in item::definitions(&kept(item, |_| true)).map_err(bad)? {
                     copy.save_provider_fields(&provider, &fields)?;
                 }
             }

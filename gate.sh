@@ -10,7 +10,5 @@ cargo clippy --all-targets --quiet -- -D warnings
 slimfit check
 # The release build: both arches, universal, the formula (ADR 0003).
 DIST=target/release-dry packaging/release.sh dry >/dev/null
-# The op stand-in answers every case of its contract (truefit.toml); the
-# real op's side runs outside the gate (`truefit contract --real op`).
-cargo build --quiet --example fake-op
+# Each stand-in answers every case of its contract (truefit.toml).
 truefit contract >/dev/null || truefit contract

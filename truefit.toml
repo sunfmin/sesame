@@ -1,119 +1,5 @@
-# sesame's ties to the real programs its tests stand in for (`truefit --help`).
-# The `op` stand-in is tests/support/fake_op.rs, run through the scenarios of
-# tests/contract/scenario.sh: each case is a few `op` calls as sesame makes
-# them, printing only what sesame reads of their answers.
-#
-# `truefit contract` (in ./gate.sh) runs the cases against the stand-in.
-# `truefit contract --real op`, outside the gate, runs them against the real
-# `op` too. It signs in as mytokens profile sesame-scratch: OP_SERVICE_ACCOUNT_TOKEN
-# of the service account that sees only the vault sesame-scratch, the
-# contract's vault (tests/contract/vault.sh; SESAME_CONTRACT_VAULT names
-# another), never one of the owner's own. There is no other account for it:
-#   (eval "$(mytokens env sesame-scratch)"; cargo build --example fake-op && truefit contract --real op)
-
-[contract]
-standins = ["tests/contract/fake-*"]
-
-[[standin]]
-name = "op"
-run = ["tests/contract/fake-op"]
-real = ["tests/contract/real-op"]
-needs = "op 2.x on PATH, jq, and OP_SERVICE_ACCOUNT_TOKEN of mytokens profile sesame-scratch: a service account that sees only the vault sesame-scratch (or the one SESAME_CONTRACT_VAULT names)"
-ready = ["tests/contract/real-op-ready"]
-version = ["op", "--version"]
-compare = ["exit", "stdout"]
-normalise = [
-    { pattern = '\[ERROR\] \d{4}/\d\d/\d\d \d\d:\d\d:\d\d', replace = "[ERROR] <date> <time>" },
-    # The run in the contract's item titles (tests/contract/scenario.sh);
-    # their tag is the fixed `sesame-contract`.
-    { pattern = 'run\d+x\d+', replace = "run<n>" },
-]
-# An edit whose item is gone: sesame's write of a token the provider has
-# just issued must not lose it (tests/e2e.rs).
-faults = ["edit-gone"]
-fault_env = "FAKE_OP_FAULT"
-
-# Each error on stderr, `[ERROR] <date> <time> <message>`; "isn't an item".
-[[standin.case]]
-name = "missing-item"
-args = ["missing-item"]
-
-# "isn't a vault".
-[[standin.case]]
-name = "missing-vault"
-args = ["missing-vault"]
-
-# A template from a stdin pipe creates the item; get, list --tags and an
-# archive as sesame reads them.
-[[standin.case]]
-name = "create-get-list-archive"
-args = ["create-get-list-archive"]
-
-# An edit without `tags` keeps them (and the item's category), though its
-# answer shows none.
-[[standin.case]]
-name = "edit-without-tags"
-args = ["edit-without-tags"]
-
-# An edit with `tags` sets them.
-[[standin.case]]
-name = "edit-with-tags"
-args = ["edit-with-tags"]
-
-# A template only from a stdin pipe without `--template`.
-[[standin.case]]
-name = "template-flag-and-stdin"
-args = ["template-flag-and-stdin"]
-
-# No pipe on stdin: no template.
-[[standin.case]]
-name = "create-stdin-not-a-pipe"
-args = ["create-stdin-not-a-pipe"]
-
-# An edit of an item not there: "could not find item to edit". With the
-# fault, the stand-in refuses every edit so.
-[[standin.case]]
-name = "edit-gone"
-fault = "edit-gone"
-args = ["edit-gone"]
-
-# A write over the service account's budget is refused
-# (FAKE_OP_MAX_WRITES on the stand-in). Its real run spends that budget, so
-# it is a stand-in of its own, run only with SESAME_CONTRACT_SPEND_WRITES=1:
-#   (eval "$(mytokens env sesame-scratch)"; SESAME_CONTRACT_SPEND_WRITES=1 truefit contract --real op-write-budget)
-[[standin]]
-name = "op-write-budget"
-run = ["tests/contract/fake-op"]
-real = ["tests/contract/real-op"]
-needs = "as `op`'s, and SESAME_CONTRACT_SPEND_WRITES=1: it spends the service account's hourly write budget"
-ready = ["tests/contract/real-op-budget-ready"]
-version = ["op", "--version"]
-compare = ["exit", "stdout"]
-normalise = [
-    { pattern = '\[ERROR\] \d{4}/\d\d/\d\d \d\d:\d\d:\d\d', replace = "[ERROR] <date> <time>" },
-    # The run in the contract's item titles (tests/contract/scenario.sh);
-    # their tag is the fixed `sesame-contract`.
-    { pattern = 'run\d+x\d+', replace = "run<n>" },
-]
-
-# A write refused over the budget after an earlier one took effect: sesame
-# keeps a token the provider has just issued (tests/e2e.rs
-# a_refreshed_token_the_vault_refuses_is_kept), and a migrate cut short
-# says to run it again.
-faults = ["over-budget"]
-fault_env = "FAKE_OP_FAULT"
-
-[[standin.case]]
-name = "write-budget"
-args = ["write-budget"]
-env = { FAKE_OP_MAX_WRITES = "3" }
-
-# With the fault, the stand-in refuses every write; the real op, once the
-# scenario's writes have spent the budget.
-[[standin.case]]
-name = "over-budget"
-fault = "over-budget"
-args = ["over-budget"]
+# sesame's ties to the real system (`truefit --help`): its promises. The
+# 1Password stand-in Core (src/store/vault/stand_in.rs) has no contract yet.
 
 # Sesame's promises (`truefit promise`): each sentence of README.md and
 # docs/adr/ that a run could break, with the tests that keep it named in the
@@ -224,8 +110,8 @@ check = ["test"]
 # store/vault.rs sync_rereads_only_items_whose_version_moved_plus_the_forced_one; e2e one_password_local_copy
 [[promise]]
 name = "sync-rereads-only-moved-items"
-says = '''Before refreshing a token sesame syncs: it lists the vault once and reads only the items whose version moved, so a token another machine already refreshed is used without refreshing again'''
-source = "README.md:242"
+says = '''Before refreshing a token sesame syncs: it lists the vault once and reads, in one batch, only the items that changed, so a token another machine already refreshed is used without refreshing again'''
+source = "README.md:243"
 check = ["test"]
 why = "each machine syncs under its own lock as one sequence (list, then the moved items); the other machine's write is a vault version the test sets up before the sync, and no interleaving inside one machine is involved"
 
@@ -243,18 +129,11 @@ says = '''So a change made elsewhere reaches a machine within its token's life (
 source = "README.md:247"
 check = ["test"]
 
-# e2e one_password_local_copy (op call and write counts per command)
+# e2e one_password_local_copy (Core call and write counts per command)
 [[promise]]
-name = "two-op-requests-per-refresh"
-says = '''**Per day**, a machine spends about 2 requests per refresh'''
-source = "README.md:255"
-check = ["test"]
-
-# e2e one_password_vault_store (no secret in any op argv; the token in every op's environment)
-[[promise]]
-name = "secrets-never-on-op-argv"
-says = '''Secrets reach `op` only on its stdin and the token only in its environment, never on its command line.'''
-source = "README.md:260"
+name = "four-requests-per-refresh"
+says = '''**Per day**, a machine spends about 4 requests per refresh'''
+source = "README.md:259"
 check = ["test"]
 
 # e2e one_password_vault_errors
@@ -287,17 +166,11 @@ says = '''A write happens only when what sesame keeps in the item changed, and a
 source = "docs/adr/0001-1password-vault-store.md:41"
 check = ["test"]
 
-[[promise]]
-name = "op-token-only-to-op-children"
-says = '''The token is taken out of sesame's own environment at start and given only to `op` children.'''
-source = "docs/adr/0001-1password-vault-store.md:54"
-kept = "store::vault::take_token removes it first thing in main and only the op runner sets it; e2e one_password_vault_store sees it in every op call's environment, but no test inspects the environment of the other child (the browser opener)"
-
-# e2e one_password_local_copy, a_refreshed_token_the_vault_refuses_is_kept
+# store/vault.rs a_write_whose_item_is_unchanged_since_the_copy_reads_nothing; e2e a_refreshed_token_the_vault_refuses_is_kept
 [[promise]]
 name = "write-through-under-lock"
-says = '''**Writes** go through: under the machine's lock the item is read afresh (by id when the copy knows it), written (`create` / `edit` / archive, as in ADR 0001, only if what sesame keeps changed), then the copy is made what was written, version included, and saved.'''
-source = "docs/adr/0002-1password-local-copy.md:33"
+says = '''**Writes**, under the lock: one list; a `get_all` only when the item's `updatedAt` is not the copy's, else the copy's item (kept whole) is written over.'''
+source = "docs/adr/0004-1password-through-opcore.md:24"
 check = ["test"]
 why = "the machine's lock serializes its processes (store/sqlite.rs concurrent_read_then_write_waits_instead_of_failing); within the lock the steps are one sequence the tests drive"
 
@@ -349,4 +222,25 @@ check = ["test"]
 name = "cut-needs-no-tap-token"
 says = '''A cut needs no tap token on the host: only `gh` logged in as a user who may push sesame and dispatch the tap's workflow.'''
 source = "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:39"
+check = ["test"]
+
+# e2e one_password_local_copy (0 Core calls, init_client included); store/vault.rs opcore_signs_in_on_the_first_request_only
+[[promise]]
+name = "copy-answer-never-signs-in"
+says = '''**`Op` is opcore's Client** (`src/store/vault/op.rs`), signed in on a process's first request only: a command the copy answers never signs in.'''
+source = "docs/adr/0004-1password-through-opcore.md:16"
+check = ["test"]
+
+# store/vault.rs sync_rereads_only_items_whose_version_moved_plus_the_forced_one, an_item_the_list_lacks_is_asked_for_by_id_and_an_edit_keeps_other_peoples_fields
+[[promise]]
+name = "sync-one-list-one-get-all"
+says = '''**Sync**: one list, one `get_all` of every item whose `updatedAt` is not the copy's, the forced one, and the unlisted ones the copy has.'''
+source = "docs/adr/0004-1password-through-opcore.md:22"
+check = ["test"]
+
+# store/vault.rs a_read_is_cached_once_per_lock_and_forgotten_when_the_lock_is_taken_again (no read after the writes)
+[[promise]]
+name = "write-answer-kept-not-read-back"
+says = '''What the write answers is kept, never read back.'''
+source = "docs/adr/0004-1password-through-opcore.md:26"
 check = ["test"]

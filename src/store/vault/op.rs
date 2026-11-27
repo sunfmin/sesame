@@ -71,7 +71,8 @@ impl<C: Core> Opcore<C> {
             *slot = Some(signed_in);
         }
         Ok(RefMut::map(slot, |c| {
-            c.as_mut().unwrap_or_else(|| unreachable!("signed in above"))
+            c.as_mut()
+                .unwrap_or_else(|| unreachable!("signed in above"))
         }))
     }
 }
@@ -163,7 +164,11 @@ impl Memory {
 
     /// The item titled `title`, as 1Password holds it.
     pub fn item(&self, title: &str) -> Option<Item> {
-        self.state().items.iter().find(|i| i.title == title).cloned()
+        self.state()
+            .items
+            .iter()
+            .find(|i| i.title == title)
+            .cloned()
     }
 
     /// Changes item `title` as another machine would: a new version.
@@ -247,7 +252,11 @@ impl Op for Memory {
     fn archive(&self, id: &str) -> Result<(), OpError> {
         let mut s = self.state();
         s.calls.push(format!("archive {id}"));
-        let at = s.items.iter().position(|i| i.id == id).ok_or(OpError::NoItem)?;
+        let at = s
+            .items
+            .iter()
+            .position(|i| i.id == id)
+            .ok_or(OpError::NoItem)?;
         s.items.remove(at);
         Ok(())
     }

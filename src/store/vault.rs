@@ -122,7 +122,7 @@ impl Vault {
         Ok(Some(v))
     }
 
-    /// Vault `name` through `op`, its copy (and whether one opened) sealed
+    /// Vault `name` through `op` (opcore, or the tests' vault), its copy (and whether one opened) sealed
     /// under `token` in `dir`.
     fn new(
         name: String,
@@ -312,10 +312,7 @@ impl Vault {
         change: impl FnOnce(&mut Kept),
     ) -> Result<Kept, String> {
         let current = self.current(title)?;
-        let have = current
-            .as_ref()
-            .map(|i| kept(i, &ours))
-            .unwrap_or_default();
+        let have = current.as_ref().map(|i| kept(i, &ours)).unwrap_or_default();
         let mut want = have.clone();
         let provider = title.strip_prefix("sesame.").unwrap_or_default();
         if let Some(t) = self.copy().unwritten_token(provider)? {
@@ -695,7 +692,13 @@ mod tests {
                 format!("edit {x}")
             ]
         );
-        assert!(mem.item("sesame.x").unwrap().fields.iter().any(|f| f.title == "url"));
+        assert!(
+            mem.item("sesame.x")
+                .unwrap()
+                .fields
+                .iter()
+                .any(|f| f.title == "url")
+        );
     }
 
     #[test]
@@ -753,7 +756,10 @@ mod tests {
         let item = mem.item("sesame.x").unwrap();
         assert_eq!(item.tags, ["mine", "sesame"]);
         assert_eq!(item.sections, sections);
-        assert_eq!((item.category, item.notes.as_str()), (Category::Login, "hello"));
+        assert_eq!(
+            (item.category, item.notes.as_str()),
+            (Category::Login, "hello")
+        );
         for f in &theirs {
             assert!(item.fields.contains(f), "{f:?} kept");
         }
@@ -880,7 +886,9 @@ mod tests {
         );
 
         // Another machine writes; the next lock reads the item afresh.
-        mem.change("sesame.x", |i| i.fields.retain(|f| f.title != "access_token"));
+        mem.change("sesame.x", |i| {
+            i.fields.retain(|f| f.title != "access_token")
+        });
         a.save_token("x", &token("t-2")).unwrap();
         assert_eq!(
             calls(&mem),
@@ -900,7 +908,10 @@ mod tests {
     fn a_copy_sealed_before_the_move_to_opcore_opens_with_its_unwritten_tokens() {
         let dir = scratch_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/1password-copy-55d7766");
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/1password-copy-55d7766"
+        );
         std::fs::copy(fixture, dir.join("1password-copy")).unwrap();
         let mem = Memory::default();
         let x = mem.add(ItemParams {

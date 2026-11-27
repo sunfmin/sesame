@@ -24,7 +24,7 @@ agent_help::binary!("sesame");
 
 /// Sign in to SaaS APIs that have no CLI of their own, from the terminal, and call their REST APIs with the stored token.
 ///
-/// A provider is one OAuth login and its one token (`google`, `github`); a service is one API of a provider, reached with its token (`gmail`, `calendar`). sesame keeps clients, tokens and the person's provider definitions in `sesame.db`, or in the 1Password vault `{const:VAULT_VAR}` names, through the `op` CLI.
+/// A provider is one OAuth login and its one token (`google`, `github`); a service is one API of a provider, reached with its token (`gmail`, `calendar`). sesame keeps clients, tokens and the person's provider definitions in `sesame.db`, or in the 1Password vault `{const:VAULT_VAR}` names, reached through opcore (no `op` needed).
 ///
 /// Run `sesame <command> --help` before a command's first run. If you are an AI using sesame for someone:
 ///

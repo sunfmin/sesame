@@ -159,7 +159,9 @@ impl Core for Stand {
         let method = call["name"].as_str().unwrap_or_default();
         let (n, writes) = self.log(method);
         if WRITES.contains(&method) {
-            let max = std::env::var(MAX_WRITES_VAR).ok().and_then(|m| m.parse().ok());
+            let max = std::env::var(MAX_WRITES_VAR)
+                .ok()
+                .and_then(|m| m.parse().ok());
             let spent = std::env::var(FAULT_VAR).is_ok_and(|f| f == "over-budget");
             if spent || max.is_some_and(|m: usize| writes >= m) {
                 return Err(error("RateLimitExceeded", "Too many requests"));

@@ -1,5 +1,0 @@
-#!/bin/sh
-# The write-budget case spends the service account's hourly write budget (and
-# up to that many of the account's daily requests): only when asked to.
-[ "${SESAME_CONTRACT_SPEND_WRITES:-}" = 1 ] || { echo "set SESAME_CONTRACT_SPEND_WRITES=1 to spend the write budget" >&2; exit 1; }
-exec "$(dirname "$0")/real-op-ready"

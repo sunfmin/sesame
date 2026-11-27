@@ -1,4 +1,10 @@
 {
+  "079928548a41": {
+    "mark": "not",
+    "sentence": "The tests reach 1Password only through a stand-in Core (`src/store/vault/stand_in.rs`). `tests/e2e.rs` runs the whole flow against a fake provider on 127.0.0.1.",
+    "source": "README.md:284",
+    "why": "a description of how the tests run, or a decision's context: no behaviour a run could break"
+  },
   "08e5dcc290b7": {
     "mark": "not",
     "sentence": "GitHub's built-in tokens do not expire (refreshing would need the secret). A provider with an `identity_url` records who signed in, shown by `sesame providers`. A provider that takes only https callbacks (`--redirect https-paste`, as slack) uses `https://localhost:<redirect-port>/callback`: nothing listens there, the browser says it cannot open the page, and you paste its address.",
@@ -39,9 +45,10 @@
     "source": "README.md:141"
   },
   "28c5ef6f0948": {
-    "mark": "promise",
+    "mark": "not",
     "sentence": "The token is taken out of sesame's own environment at start and given only to `op` children.",
-    "source": "docs/adr/0001-1password-vault-store.md:54"
+    "source": "docs/adr/0001-1password-vault-store.md:56",
+    "why": "superseded by ADR 0004 (opcore): no op children, and a write reads its item only when the list shows it changed (promise write-through-under-lock)"
   },
   "2a66fdb122b6": {
     "mark": "promise",
@@ -68,15 +75,28 @@
     "sentence": "`store migrate` copies every client, token and provider field, one write per provider (and one for all provider fields), within the service account's write budget.",
     "source": "README.md:207"
   },
+  "433a10e13ef4": {
+    "mark": "not",
+    "sentence": "**Tests** run the binary on a stand-in Core (`src/store/vault/stand_in.rs`, debug builds only); the store's own use `Memory`.",
+    "source": "docs/adr/0004-1password-through-opcore.md:30",
+    "why": "a description of how the tests run, or a decision's context: no behaviour a run could break"
+  },
   "44b5f21fc64d": {
     "mark": "promise",
     "sentence": "A change on another machine reaches this one at its next refresh (about an hour for Google, sooner for shorter tokens), at its next `sesame providers`, or within `COPY_LIFE`. Until then this machine uses what it has; a token revoked elsewhere is learned of from the provider's 401, which syncs and refreshes.",
     "source": "docs/adr/0002-1password-local-copy.md:104"
   },
+  "4c12eab1e6d1": {
+    "mark": "not",
+    "sentence": "Tested against a fake `op` in `tests/e2e.rs`: every command, no secret under the config dir or in any `op` argv, call and write counts, the three errors.",
+    "source": "docs/adr/0001-1password-vault-store.md:77",
+    "why": "a description of how the tests run, or a decision's context: no behaviour a run could break"
+  },
   "4c20e7722cf8": {
-    "mark": "promise",
+    "mark": "not",
     "sentence": "**Writes** go through: under the machine's lock the item is read afresh (by id when the copy knows it), written (`create` / `edit` / archive, as in ADR 0001, only if what sesame keeps changed), then the copy is made what was written, version included, and saved.",
-    "source": "docs/adr/0002-1password-local-copy.md:33"
+    "source": "docs/adr/0002-1password-local-copy.md:35",
+    "why": "superseded by ADR 0004 (opcore): no op children, and a write reads its item only when the list shows it changed (promise write-through-under-lock)"
   },
   "4f5fce6dbe7e": {
     "mark": "promise",
@@ -257,6 +277,12 @@
     "sentence": "An access-token-only cache (the issue's first scope) cannot reach 0 calls: resolving the provider reads the definitions from the vault too.",
     "source": "docs/adr/0002-1password-local-copy.md:16",
     "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
+  },
+  "f404c6718401": {
+    "mark": "not",
+    "sentence": "Felix, 2026-11-27 (control session): one package for optokens and sesame, on the 1Password SDK's core WebAssembly (github.com/sunfmin/opcore), spending as few reads and writes as it can, items as the SDK's structs (「应该直接用结构体，不应该用 Json」). Through `op`, a sync read each moved item alone, and every write read its item first.",
+    "source": "docs/adr/0004-1password-through-opcore.md:8",
+    "why": "a description of how the tests run, or a decision's context: no behaviour a run could break"
   },
   "f8a7feef6869": {
     "mark": "promise",

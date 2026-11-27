@@ -1,5 +1,7 @@
 # An encrypted local copy of the 1Password store
 
+Status: reads before a write, and per item, superseded by ADR 0004.
+
 sesame#4, on top of the vault store of ADR 0001. With the vault selected,
 each machine keeps a copy of the whole store (clients, tokens, provider
 fields) on its disk, sealed; reads come from it, and a call whose token is
@@ -68,7 +70,7 @@ control session 2026-11-20: 「把整个 DB 缓存下来不就行了吗」, then
 - **Sealed at rest.** The copy lives in memory (`rusqlite` `serialize`) and
   reaches disk only as `<config_dir>/1password-copy`: XChaCha20-Poly1305 with
   a random nonce, the key HKDF-SHA256 of `OP_SERVICE_ACCOUNT_TOKEN` with the
-  vault's name as context (`src/store/sealed.rs`). Whoever lacks the token
+  vault's name as context (opcore's `Sealer`). Whoever lacks the token
   reads nothing; whoever has it can read the vault anyway, so holding the
   long-lived secrets locally widens nothing. A copy that does not open
   (another token, another vault, a changed byte) is dropped silently and
@@ -106,13 +108,12 @@ control session 2026-11-20: 「把整个 DB 缓存下来不就行了吗」, then
   providers`, or within `COPY_LIFE`. Until then this machine uses what it
   has; a token revoked elsewhere is learned of from the provider's 401, which
   syncs and refreshes.
-- Tested against the fake `op` (`one_password_local_copy` in tests/e2e.rs):
-  0 calls for a valid token, provider resolution included; a refresh is a
-  list, a read and one write; B picks up A's refreshed token without
+- Tested (`one_password_local_copy` in tests/e2e.rs): 0 calls for a valid
+  token, provider resolution included; B picks up A's refreshed token without
   refreshing and A's `client` / `provider set` at its next refresh; no token,
   refresh token or client secret in plaintext under either config dir; a
   copy under another service account token, or damaged, is rebuilt.
-  `a_refreshed_token_the_vault_refuses_is_kept`: with op refusing writes, a
+  `a_refreshed_token_the_vault_refuses_is_kept`: with writes refused, a
   rotating provider's refreshed token is used, refreshed again from, and
   written once writes go through.
 - Measured against real 1Password: see the README's budget and the comment on
