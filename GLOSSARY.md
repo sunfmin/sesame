@@ -17,6 +17,7 @@
   services.
 - **Config dir**: where the store keeps its files (`~/.config/sesame`, or
   `$SESAME_CONFIG_DIR`). The store's concern; nothing else reads it.
-- **Local copy**: with the 1Password store, each machine's copy of the vault
-  (ADR 0002): `sesame.db`'s rows, each item's id and version at the last sync,
-  and the tokens the vault does not hold yet; sealed on disk, beside the lock.
+- **Local copy**: with the 1Password store, each machine's copy of the vault's
+  sesame items, opcore's Copy (ADR 0006): sealed on disk beside the lock, the
+  writes the vault has not taken yet beside it; read at any age, synced on
+  demand.

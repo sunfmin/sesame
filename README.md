@@ -28,9 +28,9 @@ The manual is the binary's help: `sesame --help` first, `sesame <command>
 - **Clients, tokens and your provider fields**: in plaintext in
   `~/.config/sesame/sesame.db` (`$SESAME_CONFIG_DIR` when set), 0600 in a 0700
   directory, so keep it out of dotfiles and synced folders. Or, opted in by the
-  environment, in a 1Password vault: `sesame help 1password-vault`. The
-  decisions behind the vault store are ADRs 0001, 0002 and 0004 in
-  `docs/adr/`.
+  environment, in a 1Password vault: `sesame help 1password-vault`, which
+  says when sesame reaches 1Password. The decisions behind the vault store
+  are ADRs 0001, 0002, 0004 and 0006 in `docs/adr/`.
 - **The manual**: written where each fact lives, assembled by
   [agent-help](https://github.com/sunfmin/agent-cli): a command's doc comment
   on its clap variant in `src/main.rs`, a topic in `src/help/<topic>.md`

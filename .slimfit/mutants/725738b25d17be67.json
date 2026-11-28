@@ -1,0 +1,53 @@
+{
+  "tree": "9ca73508a0841c2ef2a600788f527f5d49d4e25e+d1fba762150c532c",
+  "picker": "codex:01a22326-150f-7dd3-849f-fefb9d18e978:default",
+  "author": "claude-code:62578623-5324-529e-a472-32ebfbdbd08a:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store/vault.rs:210:9: replace Vault::pending_path -> PathBuf with Default::default()",
+        "why": "The refresh test checks that a warning appears, so an empty pending-file path could slip through both the warning and the lock's file-change detection.",
+        "outcome": "killed",
+        "first_outcome": "survived"
+      },
+      {
+        "name": "src/store/vault.rs:451:62: replace == with != in Vault::push",
+        "why": "The refresh during retry backoff checks the returned token and the vault's unchanged value, so it could miss a write still pending for that title being reported as landed.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:527:27: replace match guard e.is_transient() with true in Vault::latest_token",
+        "why": "The shown tests leave room for a permanent sync error with a readable copy to be treated as permission to use the cached token.",
+        "outcome": "killed",
+        "first_outcome": "survived"
+      },
+      {
+        "name": "src/store/sqlite.rs:320:24: replace > with >= in Sqlite::delete_client",
+        "why": "The replacement no-op deletion test uses the vault backend, so a SQLite reset that reports success after deleting zero rows could go unnoticed.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/item.rs:149:13: delete field field_type from struct ItemField expression in fields",
+        "why": "Vault round trips can preserve the secret values while losing their concealed field type, and the shown assertions check values and encrypted copy bytes.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  },
+  "removed_tests": {
+    "rust": [
+      "src/store/sqlite.rs:507: an_image_comes_back_whole_and_migrated",
+      "src/store/vault.rs:611: sync_rereads_only_items_whose_version_moved_plus_the_forced_one",
+      "src/store/vault.rs:662: a_write_whose_item_is_unchanged_since_the_copy_reads_nothing",
+      "src/store/vault.rs:693: an_item_the_list_lacks_is_asked_for_by_id_and_an_edit_keeps_other_peoples_fields",
+      "src/store/vault.rs:759: an_unchanged_update_writes_nothing_and_the_normal_form_is_what_reads_back",
+      "src/store/vault.rs:852: a_read_is_cached_once_per_lock_and_forgotten_when_the_lock_is_taken_again",
+      "src/store/vault.rs:896: a_copy_sealed_before_the_move_to_opcore_opens_with_its_unwritten_tokens",
+      "src/store/vault.rs:947: opcore_signs_in_on_the_first_request_only",
+      "tests/e2e.rs:1880: a_refreshed_token_the_vault_refuses_is_kept"
+    ]
+  },
+  "added_lines": 370
+}

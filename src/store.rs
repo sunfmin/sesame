@@ -68,8 +68,8 @@ impl Store {
     }
 
     /// `open`, with a view current enough to list every provider's state
-    /// (`sesame providers`): the vault's local copy is synced first (one
-    /// request when nothing moved, docs/adr/0002). `sesame.db` is current.
+    /// (`sesame providers`): the vault's Copy is synced first, pushing what
+    /// waits (docs/adr/0006). `sesame.db` is current.
     pub fn open_current() -> Result<Store, String> {
         Store::open_with(true)
     }
@@ -104,10 +104,9 @@ impl Store {
 
     /// `provider`'s token as it stands now, to decide on refreshing it (call
     /// it under `locked`): what another machine wrote included, so a token it
-    /// refreshed is used rather than refreshed again. `token` may answer from
-    /// the vault's local copy as last synced; this syncs it first, reading
-    /// `provider`'s item whatever its version (docs/adr/0002). `sesame.db` is
-    /// this machine's alone: the same as `token`.
+    /// refreshed is used rather than refreshed again. `token` answers from
+    /// the vault's Copy as last synced; this syncs it first (docs/adr/0006).
+    /// `sesame.db` is this machine's alone: the same as `token`.
     pub fn latest_token(&self, provider: &str) -> Result<Option<Token>, String> {
         match self {
             Store::Sqlite(s) => s.token(provider),
@@ -152,8 +151,8 @@ impl Store {
     }
 
     /// Stores `t`, a token the provider issued in place of the stored one
-    /// (a refresh): never lost, even where the vault refuses the write
-    /// (`Vault::keep_token`). `sesame.db` saves it.
+    /// (a refresh): the command goes on with it even where the vault cannot
+    /// take the write now (`Vault::keep_token`). `sesame.db` saves it.
     pub fn keep_token(&self, provider: &str, t: &Token) -> Result<(), String> {
         match self {
             Store::Sqlite(s) => s.save_token(provider, t),

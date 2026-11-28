@@ -3,6 +3,8 @@
 Supersedes ADR 0001's "read and written by `op`" and ADR 0002's reads before
 a write; the vault layout and the local copy stay.
 
+Status: its copy, sync and writes superseded by ADR 0006.
+
 ## Context
 
 Felix, 2026-11-27 (control session): one package for optokens and sesame, on
@@ -13,7 +15,7 @@ item alone, and every write read its item first.
 
 ## Decision
 
-- **`Op` is opcore's Client** (`src/store/vault/op.rs`), signed in on a
+- **`Op` is opcore's Client** (in `src/store/vault.rs` then), signed in on a
   process's first request only: a command the copy answers never signs in.
   No `op`, no child; the token is taken out of the environment.
 - **Items are opcore's structs**, laid out as ADR 0001 says: in `op` a

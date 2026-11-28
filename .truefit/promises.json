@@ -28,6 +28,12 @@
     "source": "README.md:188",
     "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
   },
+  "10bbfea41f9e": {
+    "mark": "not",
+    "sentence": "What opcore lacks, so sesame does too: why a push waits is not reported; a failed push is retried on factum's backoff (1 s, doubling), so a process within it leaves the write waiting; every staged write warns that it is staged, even when pushed at once.",
+    "source": "docs/adr/0006-opcores-copy-on-demand.md:46",
+    "why": "a limit the decision states (what opcore does not give), no promise of sesame's"
+  },
   "150a41bfe2ae": {
     "mark": "not",
     "sentence": "Definitions change only by a person's command, so a lost update between two machines editing definitions at the same moment is accepted.",
@@ -94,9 +100,10 @@
     "why": "a description of how the tests run, or a decision's context: no behaviour a run could break"
   },
   "44b5f21fc64d": {
-    "mark": "promise",
+    "mark": "not",
     "sentence": "A change on another machine reaches this one at its next refresh (about an hour for Google, sooner for shorter tokens), at its next `sesame providers`, or within `COPY_LIFE`. Until then this machine uses what it has; a token revoked elsewhere is learned of from the provider's 401, which syncs and refreshes.",
-    "source": "docs/adr/0002-1password-local-copy.md:104"
+    "source": "docs/adr/0002-1password-local-copy.md:106",
+    "why": "superseded by ADR 0006: sesame's own Copy, its hour and its write path are gone"
   },
   "4c12eab1e6d1": {
     "mark": "not",
@@ -174,6 +181,12 @@
     "sentence": "An item is read at most once per process; taking the local lock forgets what was read, so a read-then-write sees the other process's write.",
     "source": "docs/adr/0001-1password-vault-store.md:39"
   },
+  "8c7590dba53b": {
+    "mark": "not",
+    "sentence": "The account's 1000 requests a day count every read and write (opcore's decision record 7): a sync nobody asked for spends them.",
+    "source": "docs/adr/0006-opcores-copy-on-demand.md:9",
+    "why": "a decision's context: no behaviour a run could break"
+  },
   "8c8c720ed527": {
     "mark": "not",
     "sentence": "**An access-token-only cache.**",
@@ -192,9 +205,10 @@
     "source": "README.md:220"
   },
   "90cca75f1700": {
-    "mark": "promise",
+    "mark": "not",
     "sentence": "It is written to a file beside it and renamed over it, under the lock, so a reader never sees half of one.",
-    "source": "docs/adr/0002-1password-local-copy.md:75"
+    "source": "docs/adr/0002-1password-local-copy.md:77",
+    "why": "superseded by ADR 0006: sesame's own Copy, its hour and its write path are gone"
   },
   "9541baaeff07": {
     "mark": "not",
@@ -246,6 +260,18 @@
     "source": "docs/adr/0001-1password-vault-store.md:35",
     "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
   },
+  "bc79be224046": {
+    "mark": "not",
+    "sentence": "The copy lives in memory (`rusqlite` `serialize`) and reaches disk only as `<config_dir>/1password-copy`: XChaCha20-Poly1305 with a random nonce, the key HKDF-SHA256 of `OP_SERVICE_ACCOUNT_TOKEN` with the vault's name as context (opcore's `Sealer`). Whoever lacks the token reads nothing; whoever has it can read the vault anyway, so holding the long-lived secrets locally widens nothing.",
+    "source": "docs/adr/0002-1password-local-copy.md:70",
+    "why": "superseded by ADR 0006: sesame's own Copy, its hour and its write path are gone"
+  },
+  "c2325e9be8b0": {
+    "mark": "not",
+    "sentence": "**Writes**, under the lock: one list; a `get_all` only when the item's `updatedAt` is not the copy's, else the copy's item (kept whole) is written over.",
+    "source": "docs/adr/0004-1password-through-opcore.md:26",
+    "why": "superseded by ADR 0006: sesame's own Copy, its hour and its write path are gone"
+  },
   "ca23f22c90d6": {
     "mark": "not",
     "sentence": "Undo: remove `tests/budget.rs`, `docs/budget.md` and `scripts/e2e.sh`; the stand-in's ` refused` is read only by the tests.",
@@ -253,9 +279,10 @@
     "why": "description of what the tests and the script do, rationale, or how to undo: nothing a run of sesame could break"
   },
   "d0ec56e0fb50": {
-    "mark": "promise",
+    "mark": "not",
     "sentence": "when the copy is older than `COPY_LIFE` (1 h), so a provider whose token never expires (GitHub's, a pasted one) still sees another machine's change within the hour;",
-    "source": "docs/adr/0002-1password-local-copy.md:62"
+    "source": "docs/adr/0002-1password-local-copy.md:64",
+    "why": "superseded by ADR 0006: sesame's own Copy, its hour and its write path are gone"
   },
   "d23bf892b42e": {
     "mark": "not",
@@ -278,6 +305,12 @@
     "mark": "promise",
     "sentence": "**Per day**, a machine spends about 2 requests per refresh: a provider with hour-long tokens used all day long is ~24 refreshes, ~50 requests; one whose token does not expire, at most 24 hourly syncs.",
     "source": "README.md:255"
+  },
+  "e6524efaf8d7": {
+    "mark": "not",
+    "sentence": "**Sync**: one list, one `get_all` of every item whose `updatedAt` is not the copy's, the forced one, and the unlisted ones the copy has.",
+    "source": "docs/adr/0004-1password-through-opcore.md:24",
+    "why": "superseded by ADR 0006: sesame's own Copy, its hour and its write path are gone"
   },
   "e85f3027481d": {
     "mark": "not",

@@ -176,8 +176,9 @@ fn provider() -> FakeProvider {
     })
 }
 
-/// The first sync of a process: the sign-in, its vault, one list.
-const SIGN_IN: &str = "init_client VaultsList";
+/// A new host's sign-in: it finds the vault. After it, the Copy knows the
+/// vault, and a sign-in is `init_client` alone.
+const FIRST_SIGN_IN: &str = "init_client VaultsList";
 
 /// Every command's scenarios, in the order they run on two machines.
 fn rows() -> Vec<Row> {
@@ -189,14 +190,16 @@ fn rows() -> Vec<Row> {
     let base = fake.base();
     let add = fake.add_args("hub", "", &["--device-url", &format!("{base}/device")]);
     let add = add.join(" ");
-    // A sync that finds nothing moved; one that reads what did.
-    let listed = format!("{SIGN_IN} ItemsList");
-    let sync = format!("{listed} ItemsGetAll");
-    // A write; a refresh's, whose sync reads the provider's item whatever its
-    // version, then the write's own read.
-    let edit = format!("{sync} ItemsPut");
-    let refresh = format!("{sync} ItemsGetAll ItemsPut");
-    let create = format!("{listed} ItemsCreateAll");
+    // A sync that finds nothing moved.
+    let listed = "init_client ItemsList".to_string();
+    // A write, staged and pushed: the push's list, its read of the item as
+    // 1Password holds it now, the write.
+    let edit = format!("{listed} ItemsGetAll ItemsPut");
+    // A refresh: the sync it decides on, then its write's push.
+    let refresh = format!("{listed} ItemsList ItemsGetAll ItemsPut");
+    // A create: a sync first (another host may have made the item), then
+    // the push.
+    let create = format!("{listed} ItemsList ItemsCreateAll");
     let mut rows = steps(
         &costs,
         &a,
@@ -206,7 +209,7 @@ fn rows() -> Vec<Row> {
                 &add,
                 "",
                 "",
-                &format!("{listed} ItemsList ItemsCreateAll"),
+                &format!("{FIRST_SIGN_IN} ItemsList ItemsList ItemsCreateAll"),
                 [2, 1],
             ),
             (
@@ -255,9 +258,17 @@ fn rows() -> Vec<Row> {
                 "token hub --min-life 7200",
                 "",
                 "over-budget",
-                &format!("{sync} ItemsGetAll ItemsPut!"),
+                &format!("{listed} ItemsList ItemsGetAll ItemsPut!"),
                 [1, 0],
             ),
+        ],
+    );
+    // Past opcore's retry wait (1 s) for the write that waits.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    rows.extend(steps(
+        &costs,
+        &a,
+        &[
             (
                 "`providers`, writing the kept token",
                 "providers",
@@ -277,7 +288,7 @@ fn rows() -> Vec<Row> {
             ),
             ("`provider show`", "provider show hub", "", "", "", [0, 0]),
         ],
-    );
+    ));
     rows.extend(steps(
         &costs,
         &b,
@@ -286,7 +297,7 @@ fn rows() -> Vec<Row> {
             "token hub",
             "",
             "",
-            &sync,
+            &format!("{FIRST_SIGN_IN} ItemsList ItemsGetAll"),
             [1, 0],
         )],
     ));
