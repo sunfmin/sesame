@@ -43,3 +43,8 @@ The manual is the binary's help: `sesame --help` first, `sesame <command>
 tests reach 1Password only through a stand-in Core
 (`src/store/vault/stand_in.rs`); `tests/e2e.rs` runs the whole flow against a
 fake provider on 127.0.0.1.
+What each command spends of 1Password's reads and writes is
+`docs/budget.md`, generated from the stand-in by `tests/budget.rs`;
+`scripts/e2e.sh` measures the same commands on the vault `sesame-scratch`
+(outside the gate: it needs the network and the optokens Profile
+`sesame-scratch`).
