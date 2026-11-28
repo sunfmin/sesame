@@ -1,24 +1,21 @@
 {
   "README.md": {
-    "bytes": 19221,
-    "local_refs": 1,
-    "measurements": 2,
+    "bytes": 19018,
     "paragraph": 1270,
     "pointers": [
       "sesame.lock"
     ]
   },
   "docs/adr/0001-1password-vault-store.md": {
-    "bytes": 5177,
-    "local_refs": 3,
-    "paragraph": 703,
+    "bytes": 5139,
+    "paragraph": 687,
     "pointers": [
       "ADR 0022",
       "sesame.lock"
     ]
   },
   "docs/adr/0002-1password-local-copy.md": {
-    "bytes": 7347,
+    "bytes": 7341,
     "local_refs": 6,
     "paragraph": 1065,
     "pointers": [
@@ -39,9 +36,6 @@
     "local_refs": 1
   },
   "tests/e2e.rs": {
-    "local_refs": 1
-  },
-  "tests/support/fake_op.rs": {
     "local_refs": 1
   },
   "truefit.toml": {

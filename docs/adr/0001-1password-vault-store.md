@@ -2,7 +2,7 @@
 
 Status: the `op` part superseded by ADR 0004 (opcore).
 
-sesame#1. With `SESAME_1PASSWORD_VAULT=<vault>` set, sesame keeps everything
+With `SESAME_1PASSWORD_VAULT=<vault>` set, sesame keeps everything
 `sesame.db` holds (clients, tokens, the person's provider fields) in a
 1Password vault, read and written by `op` as a service account
 (`OP_SERVICE_ACCOUNT_TOKEN`). Unset, `sesame.db` as before.
@@ -49,8 +49,8 @@ sync), ~2 s per `op` call (mytokens ADR 0022, measured).
 - **Talking to `op`.** Templates go on stdin through a pipe with no
   `--template`; an edit carries `tags` (sesame's own added to the item's) and
   keeps the fields, sections and tags someone else put on the item. (Written
-  as "without them op wipes them"; sesame#22 found op 2.42.0 keeps an item's
-  tags on an edit without `tags`: only that edit's printed answer shows none.
+  as "without them op wipes them"; op 2.42.0 keeps an item's tags
+  on an edit without `tags`: only that edit's printed answer shows none.
   Tags come back sorted.) An archived item still answers `op item get <id>`
   (`"state": "ARCHIVED"`, and an edit of it fails) though not its title or a
   list: sesame reads it as gone. The token is
@@ -78,7 +78,7 @@ sync), ~2 s per `op` call (mytokens ADR 0022, measured).
   config dir or in any `op` argv, call and write counts, the three errors.
 - **Not checked against real 1Password** when this was written: the machine
   had no `op` and no scratch vault profile (`mytokens env sesame-scratch`).
-  Checked in sesame#4 against `sesame-scratch` with op 2.42.0: `op item get
+  Checked on 2026-11-19 against `sesame-scratch` with op 2.42.0: `op item get
   <title>` found an item 1.15 s after `create`, `op item list` listed it at
   once (with its `version`), and an edit carrying the fields op printed was
   accepted (version 1 → 2, tags kept). Reads and writes of the store go
