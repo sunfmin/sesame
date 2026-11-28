@@ -38,6 +38,15 @@
       "test": "sesame::e2e::one_password_local_copy",
       "hash": "8f2dd00622bfaee7",
       "reason": "read: no assertion maps — it checks the two-machine local copy (B syncs A's refreshed token without refreshing, no plaintext secret in either config dir, copy rebuilt under another service account token or when damaged, logout and archived item reaching B), none of which a_refreshed_token_the_vault_refuses_is_kept asserts; setups conflict (two machines and a non-rotating provider vs one machine, a rotating provider and write faults), so a merge would change what each checks and hide which behaviour failed"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::e2e::one_password_local_copy",
+      "kind": "slow-test",
+      "hash": "8f2dd00622bfaee7",
+      "seconds": 0.523,
+      "suite_seconds": 5.215,
+      "reason": "Its time is ~24 real spawns of the sesame binary (10-30ms CPU each in a debug build, measured per spawn; no sleep, the provider and vault stand-ins answer at once, the seal is HKDF + XChaCha20, cheap) across two machines sharing one stand-in vault. Each spawn is a separate process on purpose: what it checks is per process (no 1Password call at all from a fresh process with a valid token, the sealed copy on disk reopened by the next process, under another service account token, damaged, and what machine A wrote reaching machine B's next process). Folding spawns into one process or faking the binary would test less; which items a sync reads is already store::vault's in-process tests."
     }
   ],
   "kept_files": [
