@@ -73,10 +73,17 @@ impl Source {
                 h.var
             ))),
             Source::Stored(s) if token.refresh_token.is_some() => Ok(Refused::Retry(refresh(s)?)),
-            Source::Stored(_) => Ok(Refused::Tell(format!(
-                "sesame: the `{p}` token was refused and has no refresh token; run `sesame login {p}`",
-                p = t.provider
-            ))),
+            // Never refreshed, so caught up here: another machine may have
+            // logged in again since this one's copy of the token.
+            Source::Stored(s) => match s.locked(|s| s.latest_token(&t.provider))? {
+                Some(other) if other.access_token != token.access_token => {
+                    Ok(Refused::Retry(other))
+                }
+                _ => Ok(Refused::Tell(format!(
+                    "sesame: the `{p}` token was refused and has no refresh token; run `sesame login {p}`",
+                    p = t.provider
+                ))),
+            },
         }
     }
 }
@@ -239,6 +246,13 @@ mod tests {
                     .into()
             )
         );
+    }
+
+    #[test]
+    fn a_refused_token_without_a_refresh_token_is_retried_with_another_the_store_holds_now() {
+        let (t, src) = stored(&token("new", None));
+        let got = src.refused_with(&t, &token("old", None), no_refresh);
+        assert_eq!(got.unwrap(), Refused::Retry(token("new", None)));
     }
 
     #[test]

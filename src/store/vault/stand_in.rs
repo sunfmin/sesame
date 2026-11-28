@@ -3,7 +3,6 @@
 //! as the Core v0.4.1 does where sesame depends on it, and logging each
 //! method called, one per line of `calls.log`. Only in a debug build, and
 //! only when `DIR_VAR` names its directory; a release build has none.
-use opcore::Client;
 use opcore::core::{Core, Failure};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -18,20 +17,29 @@ pub const TOKEN_VAR: &str = "SESAME_STAND_IN_TOKEN";
 pub const FAULT_VAR: &str = "SESAME_STAND_IN_FAULT";
 /// Writes past this many (in `calls.log`) are refused by the rate limit.
 pub const MAX_WRITES_VAR: &str = "SESAME_STAND_IN_MAX_WRITES";
-/// The one vault it has.
+/// The one vault it has, unless `Stand::on` names another.
 const VAULT: &str = "scratch";
 const WRITES: [&str; 3] = ["ItemsCreateAll", "ItemsPut", "ItemsArchive"];
 
-type SignIn = Box<dyn Fn() -> Result<Client<Stand>, opcore::Error>>;
-
-/// Signs in to the stand-in in `dir`, as opcore signs in to the Core.
-pub fn sign_in(dir: PathBuf, token: &str, vault: &str) -> SignIn {
-    let (t, v) = (token.to_string(), vault.to_string());
-    Box::new(move || Client::with_core(Stand { dir: dir.clone() }, &t, &v))
-}
-
+/// The stand-in on the vault in `dir`: a Core opcore signs in on.
 pub struct Stand {
     dir: PathBuf,
+    vault: String,
+}
+
+impl Stand {
+    /// The vault `scratch`, kept in `dir`.
+    pub fn new(dir: PathBuf) -> Stand {
+        Stand::on(dir, VAULT)
+    }
+
+    /// The vault titled `vault`, kept in `dir`.
+    pub fn on(dir: PathBuf, vault: &str) -> Stand {
+        Stand {
+            dir,
+            vault: vault.into(),
+        }
+    }
 }
 
 fn error(name: &str, message: &str) -> Failure {
@@ -65,7 +73,7 @@ impl Stand {
         let mut items = self.read("items.json");
         let find = |items: &[Value], id: &Value| items.iter().position(|i| i["id"] == *id);
         let answer = match method {
-            "VaultsList" => json!([{ "id": "v1", "title": VAULT }]),
+            "VaultsList" => json!([{ "id": "v1", "title": self.vault }]),
             "ItemsList" => items
                 .iter()
                 .map(|i| {

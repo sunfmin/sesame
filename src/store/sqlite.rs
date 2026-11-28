@@ -106,7 +106,8 @@ impl Sqlite {
     }
 
     /// A database in memory, named `name` in errors, with nothing on disk:
-    /// `image` (what `image` gave) if any, else empty; migrated either way.
+    /// `image` (a serialized database: the old Copy's) if any, else empty;
+    /// migrated either way.
     pub fn in_memory(name: &str, image: Option<&[u8]>) -> Result<Sqlite, String> {
         let err = |e: rusqlite::Error| format!("{name}: {e}");
         let mut conn = Connection::open_in_memory().map_err(err)?;
@@ -120,15 +121,6 @@ impl Sqlite {
         };
         store.migrate()?;
         Ok(store)
-    }
-
-    /// The whole database as bytes, for `in_memory` to take back.
-    pub fn image(&mut self) -> Result<Vec<u8>, String> {
-        let data = self
-            .conn
-            .serialize(MAIN_DB)
-            .map_err(|e| format!("{}: {e}", self.path.display()))?;
-        Ok(data.to_vec())
     }
 
     /// The connection, for a caller keeping tables of its own beside these.
@@ -501,31 +493,6 @@ mod tests {
         s.delete_token("p").unwrap();
         assert!(s.token("p").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_image_comes_back_whole_and_migrated() {
-        let mut s = Sqlite::in_memory("copy", None).unwrap();
-        s.save_client(
-            "p",
-            &Client {
-                client_id: "id".into(),
-                client_secret: Some("s".into()),
-            },
-        )
-        .unwrap();
-        let image = s.image().unwrap();
-        let back = Sqlite::in_memory("copy", Some(&image)).unwrap();
-        assert_eq!(
-            back.client("p").unwrap().unwrap().client_secret,
-            Some("s".into())
-        );
-        let v: i64 = back
-            .conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(v as usize, MIGRATIONS.len());
-        assert!(Sqlite::in_memory("copy", Some(b"not a database")).is_err());
     }
 
     #[test]
