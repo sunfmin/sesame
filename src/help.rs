@@ -24,6 +24,11 @@ pub struct SigningIn;
 #[topic(name = "handed-token")]
 pub struct HandedToken;
 
+#[doc = include_str!("help/1password-vault.md")]
+#[derive(Topic)]
+#[topic(name = "1password-vault")]
+pub struct OnePasswordVault;
+
 /// The manual, assembled from the parser's command tree (the provider
 /// fields' flags made from the field table among it), the topics and the
 /// names of the environment variables.
@@ -31,6 +36,7 @@ pub fn manual() -> Help {
     Help::new(Cli::command())
         .topic::<SigningIn>()
         .topic::<HandedToken>()
+        .topic::<OnePasswordVault>()
         .constant("TOKEN_PREFIX", crate::source::TOKEN_PREFIX)
         .constant("PROVIDERS_VAR", crate::source::PROVIDERS_VAR)
         .constant("VAULT_VAR", crate::store::VAULT_VAR)
