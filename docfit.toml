@@ -1,4 +1,5 @@
-ignore = ["src/**"]
+# docs/budget.md is data: tests/budget.rs generates it and fails when it is stale.
+ignore = ["src/**", "docs/budget.md"]
 
 # This repo's documents, each under its kind (`docfit check --help`).
 [documents]
@@ -9,5 +10,6 @@ ignore = ["src/**"]
 "docs/adr/0002-1password-local-copy.md" = "adr"
 "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md" = "adr"
 "docs/adr/0004-1password-through-opcore.md" = "adr"
-"docs/adr/0005-opcores-copy-on-demand.md" = "adr"
+"docs/adr/0006-opcores-copy-on-demand.md" = "adr"
+"docs/adr/0005-every-commands-budget-is-recorded.md" = "adr"
 "skills/sesame/SKILL.md" = "skill"

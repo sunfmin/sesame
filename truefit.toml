@@ -1,5 +1,7 @@
 # sesame's ties to the real system (`truefit --help`): its promises. The
-# 1Password stand-in Core (src/store/vault/stand_in.rs) has no contract yet.
+# 1Password stand-in Core (src/store/vault/stand_in.rs) has no contract yet;
+# what its calls cost is opcore's (promise stand-in-costs-are-opcores), and
+# scripts/e2e.sh measures them on sesame-scratch.
 
 # Sesame's promises (`truefit promise`): each sentence of README.md and
 # docs/adr/ that a run could break, with the tests that keep it named in the
@@ -193,7 +195,7 @@ check = ["test"]
 [[promise]]
 name = "syncs-only-on-demand"
 says = '''**It syncs** only before a refresh (`latest_token`), for `sesame providers`, with no Copy, before a create (an item another machine made is edited, not made twice), and when a provider refuses the token it holds: one sync, one retry with the vault's if it holds another.'''
-source = "docs/adr/0005-opcores-copy-on-demand.md:18"
+source = "docs/adr/0006-opcores-copy-on-demand.md:18"
 check = ["test"]
 why = "each sync is a step of one command's sequence, and the retry is one call made again in that process after it; no two of them run at once or out of the order the tests drive"
 
@@ -201,5 +203,19 @@ why = "each sync is a step of one command's sequence, and the retry is one call 
 [[promise]]
 name = "change-elsewhere-arrives-on-demand"
 says = '''Another machine's change arrives at a refresh, `sesame providers` or a 401, never because time passed.'''
-source = "docs/adr/0005-opcores-copy-on-demand.md:44"
+source = "docs/adr/0006-opcores-copy-on-demand.md:44"
+check = ["test"]
+
+# tests/budget.rs docs_budget_md_is_what_each_command_spends: each scenario's calls and Budget asserted, docs/budget.md compared
+[[promise]]
+name = "commands-budget-recorded"
+says = "Every command's scenario on the stand-in Core asserts its Core calls and the reads, writes and account requests they spend, and `docs/budget.md` is their table: `tests/budget.rs` generates it, fails when it is stale, and `UPDATE_BUDGET=1` rewrites it."
+source = "docs/adr/0005-every-commands-budget-is-recorded.md:14"
+check = ["test"]
+
+# tests/budget.rs costs(): read from opcore's decision record 1 in the source cargo metadata --locked resolves
+[[promise]]
+name = "stand-in-costs-are-opcores"
+says = "Each method's cost is read from opcore's decision record 1, in the opcore source `Cargo.lock` pins, where opcore measured it on the real Core; sesame keeps no copy of the numbers, so an opcore bump that changes them changes the table."
+source = "docs/adr/0005-every-commands-budget-is-recorded.md:15"
 check = ["test"]

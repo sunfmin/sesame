@@ -30,7 +30,7 @@ The manual is the binary's help: `sesame --help` first, `sesame <command>
   directory, so keep it out of dotfiles and synced folders. Or, opted in by the
   environment, in a 1Password vault: `sesame help 1password-vault`, which
   says when sesame reaches 1Password. The decisions behind the vault store
-  are ADRs 0001, 0002, 0004 and 0005 in `docs/adr/`.
+  are ADRs 0001, 0002, 0004 and 0006 in `docs/adr/`.
 - **The manual**: written where each fact lives, assembled by
   [agent-help](https://github.com/sunfmin/agent-cli): a command's doc comment
   on its clap variant in `src/main.rs`, a topic in `src/help/<topic>.md`
@@ -43,3 +43,8 @@ The manual is the binary's help: `sesame --help` first, `sesame <command>
 tests reach 1Password only through a stand-in Core
 (`src/store/vault/stand_in.rs`); `tests/e2e.rs` runs the whole flow against a
 fake provider on 127.0.0.1.
+What each command spends of 1Password's reads and writes is
+`docs/budget.md`, generated from the stand-in by `tests/budget.rs`;
+`scripts/e2e.sh` measures the same commands on the vault `sesame-scratch`
+(outside the gate: it needs the network and the optokens Profile
+`sesame-scratch`).

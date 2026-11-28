@@ -16,6 +16,12 @@
     "sentence": "**Service** = one API of a provider, reached with the provider's client and token: Google's are `drive`, `docs`, `youtube`, `calendar` and `gmail`. A service has its own `api_base` and scopes, and its name is used like a provider's (the two share one namespace). `sesame login <service>` signs in to the provider asking for the scopes already granted plus the service's (Google adds `include_granted_scopes=true`), and the new token replaces the old one; `sesame login google` alone asks only for `openid email`. A call refused with a 403 for a missing scope says which `sesame login <service>` adds it.",
     "source": "README.md:85"
   },
+  "09c4acc54419": {
+    "mark": "not",
+    "sentence": "The account's 1000 requests a day count every read and write (opcore's decision record 7, measured 2026-11-28). Until now the only numbers were ADR 0004's one-off table.",
+    "source": "docs/adr/0005-every-commands-budget-is-recorded.md:7",
+    "why": "description of what the tests and the script do, rationale, or how to undo: nothing a run of sesame could break"
+  },
   "0eb6ab4c46e0": {
     "mark": "not",
     "sentence": "**A service account with read and write on that vault only**: in 1Password's Developer > Service Accounts (or `op service-account create sesame --vault sesame:read_items,write_items`), give it no other vault, and copy its token, shown once.",
@@ -65,6 +71,12 @@
     "mark": "promise",
     "sentence": "A cut needs no tap token on the host: only `gh` logged in as a user who may push sesame and dispatch the tap's workflow.",
     "source": "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:39"
+  },
+  "302fd8c6ff78": {
+    "mark": "not",
+    "sentence": "Failing the live check on the account's requests too: the account is shared by every token of it, so another process's requests show in the delta; the script marks that difference and fails only on the token's own reads and writes.",
+    "source": "docs/adr/0005-every-commands-budget-is-recorded.md:26",
+    "why": "description of what the tests and the script do, rationale, or how to undo: nothing a run of sesame could break"
   },
   "350f81c4bc10": {
     "mark": "promise",
@@ -260,6 +272,7 @@
     "source": "docs/adr/0001-1password-vault-store.md:35",
     "why": "a description, the rationale or history of a design, advice to the reader, or another program's behaviour (op's, GitHub's), not a promise of sesame's own that a run could break; 150a41bfe2ae states a lost update sesame accepts"
   },
+<<<<<<< HEAD
   "bc79be224046": {
     "mark": "not",
     "sentence": "The copy lives in memory (`rusqlite` `serialize`) and reaches disk only as `<config_dir>/1password-copy`: XChaCha20-Poly1305 with a random nonce, the key HKDF-SHA256 of `OP_SERVICE_ACCOUNT_TOKEN` with the vault's name as context (opcore's `Sealer`). Whoever lacks the token reads nothing; whoever has it can read the vault anyway, so holding the long-lived secrets locally widens nothing.",
@@ -273,6 +286,15 @@
     "why": "superseded by ADR 0005: sesame's own Copy, its hour and its write path are gone"
   },
   "c6c71c92f762": {
+=======
+  "ca23f22c90d6": {
+    "mark": "not",
+    "sentence": "Undo: remove `tests/budget.rs`, `docs/budget.md` and `scripts/e2e.sh`; the stand-in's ` refused` is read only by the tests.",
+    "source": "docs/adr/0005-every-commands-budget-is-recorded.md:34",
+    "why": "description of what the tests and the script do, rationale, or how to undo: nothing a run of sesame could break"
+  },
+  "d0ec56e0fb50": {
+>>>>>>> origin/proving
     "mark": "promise",
     "sentence": "Another machine's change arrives at a refresh, `sesame providers` or a 401, never because time passed.",
     "source": "docs/adr/0005-opcores-copy-on-demand.md:44",
@@ -289,6 +311,12 @@
     "sentence": "`sesame --help` is the manual's index, `sesame <command> --help` one command, `sesame help <topic>` a topic, `sesame help all` the whole manual, all assembled by [agent-help](https://github.com/sunfmin/agent-cli) from Markdown written where each fact lives: a command's doc comment on its clap variant in `src/main.rs` (with `verbatim_doc_comment`, each paragraph on one line, its group in `next_help_heading`), a topic in `src/help/<topic>.md`, registered in `src/help.rs`. The provider fields' flags and their help come from the field table, `src/providers/fields.rs`; an environment variable's name or a number is placed by `{const:NAME}`, registered in `src/help.rs`, never written out.",
     "source": "README.md:293",
     "why": "contributor guide: where each piece of the manual's source is written (doc comments, topic files, field table, {const:}); a description of the build, not a behaviour a run of sesame could break"
+  },
+  "d3f827273ec2": {
+    "mark": "not",
+    "sentence": "The tests reach 1Password only through a stand-in Core (`src/store/vault/stand_in.rs`); `tests/e2e.rs` runs the whole flow against a fake provider on 127.0.0.1. What each command spends of 1Password's reads and writes is `docs/budget.md`, generated from the stand-in by `tests/budget.rs`; `scripts/e2e.sh` measures the same commands on the vault `sesame-scratch` (outside the gate: it needs the network and the optokens Profile `sesame-scratch`).",
+    "source": "README.md:42",
+    "why": "description of what the tests and the script do, rationale, or how to undo: nothing a run of sesame could break"
   },
   "e0adecc63d0e": {
     "mark": "promise",

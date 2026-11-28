@@ -1,6 +1,6 @@
 # An encrypted local copy of the 1Password store
 
-Status: superseded by ADR 0004 (reads before a write) and ADR 0005.
+Status: superseded by ADR 0004 (reads before a write) and ADR 0006.
 
 sesame#4, on top of the vault store of ADR 0001. With the vault selected,
 each machine keeps a copy of the whole store (clients, tokens, provider

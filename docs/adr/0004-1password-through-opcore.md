@@ -3,7 +3,7 @@
 Supersedes ADR 0001's "read and written by `op`" and ADR 0002's reads before
 a write; the vault layout and the local copy stay.
 
-Status: its copy, sync and writes superseded by ADR 0005.
+Status: its copy, sync and writes superseded by ADR 0006.
 
 ## Context
 

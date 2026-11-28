@@ -1828,7 +1828,7 @@ fn one_password_local_copy() {
 /// A token the provider refuses, which this machine's Copy holds as valid
 /// (another machine refreshed it, or logged in again since): one sync, and
 /// one retry with the token the vault holds now, no refresh. The Copy is
-/// never synced because of its age (docs/adr/0005): this is how a token that
+/// never synced because of its age (docs/adr/0006): this is how a token that
 /// never expires learns of another machine's login.
 #[test]
 fn a_refused_token_syncs_once_and_retries_with_the_vaults() {
@@ -1941,7 +1941,7 @@ fn rotating_login(vault: &FakeVault) -> (FakeProvider, Machine<'_>) {
     (fake, m)
 }
 
-/// A refreshed token is written in the same process (docs/adr/0005), against
+/// A refreshed token is written in the same process (docs/adr/0006), against
 /// a provider that rotates its refresh token, so the one the vault held is
 /// refused once used. When 1Password cannot take the write now (here its
 /// rate limit, the fault `over-budget`), the command still gets the new

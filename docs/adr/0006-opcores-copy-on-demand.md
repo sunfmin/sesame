@@ -1,4 +1,4 @@
-# 5. The vault store is opcore's Copy, synced on demand
+# 6. The vault store is opcore's Copy, synced on demand
 
 Supersedes ADR 0002's sync rules and its kept token, and ADR 0004's copy,
 sync and writes; the layout of ADR 0001 and the lock stay.

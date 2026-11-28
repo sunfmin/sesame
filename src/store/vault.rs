@@ -11,7 +11,7 @@
 //!
 //! Each item is tagged `sesame`, a Secure Note.
 //!
-//! Reads answer from opcore's Copy of the vault, on demand (docs/adr/0005):
+//! Reads answer from opcore's Copy of the vault, on demand (docs/adr/0006):
 //! no sign-in, at any age of the Copy. It syncs (one list, one `get_all` of
 //! what moved) only before a refresh (`latest_token`), for `sesame
 //! providers` (`Store::open_current`), and when there is no Copy. Each
@@ -134,6 +134,9 @@ pub struct Vault {
     seen: Cell<(Seen, Seen)>,
     /// Whether this vault holds the lock (a nested `locked` runs inside it).
     held: Cell<bool>,
+    /// Whether the Copy as this process holds it synced in this process:
+    /// as current as this process can make it.
+    synced: Cell<bool>,
 }
 
 /// How a write went.
@@ -187,6 +190,7 @@ impl Vault {
             items: RefCell::new(None),
             seen: Cell::new((None, None)),
             held: Cell::new(false),
+            synced: Cell::new(false),
         };
         v.seen.set(v.files());
         v
@@ -219,7 +223,9 @@ impl Vault {
     /// Makes the Copy the vault's: one list, one `get_all` of the items
     /// that moved, after pushing what waits.
     pub fn sync(&self) -> Result<(), String> {
-        self.copy().sync().map_err(|e| self.failed(e))
+        self.copy().sync().map_err(|e| self.failed(e))?;
+        self.synced.set(true);
+        Ok(())
     }
 
     pub fn name(&self) -> &str {
@@ -267,6 +273,8 @@ impl Vault {
         };
         // A first sync here, outside the lock, is this process's own write:
         // the lock need not reopen the Copy for it (and sign in again).
+        // With no Copy before, it synced.
+        self.synced.set(self.synced.get() || before.0.is_none());
         if before == self.seen.get() {
             self.seen.set(self.files());
         }
@@ -295,6 +303,7 @@ impl Vault {
             lock.lock().map_err(|e| format!("locking: {e}"))?;
             if self.files() != self.seen.get() {
                 *self.copy() = open_copy(&self.dir, &self.token, &self.name, (self.core)());
+                self.synced.set(false);
             }
             let result = f();
             self.seen.set(self.files());
@@ -371,7 +380,7 @@ impl Vault {
         };
         let mut current = self.item(title)?;
         let (mut have, mut want) = wants(&current);
-        if current.is_none() && want != have {
+        if current.is_none() && want != have && !self.synced.get() {
             // Another machine may have made it since this Copy synced: a
             // create would make a second item of the title.
             self.sync()?;
@@ -431,6 +440,8 @@ impl Vault {
             let mut copy = self.copy();
             let before = copy.write_warnings().len();
             let failed = copy.push().err();
+            // A push is a sync (opcore's `push`, on demand).
+            self.synced.set(self.synced.get() || failed.is_none());
             let refused: Vec<String> = copy.write_warnings()[before..]
                 .iter()
                 .filter(|w| w.contains("refused"))
@@ -511,6 +522,7 @@ impl Vault {
     pub fn latest_token(&self, provider: &str) -> Result<Option<Token>, String> {
         self.locked(|| {
             let synced = self.copy().sync();
+            self.synced.set(self.synced.get() || synced.is_ok());
             match synced {
                 Err(e) if e.is_transient() => eprintln!(
                     "sesame: warning: 1Password could not be synced ({e}); the `{provider}` \
@@ -536,7 +548,7 @@ impl Vault {
     /// staged and pushed at once: another machine needs it now where the
     /// provider rotates its refresh token. One 1Password cannot take now
     /// waits staged; the command still has it, with a warning, and this
-    /// machine uses it until the next sync pushes it (docs/adr/0005).
+    /// machine uses it until the next sync pushes it (docs/adr/0006).
     pub fn keep_token(&self, provider: &str, t: &Token) -> Result<(), String> {
         let Some(t) = self.as_kept_token(t) else {
             return self.save_token(provider, t);
@@ -1000,8 +1012,10 @@ mod tests {
             (None, None)
         );
 
-        // Another's field left: edited, not archived.
+        // Another's field left: edited, not archived. The next process
+        // finds the item another machine made, and edits it.
         op.add(note("sesame.y", vec![text("url", "https://y")]));
+        let a = a.again();
         a.save_client("y", &client("y-1")).unwrap();
         a.delete_client("y").unwrap();
         assert_eq!(op.item("sesame.y").unwrap().fields.len(), 1);

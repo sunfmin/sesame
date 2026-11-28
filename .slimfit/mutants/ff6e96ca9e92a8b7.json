@@ -1,0 +1,16 @@
+{
+  "tree": "4c6ad35ed9f3f034b60b4f2e150c41f52141a830+d1fba762150c532c",
+  "picker": "codex:01a2231a-15da-7f21-9469-1bd5cc2fd580:default",
+  "author": "claude-code:0c02875b-2aea-5b11-8c98-284d9684345c:opus",
+  "picks": {
+    "rust": [
+      {
+        "name": "src/store/vault/stand_in.rs:179:63: replace >= with < in <impl Core for Stand>::invoke",
+        "why": "The budget scenario forces refusal with `over-budget`, so it leaves the configured write limit untested at the threshold.",
+        "outcome": "killed",
+        "first_outcome": "killed"
+      }
+    ]
+  },
+  "added_lines": 39
+}

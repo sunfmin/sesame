@@ -1,7 +1,8 @@
 //! A stand-in for 1Password's Core, for the tests that run sesame's binary
 //! (tests/e2e.rs): a vault in files, answering the Core methods opcore calls
 //! as the Core v0.4.1 does where sesame depends on it, and logging each
-//! method called, one per line of `calls.log`. Only in a debug build, and
+//! method called, one per line of `calls.log`, ` refused` after it when it
+//! answered an error (a call 1Password refuses spends none of its Budget). Only in a debug build, and
 //! only when `DIR_VAR` names its directory; a release build has none.
 use opcore::core::{Core, Failure};
 use serde_json::{Value, json};
@@ -59,14 +60,25 @@ impl Stand {
         std::fs::write(self.dir.join(file), text).expect("the stand-in's dir is writable");
     }
 
-    /// Logs `method`; how many calls and writes came before it.
-    fn log(&self, method: &str) -> (usize, usize) {
+    /// Runs `call` as `method` and logs it, ` refused` if it failed; `call`
+    /// is given how many calls and writes came before it.
+    fn log<T>(
+        &self,
+        method: &str,
+        call: impl FnOnce(usize, usize) -> Result<T, Failure>,
+    ) -> Result<T, Failure> {
         let path = self.dir.join("calls.log");
         let log = std::fs::read_to_string(&path).unwrap_or_default();
-        let writes = log.lines().filter(|l| WRITES.contains(l)).count();
-        let calls = log.lines().count();
-        std::fs::write(&path, format!("{log}{method}\n")).expect("the stand-in's dir is writable");
-        (calls, writes)
+        let method_of = |l: &str| l.split(' ').next().unwrap_or_default().to_string();
+        let writes = log
+            .lines()
+            .filter(|l| WRITES.contains(&method_of(l).as_str()))
+            .count();
+        let answer = call(log.lines().count(), writes);
+        let refused = if answer.is_err() { " refused" } else { "" };
+        std::fs::write(&path, format!("{log}{method}{refused}\n"))
+            .expect("the stand-in's dir is writable");
+        answer
     }
 
     fn answer(&self, method: &str, p: &Value, n: usize) -> Result<Value, Failure> {
@@ -149,36 +161,37 @@ impl Stand {
 
 impl Core for Stand {
     fn init_client(&mut self, config: &str) -> Result<String, Failure> {
-        self.log("init_client");
-        let config: Value = serde_json::from_str(config).unwrap_or_default();
-        let accepted = std::env::var(TOKEN_VAR).unwrap_or_default();
-        if config["serviceAccountToken"] != accepted.as_str() {
-            return Err(error(
-                "Unauthorized",
-                "authentication failed: the service account token is not valid",
-            ));
-        }
-        Ok("1".into())
+        self.log("init_client", |_, _| {
+            let config: Value = serde_json::from_str(config).unwrap_or_default();
+            let accepted = std::env::var(TOKEN_VAR).unwrap_or_default();
+            if config["serviceAccountToken"] != accepted.as_str() {
+                return Err(error(
+                    "Unauthorized",
+                    "authentication failed: the service account token is not valid",
+                ));
+            }
+            Ok("1".into())
+        })
     }
 
     fn invoke(&mut self, invocation: &str) -> Result<String, Failure> {
         let inv: Value = serde_json::from_str(invocation).unwrap_or_default();
         let call = &inv["invocation"]["parameters"];
         let method = call["name"].as_str().unwrap_or_default();
-        let (n, writes) = self.log(method);
-        if WRITES.contains(&method) {
-            let max = std::env::var(MAX_WRITES_VAR)
-                .ok()
-                .and_then(|m| m.parse().ok());
-            let spent = std::env::var(FAULT_VAR).is_ok_and(|f| f == "over-budget");
-            if spent || max.is_some_and(|m: usize| writes >= m) {
-                return Err(error("RateLimitExceeded", "Too many requests"));
+        self.log(method, |n, writes| {
+            if WRITES.contains(&method) {
+                let max = std::env::var(MAX_WRITES_VAR)
+                    .ok()
+                    .and_then(|m| m.parse().ok());
+                let spent = std::env::var(FAULT_VAR).is_ok_and(|f| f == "over-budget");
+                if spent || max.is_some_and(|m: usize| writes >= m) {
+                    return Err(error("RateLimitExceeded", "Too many requests"));
+                }
             }
-        }
-        let answer = self.answer(method, &call["parameters"], n)?;
-        Ok(match answer {
-            Value::Null => String::new(),
-            a => a.to_string(),
+            Ok(match self.answer(method, &call["parameters"], n)? {
+                Value::Null => String::new(),
+                a => a.to_string(),
+            })
         })
     }
 

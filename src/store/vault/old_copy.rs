@@ -1,4 +1,4 @@
-//! The Copy sesame kept itself before it used opcore's (docs/adr/0005):
+//! The Copy sesame kept itself before it used opcore's (docs/adr/0006):
 //! `sesame.db`'s tables, sealed at `<config_dir>/1password-copy`. It is
 //! never opened as a Copy again; it is read once, for the tokens it marked
 //! `unwritten_tokens` (refreshed here, refused by the vault then), which

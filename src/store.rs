@@ -69,7 +69,7 @@ impl Store {
 
     /// `open`, with a view current enough to list every provider's state
     /// (`sesame providers`): the vault's Copy is synced first, pushing what
-    /// waits (docs/adr/0005). `sesame.db` is current.
+    /// waits (docs/adr/0006). `sesame.db` is current.
     pub fn open_current() -> Result<Store, String> {
         Store::open_with(true)
     }
@@ -105,7 +105,7 @@ impl Store {
     /// `provider`'s token as it stands now, to decide on refreshing it (call
     /// it under `locked`): what another machine wrote included, so a token it
     /// refreshed is used rather than refreshed again. `token` answers from
-    /// the vault's Copy as last synced; this syncs it first (docs/adr/0005).
+    /// the vault's Copy as last synced; this syncs it first (docs/adr/0006).
     /// `sesame.db` is this machine's alone: the same as `token`.
     pub fn latest_token(&self, provider: &str) -> Result<Option<Token>, String> {
         match self {
