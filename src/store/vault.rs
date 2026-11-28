@@ -760,9 +760,10 @@ mod tests {
                 let at = self.op.clone();
                 Box::new(move || {
                     let stand = Stand::on(at.clone(), "v");
-                    Backend::Stand(
-                        fault.map_or(Stand::on(at.clone(), "v"), |f| stand.with_fault(f)),
-                    )
+                    Backend::Stand(match fault {
+                        Some(f) => stand.with_fault(f),
+                        None => stand,
+                    })
                 })
             };
             Machine {

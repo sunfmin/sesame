@@ -48,6 +48,7 @@ impl Stand {
 
     /// This one with `fault` (`over-budget`), or `sign-in-refused`: every
     /// sign-in is refused, as one with a revoked token.
+    #[cfg(test)]
     pub fn with_fault(self, fault: &'static str) -> Stand {
         Stand {
             fault: Some(fault),
