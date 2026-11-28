@@ -1,0 +1,29 @@
+{
+  "tip": "0d07a76f05d5aa3ad1a33c019e7aa4fed6dbac98",
+  "from": "6d653eae92c38444ad81ece1e0c70dfa33be0cf9",
+  "pool": 176,
+  "drawn": {
+    "rust": [
+      {
+        "name": "src/store/vault.rs:227:9: replace Vault::read_all -> Result<Vec<(&'t str, Option<Item>)>, String> with Ok(vec![(\"\", Some(Default::default()))])",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault.rs:250:9: replace Vault::current -> Result<Option<Item>, String> with Ok(None)",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/copy.rs:115:9: replace LocalCopy::items -> Result<BTreeMap<String, (String, Option<Item>)>, String> with Ok(BTreeMap::from_iter([(\"xyzzy\".into(), (\"xyzzy\".into(), Some(Default::default())))]))",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store/vault/stand_in.rs:65:9: replace Stand::answer -> Result<Value, Failure> with Ok(Default::default())",
+        "outcome": "killed"
+      },
+      {
+        "name": "src/store.rs:49:5: replace config_dir_in -> PathBuf with Default::default()",
+        "outcome": "killed"
+      }
+    ]
+  }
+}
