@@ -28,9 +28,6 @@
   "rust-toolchain.toml": {
     "local_refs": 1
   },
-  "tests/e2e.rs": {
-    "local_refs": 1
-  },
   "truefit.toml": {
     "local_refs": 1
   }
