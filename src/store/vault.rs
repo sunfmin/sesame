@@ -750,9 +750,20 @@ mod tests {
 
         /// The next process on this machine.
         fn again(&self) -> Machine {
+            self.again_with(None)
+        }
+
+        /// The next process on this machine, 1Password answering it with
+        /// `fault` (`stand_in::Stand::with_fault`).
+        fn again_with(&self, fault: Option<&'static str>) -> Machine {
             let core = {
                 let at = self.op.clone();
-                Box::new(move || Backend::Stand(Stand::on(at.clone(), "v")))
+                Box::new(move || {
+                    let stand = Stand::on(at.clone(), "v");
+                    Backend::Stand(
+                        fault.map_or(Stand::on(at.clone(), "v"), |f| stand.with_fault(f)),
+                    )
+                })
             };
             Machine {
                 vault: Vault::new("v".into(), SA.into(), self.dir.clone(), core),
@@ -1045,6 +1056,34 @@ mod tests {
             1,
             "{calls:?}"
         );
+    }
+
+    #[test]
+    fn a_sync_before_a_refresh_refused_by_1password_is_the_error() {
+        let op = OnePassword::new();
+        let a = Machine::new(&op);
+        a.save_token("x", &token("t-1")).unwrap();
+        // Refused (a revoked service account): the error, not the Copy's token.
+        let e = a.again_with(Some("sign-in-refused")).latest_token("x");
+        assert!(e.unwrap_err().contains("authentication failed"));
+    }
+
+    #[test]
+    fn a_write_1password_cannot_take_now_fails_naming_where_it_waits() {
+        let op = OnePassword::new();
+        let a = Machine::new(&op);
+        a.save_token("x", &token("t-1")).unwrap();
+        let limited = a.again_with(Some("over-budget"));
+        let e = limited.save_client("x", &client("x-1")).unwrap_err();
+        let pending = a.dir.join("vault-copy.pending");
+        assert!(
+            e.contains(&format!("waits in `{}`", pending.display())),
+            "{e}"
+        );
+        // This machine reads it meanwhile; the vault does not hold it.
+        assert_eq!(a.again().client("x").unwrap(), Some(client("x-1")));
+        let vault_x = kept(&op.item("sesame.x").unwrap(), is_provider_field);
+        assert_eq!(item::client_of(&vault_x), None);
     }
 
     /// `tests/fixtures/1password-copy-55d7766`: sesame's own Copy as its code

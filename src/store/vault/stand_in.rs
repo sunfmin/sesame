@@ -26,6 +26,9 @@ const WRITES: [&str; 3] = ["ItemsCreateAll", "ItemsPut", "ItemsArchive"];
 pub struct Stand {
     dir: PathBuf,
     vault: String,
+    /// A fault of this one alone, as `FAULT_VAR` names them (the unit tests
+    /// run at once in one process, which shares its environment).
+    fault: Option<&'static str>,
 }
 
 impl Stand {
@@ -39,7 +42,21 @@ impl Stand {
         Stand {
             dir,
             vault: vault.into(),
+            fault: None,
         }
+    }
+
+    /// This one with `fault` (`over-budget`), or `sign-in-refused`: every
+    /// sign-in is refused, as one with a revoked token.
+    pub fn with_fault(self, fault: &'static str) -> Stand {
+        Stand {
+            fault: Some(fault),
+            ..self
+        }
+    }
+
+    fn faulty(&self, fault: &str) -> bool {
+        self.fault == Some(fault) || std::env::var(FAULT_VAR).is_ok_and(|f| f == fault)
     }
 }
 
@@ -164,7 +181,8 @@ impl Core for Stand {
         self.log("init_client", |_, _| {
             let config: Value = serde_json::from_str(config).unwrap_or_default();
             let accepted = std::env::var(TOKEN_VAR).unwrap_or_default();
-            if config["serviceAccountToken"] != accepted.as_str() {
+            if config["serviceAccountToken"] != accepted.as_str() || self.faulty("sign-in-refused")
+            {
                 return Err(error(
                     "Unauthorized",
                     "authentication failed: the service account token is not valid",
@@ -183,7 +201,7 @@ impl Core for Stand {
                 let max = std::env::var(MAX_WRITES_VAR)
                     .ok()
                     .and_then(|m| m.parse().ok());
-                let spent = std::env::var(FAULT_VAR).is_ok_and(|f| f == "over-budget");
+                let spent = self.faulty("over-budget");
                 if spent || max.is_some_and(|m: usize| writes >= m) {
                     return Err(error("RateLimitExceeded", "Too many requests"));
                 }
