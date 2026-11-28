@@ -1,8 +1,7 @@
 {
   "docs/adr/0001-1password-vault-store.md": {
-    "bytes": 5163,
-    "local_refs": 3,
-    "paragraph": 703,
+    "bytes": 5139,
+    "paragraph": 687,
     "pointers": [
       "ADR 0022",
       "sesame.lock"
