@@ -36,6 +36,12 @@
     {
       "suite": "rust",
       "test": "sesame::e2e::one_password_local_copy",
+      "hash": "8f2dd00622bfaee7",
+      "reason": "read: no assertion maps — it checks the two-machine local copy (B syncs A's refreshed token without refreshing, no plaintext secret in either config dir, copy rebuilt under another service account token or when damaged, logout and archived item reaching B), none of which a_refreshed_token_the_vault_refuses_is_kept asserts; setups conflict (two machines and a non-rotating provider vs one machine, a rotating provider and write faults), so a merge would change what each checks and hide which behaviour failed"
+    },
+    {
+      "suite": "rust",
+      "test": "sesame::e2e::one_password_local_copy",
       "kind": "slow-test",
       "hash": "8f2dd00622bfaee7",
       "seconds": 0.523,
@@ -59,12 +65,20 @@
       "commits_90d": 21,
       "commits_total": 21,
       "reason": "providers.rs is the definition-in-force module: its interface is the Provider/Service/Target data types plus eight calls (all, find, find_handed, add, set, show, export, remove); behind them sit the layering of built-in definition and stored fields (effective), the reduction of stored fields to the person's own changes (own_changes), per-service merge and drop, the cross-provider namespace and fixed-port checks, and the one validation point (fields::check + Provider::check). ~200 of its 540 prod lines are the Provider type itself, whose field docs are the interface. Its 90-day churn is new Provider fields landing with each built-in (slack, figma, linear, hubspot, public client) and earlier deepenings that already moved logic out (wire.rs sesame#9, refresh sesame#8, config_dir and find_handed sesame#17). The field table (fields.rs) and the built-ins (built_in.rs) are its own submodules, used by callers only through it (guide.rs reads the table, tests read built_in). Tests drive effective, the private one-place validation seam, which is the module's internal seam, not a reach past it. Deletion test: deleting it spreads layering and validation across every command; splitting the type out would only move lines."
+    },
+    {
+      "suite": "rust",
+      "file": "src/oauth.rs",
+      "prod_lines": 371,
+      "commits_90d": 20,
+      "commits_total": 20,
+      "reason": "oauth.rs is the login module: its interface is three calls (login, save_pasted, refresh) plus the one choice of client in force (client/ClientSource/no_client) and two shared effects (http, now); behind login sit both flows (authorization code with PKCE over a loopback listener or a pasted https redirect, and the RFC 8628 device flow), the state check, the scope union with the stored token's grant, site picking and identity reading. Every provider quirk already moved out to wire.rs (sesame#9, #43), which builds each request and reads each answer under unit tests; what remains is the effect side only (sockets, stdin, browser, HTTP), driven end to end by tests/e2e.rs. Its 90-day churn is provider fields landing (device_url, redirect, identity_body, public client) and logic moving out to wire.rs, not one concept spread around. Deletion test: deleting it spreads the flows over main.rs; splitting the loopback listener or folding the two identify-or-warn calls would only move lines."
     }
   ],
   "measured": {
     "rust": {
       "uncovered_lines": 153,
-      "test_seconds": 5.176
+      "test_seconds": 5.305
     }
   }
 }
