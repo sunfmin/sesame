@@ -1,5 +1,7 @@
 # sesame's ties to the real system (`truefit --help`): its promises. The
-# 1Password stand-in Core (src/store/vault/stand_in.rs) has no contract yet.
+# 1Password stand-in Core (src/store/vault/stand_in.rs) has no contract yet;
+# what its calls cost is opcore's (promise stand-in-costs-are-opcores), and
+# scripts/e2e.sh measures them on sesame-scratch.
 
 # Sesame's promises (`truefit promise`): each sentence of README.md and
 # docs/adr/ that a run could break, with the tests that keep it named in the
@@ -243,4 +245,18 @@ check = ["test"]
 name = "write-answer-kept-not-read-back"
 says = '''What the write answers is kept, never read back.'''
 source = "docs/adr/0004-1password-through-opcore.md:26"
+check = ["test"]
+
+# tests/budget.rs docs_budget_md_is_what_each_command_spends: each scenario's calls and Budget asserted, docs/budget.md compared
+[[promise]]
+name = "commands-budget-recorded"
+says = "Every command's scenario on the stand-in Core asserts its Core calls and the reads, writes and account requests they spend, and `docs/budget.md` is their table: `tests/budget.rs` generates it, fails when it is stale, and `UPDATE_BUDGET=1` rewrites it."
+source = "docs/adr/0005-every-commands-budget-is-recorded.md:14"
+check = ["test"]
+
+# tests/budget.rs costs(): read from opcore's decision record 1 in the source cargo metadata --locked resolves
+[[promise]]
+name = "stand-in-costs-are-opcores"
+says = "Each method's cost is read from opcore's decision record 1, in the opcore source `Cargo.lock` pins, where opcore measured it on the real Core; sesame keeps no copy of the numbers, so an opcore bump that changes them changes the table."
+source = "docs/adr/0005-every-commands-budget-is-recorded.md:15"
 check = ["test"]

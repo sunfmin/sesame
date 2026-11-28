@@ -42,6 +42,16 @@ pub struct Out {
     pub writes: usize,
     /// The Core methods called, in order.
     pub methods: Vec<String>,
+    /// The same calls, each with whether the Core refused it.
+    pub log: Vec<Call>,
+}
+
+/// One Core call the stand-in logged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    pub method: String,
+    /// The Core answered an error: the call spent none of the Budget.
+    pub refused: bool,
 }
 
 impl Out {
@@ -233,20 +243,22 @@ impl<'v> Machine<'v> {
     }
 
     fn op_calls(&self) -> usize {
-        self.vault.map_or(0, |v| v.calls().len())
+        self.vault.map_or(0, |v| v.log().len())
     }
 
     fn out(&self, before: usize, ok: bool, stdout: String, stderr: String) -> Out {
-        let calls = self
+        let log = self
             .vault
-            .map(|v| v.calls().split_off(before))
+            .map(|v| v.log().split_off(before))
             .unwrap_or_default();
+        let methods: Vec<String> = log.iter().map(|c| c.method.clone()).collect();
         Out {
             ok,
             stdout,
             stderr,
-            writes: calls.iter().filter(|m| is_write(m)).count(),
-            methods: calls,
+            writes: methods.iter().filter(|m| is_write(m)).count(),
+            methods,
+            log,
         }
     }
 }
@@ -462,13 +474,22 @@ impl FakeVault {
             .env("SESAME_STAND_IN_TOKEN", SA_TOKEN)
     }
 
-    /// Every Core method called so far.
-    pub fn calls(&self) -> Vec<String> {
+    /// Every Core call so far: `calls.log`, a method a line, ` refused`
+    /// after one the Core refused.
+    pub fn log(&self) -> Vec<Call> {
         std::fs::read_to_string(self.dir.join("calls.log"))
             .unwrap_or_default()
             .lines()
-            .map(String::from)
+            .map(|l| Call {
+                method: l.trim_end_matches(" refused").to_string(),
+                refused: l.ends_with(" refused"),
+            })
             .collect()
+    }
+
+    /// Every Core method called so far.
+    pub fn calls(&self) -> Vec<String> {
+        self.log().into_iter().map(|c| c.method).collect()
     }
 
     /// How many calls so far wrote.
