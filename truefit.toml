@@ -115,20 +115,6 @@ source = "README.md:243"
 check = ["test"]
 why = "each machine syncs under its own lock as one sequence (list, then the moved items); the other machine's write is a vault version the test sets up before the sync, and no interleaving inside one machine is involved"
 
-# e2e one_password_local_copy
-[[promise]]
-name = "sync-when-copy-stale"
-says = '''It also syncs when the copy is an hour old (for tokens that never expire), on `sesame providers`, and when there is no copy.'''
-source = "README.md:245"
-check = ["test"]
-
-# e2e one_password_local_copy (follows from sync-rereads-only-moved-items and sync-when-copy-stale)
-[[promise]]
-name = "change-elsewhere-arrives-within-an-hour"
-says = '''So a change made elsewhere reaches a machine within its token's life (an hour for Google), at most an hour.'''
-source = "README.md:247"
-check = ["test"]
-
 # e2e one_password_local_copy (Core call and write counts per command)
 [[promise]]
 name = "four-requests-per-refresh"
@@ -166,46 +152,11 @@ says = '''A write happens only when what sesame keeps in the item changed, and a
 source = "docs/adr/0001-1password-vault-store.md:41"
 check = ["test"]
 
-# store/vault.rs a_write_whose_item_is_unchanged_since_the_copy_reads_nothing; e2e a_refreshed_token_the_vault_refuses_is_kept
-[[promise]]
-name = "write-through-under-lock"
-says = '''**Writes**, under the lock: one list; a `get_all` only when the item's `updatedAt` is not the copy's, else the copy's item (kept whole) is written over.'''
-source = "docs/adr/0004-1password-through-opcore.md:24"
-check = ["test"]
-why = "the machine's lock serializes its processes (store/sqlite.rs concurrent_read_then_write_waits_instead_of_failing); within the lock the steps are one sequence the tests drive"
-
-# e2e one_password_local_copy
-[[promise]]
-name = "copy-life-sync"
-says = '''when the copy is older than `COPY_LIFE` (1 h), so a provider whose token never expires (GitHub's, a pasted one) still sees another machine's change within the hour;'''
-source = "docs/adr/0002-1password-local-copy.md:62"
-check = ["test"]
-
-# store/sealed.rs opens_only_under_the_same_secret_and_context; e2e one_password_local_copy
-[[promise]]
-name = "copy-on-disk-only-sealed"
-says = '''The copy lives in memory (`rusqlite` `serialize`) and reaches disk only as `<config_dir>/1password-copy`'''
-source = "docs/adr/0002-1password-local-copy.md:68"
-check = ["test"]
-
-[[promise]]
-name = "copy-written-whole"
-says = '''It is written to a file beside it and renamed over it, under the lock, so a reader never sees half of one.'''
-source = "docs/adr/0002-1password-local-copy.md:75"
-kept = "store/vault.rs writes a file beside the copy and renames it over it under the lock (a rename is atomic on one filesystem); no test or simulation interleaves a reader with that write"
-
 # store/sqlite.rs locked_keeps_writes_made_before_an_error; e2e a_refreshed_token_the_vault_refuses_is_kept
 [[promise]]
 name = "locked-keeps-writes-made-before-an-error"
 says = '''**`locked` serializes, nothing more** (sesame#11): writes go through to 1Password, which has no transaction, so an error midway undoes none of them; `sesame.db` keeps the same rule (it commits what was written)'''
 source = "docs/adr/0002-1password-local-copy.md:81"
-check = ["test"]
-
-# e2e one_password_local_copy (a logout elsewhere reaches B at its next sync); source.rs a_refused_stored_token_is_refreshed_once
-[[promise]]
-name = "change-elsewhere-arrives-at-next-sync"
-says = '''A change on another machine reaches this one at its next refresh (about an hour for Google, sooner for shorter tokens), at its next `sesame providers`, or within `COPY_LIFE`.'''
-source = "docs/adr/0002-1password-local-copy.md:104"
 check = ["test"]
 
 # release.rs cut_builds_one_universal_formula_runs_the_taps_workflow_and_leaves_tagging_to_factorium
@@ -224,23 +175,31 @@ says = '''A cut needs no tap token on the host: only `gh` logged in as a user wh
 source = "docs/adr/0003-releases-are-signed-and-notarized-by-the-taps-workflow.md:39"
 check = ["test"]
 
-# e2e one_password_local_copy (0 Core calls, init_client included); store/vault.rs opcore_signs_in_on_the_first_request_only
-[[promise]]
-name = "copy-answer-never-signs-in"
-says = '''**`Op` is opcore's Client** (`src/store/vault/op.rs`), signed in on a process's first request only: a command the copy answers never signs in.'''
-source = "docs/adr/0004-1password-through-opcore.md:16"
-check = ["test"]
-
-# store/vault.rs sync_rereads_only_items_whose_version_moved_plus_the_forced_one, an_item_the_list_lacks_is_asked_for_by_id_and_an_edit_keeps_other_peoples_fields
-[[promise]]
-name = "sync-one-list-one-get-all"
-says = '''**Sync**: one list, one `get_all` of every item whose `updatedAt` is not the copy's, the forced one, and the unlisted ones the copy has.'''
-source = "docs/adr/0004-1password-through-opcore.md:22"
-check = ["test"]
-
 # store/vault.rs a_read_is_cached_once_per_lock_and_forgotten_when_the_lock_is_taken_again (no read after the writes)
 [[promise]]
 name = "write-answer-kept-not-read-back"
 says = '''What the write answers is kept, never read back.'''
 source = "docs/adr/0004-1password-through-opcore.md:26"
+check = ["test"]
+
+# store/vault.rs reads_answer_from_the_copy_at_any_age_with_no_core_call (a Copy synced in 1970); e2e one_password_local_copy (0 Core calls, init_client included)
+[[promise]]
+name = "copy-answer-never-signs-in"
+says = '''**`Op` is opcore's Client** (in `src/store/vault.rs` then), signed in on a process's first request only: a command the copy answers never signs in.'''
+source = "docs/adr/0004-1password-through-opcore.md:18"
+check = ["test"]
+
+# store/vault.rs another_machines_write_is_read_at_a_sync_not_before, an_item_left_empty_is_archived (a create syncs first); e2e a_refused_token_syncs_once_and_retries_with_the_vaults, one_password_local_copy
+[[promise]]
+name = "syncs-only-on-demand"
+says = '''**It syncs** only before a refresh (`latest_token`), for `sesame providers`, with no Copy, before a create (an item another machine made is edited, not made twice), and when a provider refuses the token it holds: one sync, one retry with the vault's if it holds another.'''
+source = "docs/adr/0005-opcores-copy-on-demand.md:18"
+check = ["test"]
+why = "each sync is a step of one command's sequence, and the retry is one call made again in that process after it; no two of them run at once or out of the order the tests drive"
+
+# e2e a_refused_token_syncs_once_and_retries_with_the_vaults, one_password_local_copy (B reads A's change only at its refresh or providers)
+[[promise]]
+name = "change-elsewhere-arrives-on-demand"
+says = '''Another machine's change arrives at a refresh, `sesame providers` or a 401, never because time passed.'''
+source = "docs/adr/0005-opcores-copy-on-demand.md:44"
 check = ["test"]
