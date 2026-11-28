@@ -5,7 +5,9 @@ fast = "./gate.sh"
 fast_limit = 900
 slow = "./gate.sh"
 slow_limit = 900
-regenerated = [".docfit/baseline.json"]
+# Records only their own tool writes (docfit; `slimfit ratchet`): a landing
+# whose only conflict is one of them takes proving's copy (SPEC §1.12).
+regenerated = [".docfit/baseline.json", ".slimfit/baseline.json"]
 
 [cut]
 steps = ["packaging/release.sh cut $FACTORIUM_VERSION"]
