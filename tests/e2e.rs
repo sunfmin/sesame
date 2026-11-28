@@ -1356,7 +1356,7 @@ fn one_password_vault_store() {
 
     // The loopback flow (`--browser`), the test playing the browser.
     m.login_in_browser(&["login", "hub", "--browser", "--no-browser"]);
-    assert_eq!(m.run(&["token", "hub"]).text().trim(), "browser-token");
+    assert_eq!(m.run(&["token", "hub"]).stdout.trim(), "browser-token");
 
     // A pasted token.
     let out = m.run_with_stdin(&["login", "hub", "--token-stdin"], "pasted-secret-token");
@@ -1367,7 +1367,7 @@ fn one_password_vault_store() {
         "{out}"
     );
     assert_eq!(
-        m.run(&["token", "hub"]).text().trim(),
+        m.run(&["token", "hub"]).stdout.trim(),
         "pasted-secret-token"
     );
 
@@ -1550,7 +1550,9 @@ fn one_password_vault_migrate() {
     assert!(vault.item("sesame-providers").is_some() && vault.item("sesame.hub").is_none());
     assert!(db.exists());
 
-    // Goes on: copies the rest, reports the conflict and leaves it as it is.
+    // Goes on, past opcore's retry wait (1 s) for the write that waits:
+    // pushes it, copies the rest, reports the conflict and leaves it as it is.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     let (ok, out, wrote) = migrate(&|_| {});
     assert!(
         !ok && out.contains("Conflict") && out.contains("`cli`"),
@@ -1606,11 +1608,11 @@ fn one_password_vault_migrate() {
         "refresh-secret-1"
     );
     let out = m.run(&["token", "hub"]);
-    assert!(out.ok && out.text().trim() == "device-token", "{out}");
+    assert!(out.ok && out.stdout.trim() == "device-token", "{out}");
     let out = m.run(&["api", "hub", "/me"]);
     assert!(out.ok && out.text().contains(r#"{"me":"octo"}"#), "{out}");
     let out = m.run(&["token", "pst"]);
-    assert!(out.ok && out.text().trim() == "pasted-secret", "{out}");
+    assert!(out.ok && out.stdout.trim() == "pasted-secret", "{out}");
     let out = m.run(&["providers"]);
     assert!(
         out.ok && out.text().contains("logged in (octo)") && out.text().contains("pasted token"),
@@ -1707,12 +1709,12 @@ fn one_password_local_copy() {
         assert!(out.ok, "{out}");
         assert_eq!((out.methods.len(), out.writes), (0, 0), "{args:?}");
     }
-    assert_eq!(a.run(&["token", "hub"]).text().trim(), "refreshed-1");
+    assert_eq!(a.run(&["token", "hub"]).stdout.trim(), "refreshed-1");
 
     // B's copy still has the login token, expiring: its next call syncs, finds
     // A's refreshed token, and uses it without refreshing (no write).
     let out = b.run(&["token", "hub"]);
-    assert!(out.ok && out.text().trim() == "refreshed-1", "{out}");
+    assert!(out.ok && out.stdout.trim() == "refreshed-1", "{out}");
     assert_eq!((out.writes, refresh_bodies().len()), (0, 1));
     assert_eq!(b.run(&["api", "hub", "/me"]).methods.len(), 0);
 
@@ -1731,7 +1733,7 @@ fn one_password_local_copy() {
         "{out}"
     );
     let out = b.run(&["token", "hub", "--min-life", "7200"]);
-    assert!(out.ok && out.text().trim() == "refreshed-2", "{out}");
+    assert!(out.ok && out.stdout.trim() == "refreshed-2", "{out}");
     let last = refresh_bodies().pop().unwrap();
     assert!(last.contains("client_id=cid-2"), "{last}");
     let out = b.run(&["provider", "show", "hub"]);
@@ -1755,10 +1757,7 @@ fn one_password_local_copy() {
             .unwrap()
             .map(|e| e.unwrap().path())
             .collect();
-        assert!(
-            files.iter().any(|f| f.ends_with("1password-copy")),
-            "{files:?}"
-        );
+        assert!(files.iter().any(|f| f.ends_with("vault-copy")), "{files:?}");
         for path in files {
             let bytes = std::fs::read(&path).unwrap();
             for s in secrets {
@@ -1776,18 +1775,18 @@ fn one_password_local_copy() {
     let other = "ops_another-service-account";
     let out = as_sa(&a, other, &["token", "hub"]);
     assert!(
-        out.ok && out.text().trim() == "refreshed-2" && !out.methods.is_empty(),
+        out.ok && out.stdout.trim() == "refreshed-2" && !out.methods.is_empty(),
         "{out}"
     );
     assert_eq!(as_sa(&a, other, &["token", "hub"]).methods.len(), 0);
     // And a damaged copy the same.
-    let copy = a.config().join("1password-copy");
+    let copy = a.config().join("vault-copy");
     let mut bytes = std::fs::read(&copy).unwrap();
     *bytes.last_mut().unwrap() ^= 1;
     std::fs::write(&copy, bytes).unwrap();
     let out = as_sa(&a, other, &["token", "hub"]);
     assert!(
-        out.ok && out.text().trim() == "refreshed-2" && !out.methods.is_empty(),
+        out.ok && out.stdout.trim() == "refreshed-2" && !out.methods.is_empty(),
         "{out}"
     );
 
@@ -1804,12 +1803,8 @@ fn one_password_local_copy() {
     let out = b.run(&["token", "hub"]);
     assert!(!out.ok && out.text().contains("not logged in"), "{out}");
     // Not logged in: it looked in the vault (another machine may have): a
-    // sign-in, a list and one get_all.
-    assert_eq!(
-        out.methods,
-        ["init_client", "VaultsList", "ItemsList", "ItemsGetAll"],
-        "{out}"
-    );
+    // sign-in to the vault the Copy knows, and a list; nothing moved.
+    assert_eq!(out.methods, ["init_client", "ItemsList"], "{out}");
 
     // An item archived elsewhere is gone here too, though op still answers
     // its id (archived, and refuses an edit of it): B writes a new one.
@@ -1828,6 +1823,82 @@ fn one_password_local_copy() {
     ids.sort();
     ids.dedup();
     assert_eq!(ids.len(), vault.items().len(), "{ids:?}");
+}
+
+/// A token the provider refuses, which this machine's Copy holds as valid
+/// (another machine refreshed it, or logged in again since): one sync, and
+/// one retry with the token the vault holds now, no refresh. The Copy is
+/// never synced because of its age (docs/adr/0005): this is how a token that
+/// never expires learns of another machine's login.
+#[test]
+fn a_refused_token_syncs_once_and_retries_with_the_vaults() {
+    let fake = FakeProvider::serve(move |r| {
+        match r.target.as_str() {
+        "/device" => (
+            "200 OK",
+            r#"{"device_code":"dev","user_code":"WDJB-MJHT","verification_uri":"https://example.com/device","expires_in":60,"interval":0}"#.into(),
+        ),
+        "/token" if r.body.contains("grant_type=urn") => (
+            "200 OK",
+            r#"{"access_token":"login-token","refresh_token":"refresh-secret","expires_in":3600}"#.into(),
+        ),
+        "/token" if r.is_refresh() => (
+            "200 OK",
+            r#"{"access_token":"refreshed-1","refresh_token":"refresh-secret","expires_in":3600}"#.into(),
+        ),
+        // Only the newest token of each kind is honoured.
+        "/me" if ["Bearer refreshed-1", "Bearer pasted-2"].contains(&r.header("authorization").as_str()) => {
+            ("200 OK", r#"{"me":"octo"}"#.into())
+        }
+        "/me" => ("401 Unauthorized", "{}".into()),
+        _ => ("404 Not Found", "{}".into()),
+    }
+    });
+    let vault = FakeVault::new();
+    let a = Machine::new("refused-a").with_vault(&vault);
+    let b = Machine::new("refused-b").with_vault(&vault);
+    let base = fake.base();
+    fake.add(&a, "hub", "", &["--device-url", &format!("{base}/device")]);
+    let out = a.run_with_stdin(
+        &["client", "hub", "--client-id", "cid", "--secret-stdin"],
+        "client-secret\n",
+    );
+    assert!(out.ok, "{out}");
+    let out = a.run(&["login", "hub", "--no-browser"]);
+    assert!(out.ok, "{out}");
+    let one_sync = ["init_client", "ItemsList", "ItemsGetAll"];
+
+    // B's Copy holds the login token, valid for an hour; A refreshes it.
+    assert_eq!(b.run(&["token", "hub"]).stdout.trim(), "login-token");
+    let out = a.run(&["token", "hub", "--min-life", "7200"]);
+    assert!(out.ok && out.stdout.trim() == "refreshed-1", "{out}");
+    // B's call is refused: it syncs, and retries with A's, not refreshing.
+    let out = b.run(&["api", "hub", "/me"]);
+    assert!(out.ok && out.stdout.contains("octo"), "{out}");
+    assert_eq!(out.methods, one_sync, "{out}");
+    assert_eq!(fake.refreshes().len(), 1);
+
+    // A token with no refresh token (pasted) the same.
+    let out = a.run_with_stdin(&["login", "hub", "--token-stdin"], "pasted-1");
+    assert!(out.ok, "{out}");
+    let out = b.run(&["providers"]);
+    assert!(out.ok, "{out}");
+    assert_eq!(b.run(&["token", "hub"]).stdout.trim(), "pasted-1");
+    let out = a.run_with_stdin(&["login", "hub", "--token-stdin"], "pasted-2");
+    assert!(out.ok, "{out}");
+    let out = b.run(&["api", "hub", "/me"]);
+    assert!(out.ok && out.stdout.contains("octo"), "{out}");
+    assert_eq!(out.methods, one_sync, "{out}");
+    // Refused with nothing newer in the vault: one sync, then the person is
+    // told to log in.
+    let out = a.run_with_stdin(&["login", "hub", "--token-stdin"], "pasted-3");
+    assert!(out.ok, "{out}");
+    let out = a.run(&["api", "hub", "/me"]);
+    assert!(
+        !out.ok && out.stderr.contains("run `sesame login hub`"),
+        "{out}"
+    );
+    assert_eq!(out.methods, ["init_client", "ItemsList"], "{out}");
 }
 
 /// `hub`, a provider that rotates its refresh token, logged in on a machine
@@ -1870,80 +1941,74 @@ fn rotating_login(vault: &FakeVault) -> (FakeProvider, Machine<'_>) {
     (fake, m)
 }
 
-/// A refreshed token is never dropped (sesame#24): when the vault refuses
-/// the write (here op's write budget), the command still gets the new token,
-/// and this machine keeps it, sealed in its copy, until a later write under
-/// the lock reaches the vault. Against a provider that rotates its refresh
-/// token, so the one the vault still holds is refused once used. A sync
-/// whose write of the kept token is refused (a refused edit) keeps it too.
+/// A refreshed token is written in the same process (docs/adr/0005), against
+/// a provider that rotates its refresh token, so the one the vault held is
+/// refused once used. When 1Password cannot take the write now (here its
+/// rate limit, the fault `over-budget`), the command still gets the new
+/// token, the write waits in the Copy's pending writes, this machine uses
+/// and refreshes with it, and the next process that reaches 1Password once
+/// opcore's retry wait (1 s, doubling) is past pushes it first. A write
+/// 1Password refuses outright (`put-refused`) is dropped, as opcore drops
+/// it: the command's token is valid, the vault's is kept.
 #[test]
-fn a_refreshed_token_the_vault_refuses_is_kept() {
+fn a_refreshed_token_is_written_at_once_or_waits() {
     let vault = FakeVault::new();
     let (fake, m) = rotating_login(&vault);
-    // Every write is refused: the budget is spent (the fault `over-budget`).
-    let refusing = |args: &[&str]| {
+    let with_fault = |fault: &str, args: &[&str]| {
         let mut c = m.cmd(args);
-        c.env("SESAME_STAND_IN_FAULT", "over-budget");
+        c.env("SESAME_STAND_IN_FAULT", fault);
         m.output(c, "")
     };
+    let refusing = |args: &[&str]| with_fault("over-budget", args);
 
-    // The login token is expiring: refreshed; the vault refuses the new one.
-    let out = refusing(&["token", "hub"]);
+    // The login token is expiring: refreshed, and written in this process.
+    let out = m.run(&["token", "hub"]);
     assert!(out.ok && out.stdout.trim() == "access-1", "{out}");
-    assert!(
-        out.stderr.contains("could not write") && out.stderr.contains("Too many requests"),
-        "{out}"
-    );
-    assert_eq!(fake.refreshes().len(), 1);
-    // The next command finds it here, with no 1Password call.
-    let out = refusing(&["token", "hub"]);
-    assert!(out.ok && out.stdout.trim() == "access-1", "{out}");
-    assert!(out.methods.is_empty(), "{out}");
+    assert!(!out.stderr.contains("could not write"), "{out}");
+    assert_eq!(out.writes, 1, "{out}");
+    assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-1");
 
-    // Refreshed again, still refused: with refresh-1, the one the provider
-    // honours now, not the vault's refresh-0.
+    // Refreshed again; 1Password refuses the write: the command succeeds.
     let out = refusing(&["token", "hub", "--min-life", "7200"]);
     assert!(out.ok && out.stdout.trim() == "access-2", "{out}");
-    assert_eq!(fake.refreshes().len(), 2);
-
-    // Writes go through again: the next write under the lock (a sync's)
-    // writes the kept token first; the refresh after it uses refresh-2.
-    let out = m.run(&["token", "hub", "--min-life", "7200"]);
+    assert!(out.stderr.contains("could not write"), "{out}");
+    assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-1");
+    // The next command finds it here, with no 1Password call.
+    let out = refusing(&["token", "hub"]);
+    assert!(out.ok && out.stdout.trim() == "access-2", "{out}");
+    assert!(out.methods.is_empty(), "{out}");
+    // Refreshed again while it waits: with refresh-2, the one the provider
+    // honours now, not the vault's refresh-1. Within opcore's retry wait
+    // this one waits too.
+    let out = refusing(&["token", "hub", "--min-life", "7200"]);
     assert!(out.ok && out.stdout.trim() == "access-3", "{out}");
+    assert_eq!(fake.refreshes().len(), 3);
+    assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-1");
+
+    // Past the wait, the next process that reaches 1Password pushes it
+    // before its refresh, which uses refresh-3 and is written too.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let out = m.run(&["token", "hub", "--min-life", "7200"]);
+    assert!(out.ok && out.stdout.trim() == "access-4", "{out}");
     assert!(!out.stderr.contains("could not write"), "{out}");
-    assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-3");
-    // Written: nothing is pending, so the next sync writes nothing.
+    let puts: Vec<_> = out.methods.iter().filter(|m| *m == "ItemsPut").collect();
+    assert_eq!(puts.len(), 2, "{out}");
+    assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-4");
+    // Nothing waits: the next sync writes nothing.
     let out = m.run(&["providers"]);
     assert!(out.ok && out.writes == 0, "{out}");
 
-    // A refused edit (`edit-gone`: op refuses an edit of an item another
-    // machine removed since it was read) after the provider issued a token:
-    // the refresh still answers it.
-    let gone = |args: &[&str]| {
-        let mut c = m.cmd(args);
-        c.env("SESAME_STAND_IN_FAULT", "put-refused");
-        m.output(c, "")
-    };
-    let out = gone(&["token", "hub", "--min-life", "7200"]);
-    assert!(out.ok && out.stdout.trim() == "access-4", "{out}");
+    // Refused outright: the command still answers the new token, and says
+    // the vault keeps its own.
+    let out = with_fault("put-refused", &["token", "hub", "--min-life", "7200"]);
+    assert!(out.ok && out.stdout.trim() == "access-5", "{out}");
     assert!(
-        out.stderr.contains("the item to put is not in the vault"),
+        out.stderr.contains("the item to put is not in the vault")
+            && out.stderr.contains("the next refresh uses the vault's"),
         "{out}"
     );
-    // A sync tries the kept token first, is refused, keeps it and goes on.
-    let out = gone(&["providers"]);
-    assert!(out.ok && out.text().contains("hub"), "{out}");
-    assert!(
-        out.writes == 1 && out.stderr.contains("could not write"),
-        "{out}"
-    );
-    assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-3");
-    // The first sync whose write goes through writes it.
-    let out = m.run(&["providers"]);
-    assert!(out.ok && out.writes == 1, "{out}");
-    assert!(!out.stderr.contains("could not write"), "{out}");
     assert_eq!(vault.read("sesame.hub", "refresh_token"), "refresh-4");
     let out = m.run(&["token", "hub"]);
     assert!(out.ok && out.stdout.trim() == "access-4", "{out}");
-    assert_eq!(fake.refreshes().len(), 4);
+    assert!(out.methods.is_empty(), "{out}");
 }

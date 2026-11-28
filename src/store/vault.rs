@@ -126,6 +126,9 @@ pub struct Vault {
     /// A Core for each Copy opened.
     core: Box<dyn Fn() -> Backend>,
     copy: RefCell<Copy<Backend>>,
+    /// The Copy's items as its last read answered them, until anything
+    /// changes it: one read (and one warning of what waits) a process.
+    items: RefCell<Option<Vec<Item>>>,
     /// The Copy's file and its pending writes' as this process last left
     /// them: changed when the lock is taken, another process wrote them.
     seen: Cell<(Seen, Seen)>,
@@ -133,37 +136,14 @@ pub struct Vault {
     held: Cell<bool>,
 }
 
-/// How a push went for one item.
+/// How a write went.
 enum Pushed {
+    /// In the vault, or nothing to write.
     Landed,
     /// Still pending, and why.
     Waits(String),
-    /// Refused by 1Password and dropped, as opcore warned.
+    /// Refused by 1Password and dropped (as opcore drops it), and why.
     Refused(String),
-}
-
-/// What one push did.
-struct Push {
-    /// The push failed whole: nothing was sent.
-    failed: Option<String>,
-    /// opcore's warnings of writes it refused.
-    refused: Vec<String>,
-    /// The titles of the items whose writes still wait.
-    waiting: Vec<String>,
-}
-
-impl Push {
-    fn of(&self, title: &str) -> Pushed {
-        let named = format!("`{title}`");
-        if let Some(w) = self.refused.iter().find(|w| w.contains(&named)) {
-            return Pushed::Refused(w.clone());
-        }
-        match (&self.failed, self.waiting.iter().any(|t| t == title)) {
-            (Some(why), _) => Pushed::Waits(why.clone()),
-            (None, true) => Pushed::Waits("1Password did not take it now".into()),
-            (None, false) => Pushed::Landed,
-        }
-    }
 }
 
 impl Vault {
@@ -181,7 +161,12 @@ impl Vault {
                  token, or unset {VAULT_VAR} to use sesame.db"
             )
         })?;
-        let v = Vault::new(name, token, super::config_dir(), Box::new(Backend::from_env));
+        let v = Vault::new(
+            name,
+            token,
+            super::config_dir(),
+            Box::new(Backend::from_env),
+        );
         v.retire_old_copy()?;
         if current {
             v.locked(|| v.sync())?;
@@ -199,6 +184,7 @@ impl Vault {
             dir,
             core,
             copy: RefCell::new(copy),
+            items: RefCell::new(None),
             seen: Cell::new((None, None)),
             held: Cell::new(false),
         };
@@ -206,7 +192,9 @@ impl Vault {
         v
     }
 
+    /// The Copy, for a call that may change it: its items are read again.
     fn copy(&self) -> RefMut<'_, Copy<Backend>> {
+        *self.items.borrow_mut() = None;
         self.copy.borrow_mut()
     }
 
@@ -254,13 +242,9 @@ impl Vault {
         if !unwritten.is_empty() {
             self.locked(|| {
                 for (provider, t) in &unwritten {
-                    self.stage(&title(provider), &is_provider_field, |k| {
-                        item::put_token(k, t);
-                    })?;
-                }
-                let push = self.push();
-                for (provider, _) in &unwritten {
-                    self.warn_unless_landed(provider, push.of(&title(provider)));
+                    let put = |k: &mut Kept| item::put_token(k, t);
+                    let (_, pushed) = self.write(&title(provider), &is_provider_field, &put)?;
+                    self.warn_unless_landed(provider, pushed);
                 }
                 Ok(())
             })?;
@@ -271,16 +255,23 @@ impl Vault {
     /// The item titled `title` as the Copy holds it, its pending writes
     /// made; the Copy is synced first only if there is none.
     fn item(&self, title: &str) -> Result<Option<Item>, String> {
+        let find = |items: &[Item]| items.iter().find(|i| i.title == title).cloned();
+        if let Some(items) = self.items.borrow().as_deref() {
+            return Ok(find(items));
+        }
         let before = self.files();
-        let mut copy = self.copy();
-        let items = copy.items().map_err(|e| self.failed(e))?;
-        let found = items.into_iter().find(|i| i.title == title).cloned();
-        drop(copy);
+        let items: Vec<Item> = {
+            let mut copy = self.copy.borrow_mut();
+            let items = copy.items().map_err(|e| self.failed(e))?;
+            items.into_iter().cloned().collect()
+        };
         // A first sync here, outside the lock, is this process's own write:
         // the lock need not reopen the Copy for it (and sign in again).
         if before == self.seen.get() {
             self.seen.set(self.files());
         }
+        let found = find(&items);
+        *self.items.borrow_mut() = Some(items);
         Ok(found)
     }
 
@@ -314,22 +305,20 @@ impl Vault {
     }
 
     /// Changes what sesame keeps in the item `title` with `change`, and,
-    /// if that changed it, writes it through: staged, then pushed. Refused,
-    /// or waiting because 1Password cannot take it now, an error says so.
-    /// What sesame kept in it before.
+    /// if that changed it, writes it through (`write`). Refused, or waiting
+    /// because 1Password cannot take it now, an error says so. What sesame
+    /// kept in it before.
     fn update(
         &self,
         title: &str,
         ours: impl Fn(&str) -> bool,
-        change: impl FnOnce(&mut Kept),
+        change: impl Fn(&mut Kept),
     ) -> Result<Kept, String> {
         self.locked(|| {
-            let (had, staged) = self.stage(title, &ours, change)?;
-            if !staged {
-                return Ok(had);
-            }
-            let failed = |why: String| format!("1Password vault `{}`: writing `{title}`: {why}", self.name);
-            match self.push().of(title) {
+            let (had, pushed) = self.write(title, &ours, &change)?;
+            let failed =
+                |why: String| format!("1Password vault `{}`: writing `{title}`: {why}", self.name);
+            match pushed {
                 Pushed::Landed => Ok(had),
                 Pushed::Waits(why) => Err(failed(format!(
                     "{why}; the write waits in `{}`, and the next sync (`{PUSH}`) pushes it",
@@ -340,22 +329,57 @@ impl Vault {
         })
     }
 
+    /// Writes `change` to what sesame keeps in item `title`: staged, then
+    /// pushed at once. An item gone from the vault since the Copy read it
+    /// (archived elsewhere) refuses the edit: it is made anew. What sesame
+    /// kept in it before, and how the write went.
+    fn write(
+        &self,
+        title: &str,
+        ours: &dyn Fn(&str) -> bool,
+        change: &dyn Fn(&mut Kept),
+    ) -> Result<(Kept, Pushed), String> {
+        let (had, Some(want)) = self.stage(title, ours, change)? else {
+            return Ok((self.kept(title, ours)?, Pushed::Landed));
+        };
+        let pushed = self.push(title, ours, &want)?;
+        if !matches!(pushed, Pushed::Refused(_)) || self.item(title)?.is_some() {
+            return Ok((had, pushed));
+        }
+        match self.stage(title, ours, change)? {
+            (_, Some(want)) => Ok((had, self.push(title, ours, &want)?)),
+            (_, None) => Ok((had, pushed)),
+        }
+    }
+
     /// Stages the write of item `title` that `change` makes to what sesame
     /// keeps in it: created when new, archived when left with nothing in
     /// it, else edited keeping what others put there. None when nothing
-    /// changes. What sesame kept in it before, and whether a write was staged.
+    /// changes. What sesame kept in it before, and what it is to keep now if
+    /// a write was staged.
     fn stage(
         &self,
         title: &str,
         ours: &dyn Fn(&str) -> bool,
-        change: impl FnOnce(&mut Kept),
-    ) -> Result<(Kept, bool), String> {
-        let current = self.item(title)?;
-        let have = current.as_ref().map(|i| kept(i, ours)).unwrap_or_default();
-        let mut want = have.clone();
-        change(&mut want);
+        change: &dyn Fn(&mut Kept),
+    ) -> Result<(Kept, Option<Kept>), String> {
+        let wants = |current: &Option<Item>| {
+            let have = current.as_ref().map(|i| kept(i, ours)).unwrap_or_default();
+            let mut want = have.clone();
+            change(&mut want);
+            (have, want)
+        };
+        let mut current = self.item(title)?;
+        let (mut have, mut want) = wants(&current);
+        if current.is_none() && want != have {
+            // Another machine may have made it since this Copy synced: a
+            // create would make a second item of the title.
+            self.sync()?;
+            current = self.item(title)?;
+            (have, want) = wants(&current);
+        }
         if want == have {
-            return Ok((have, false));
+            return Ok((have, None));
         }
         let mut copy = self.copy();
         let staged = match current {
@@ -391,28 +415,41 @@ impl Vault {
             }
         };
         staged.map_err(|e| self.failed(e))?;
-        Ok((have, true))
+        Ok((have, Some(want)))
     }
 
-    /// Pushes every write staged on this machine, in one sync.
-    fn push(&self) -> Push {
-        let mut copy = self.copy();
-        let before = copy.write_warnings().len();
-        let failed = copy.push().err().map(|e| e.to_string());
-        let refused = copy.write_warnings()[before..]
-            .iter()
-            .filter(|w| w.contains("refused"))
-            .cloned()
-            .collect();
-        let waiting = match copy.pending() {
-            Ok(p) => p.into_iter().map(|p| p.title).collect(),
-            Err(e) => return push_failed(e.to_string()),
+    /// Pushes every write staged on this machine, in one sync: how the one
+    /// of item `title`, to keep `want`, went. Landed when the Copy, synced
+    /// by the push, holds it and nothing of it waits.
+    fn push(
+        &self,
+        title: &str,
+        ours: &dyn Fn(&str) -> bool,
+        want: &Kept,
+    ) -> Result<Pushed, String> {
+        let (failed, refused, waits) = {
+            let mut copy = self.copy();
+            let before = copy.write_warnings().len();
+            let failed = copy.push().err();
+            let refused: Vec<String> = copy.write_warnings()[before..]
+                .iter()
+                .filter(|w| w.contains("refused"))
+                .cloned()
+                .collect();
+            let pending = copy.pending().map_err(|e| self.failed(e))?;
+            (failed, refused, pending.iter().any(|p| p.title == title))
         };
-        Push {
-            failed,
-            refused,
-            waiting,
-        }
+        Ok(match (failed, waits) {
+            (Some(e), _) => Pushed::Waits(e.to_string()),
+            (None, true) => Pushed::Waits("1Password did not take it now".into()),
+            (None, false) if self.kept(title, ours)? == *want => Pushed::Landed,
+            (None, false) => Pushed::Refused(
+                refused
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| "1Password did not take it".into()),
+            ),
+        })
     }
 
     /// Says on stderr how `provider`'s new token's write went, unless it
@@ -504,12 +541,10 @@ impl Vault {
         let Some(t) = self.as_kept_token(t) else {
             return self.save_token(provider, t);
         };
-        let title = title(provider);
         self.locked(|| {
-            let (_, staged) = self.stage(&title, &is_provider_field, |k| item::put_token(k, &t))?;
-            if staged {
-                self.warn_unless_landed(provider, self.push().of(&title));
-            }
+            let put = |k: &mut Kept| item::put_token(k, &t);
+            let (_, pushed) = self.write(&title(provider), &is_provider_field, &put)?;
+            self.warn_unless_landed(provider, pushed);
             Ok(())
         })
     }
@@ -564,14 +599,6 @@ impl Vault {
     }
 }
 
-fn push_failed(why: String) -> Push {
-    Push {
-        failed: Some(why),
-        refused: Vec::new(),
-        waiting: Vec::new(),
-    }
-}
-
 /// Vault `name`'s Copy in `dir`, sealed under `token`, syncing on demand.
 fn open_copy(dir: &Path, token: &str, name: &str, core: Backend) -> Copy<Backend> {
     let syncs = Syncs::OnDemand { push: PUSH.into() };
@@ -613,10 +640,8 @@ mod tests {
     fn scratch_dir(what: &str) -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
         let n = N.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "sesame-vault-{}-{n}-{what}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sesame-vault-{}-{n}-{what}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -795,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_answer_from_the_copy_with_no_core_call() {
+    fn reads_answer_from_the_copy_at_any_age_with_no_core_call() {
         let op = OnePassword::new();
         let a = Machine::new(&op);
         a.save_login("x", Some(&client("x-1")), Some(&token("t-1")))
@@ -803,6 +828,16 @@ mod tests {
         a.save_provider_fields("x", json!({"about": "first"}).as_object().unwrap())
             .unwrap();
         op.calls();
+
+        // The Copy last synced in 1970, as far as it says.
+        let path = a.dir.join(COPY_FILE);
+        let sealer = opcore::Sealer::new(SA, "sesame's copy of 1Password vault v");
+        let plain = sealer.open(&std::fs::read(&path).unwrap()).unwrap();
+        let mut held: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+        assert!(held["synced_at"].as_u64().unwrap() > 1);
+        held["synced_at"] = 1.into();
+        let aged = sealer.seal(held.to_string().as_bytes());
+        std::fs::write(&path, aged).unwrap();
 
         // The next process reads all of it from the Copy, no sign-in.
         let a = a.again();
