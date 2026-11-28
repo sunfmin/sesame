@@ -1,0 +1,7 @@
+{
+  "tree": "082b08333a945ff4d238691e114cbc853ab358ce+d1fba762150c532c",
+  "picker": "codex:01a22030-8496-7f70-82b5-1d2249341010:default",
+  "author": "claude-code:680b2c3e-2bc5-5943-80f2-2690c8d1e954:opus",
+  "none": "The only candidate replaces the entire manual, so it probes whether the manual exists rather than whether the new 1Password topic is registered.",
+  "added_lines": 5
+}
