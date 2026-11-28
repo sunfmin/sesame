@@ -7,7 +7,7 @@ edition = "2024"
 agent-help = { git = "https://github.com/sunfmin/agent-cli", rev = "f506df826a97b2fd834e1d65b9057001a6a6e796" }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
-opcore = { git = "https://github.com/sunfmin/opcore", rev = "6a34c61d76a2e3e69be83f3a34102c89003156cb" }
+opcore = { git = "https://github.com/sunfmin/opcore", rev = "bb02f5c355592b6a3f0a80512baf18b2ba457787" }
 open = "5.4.5"
 rand = "0.10.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls", "json", "form", "query"] }
