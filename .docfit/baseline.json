@@ -1,11 +1,4 @@
 {
-  "README.md": {
-    "bytes": 19018,
-    "paragraph": 1270,
-    "pointers": [
-      "sesame.lock"
-    ]
-  },
   "docs/adr/0001-1password-vault-store.md": {
     "bytes": 5139,
     "paragraph": 687,
